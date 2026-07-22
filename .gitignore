@@ -1,0 +1,85 @@
+# --- OS / editor ---
+# macOS Finder metadata (any depth)
+.DS_Store
+**/.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+*.code-workspace
+
+# --- Secrets / local env ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+!*.key.example
+secrets/
+*.secret
+OBOARD_RELEASE_SIGNING_KEY
+*release*signing*key*
+
+# --- Logs ---
+*.log
+logs/
+
+# --- Temporary ---
+tmp/
+temp/
+.tmp/
+.cache/
+.temp/
+
+# --- Local data / runtime ---
+/data/
+/state/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# --- Go build outputs (never commit) ---
+/bin/
+/dist/
+/build/
+/out/
+/agent
+/oboard-agent
+/oboard-sb
+/kernel/oboard-sb/oboard-sb
+/kernel/oboard-sb/bin/
+/kernel/oboard-sb/dist/
+*.exe
+
+# --- Go test / coverage / profiles ---
+*.test
+*.out
+*.prof
+*.pprof
+coverage.out
+coverage.html
+cover.out
+cover.html
+cpu.out
+mem.out
+block.out
+mutex.out
+*.race
+vendor/
+
+# --- Release staging (local) ---
+/release/
+/downloads/
+release-manifest.json
+release-manifest.json.sig
+sha256sums.txt

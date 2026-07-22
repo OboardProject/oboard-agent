@@ -1,0 +1,1365 @@
+package agent
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/gorilla/websocket"
+
+	"github.com/OboardProject/oboard-agent/internal/model"
+	"github.com/OboardProject/oboard-agent/internal/security"
+)
+
+func TestNormalizeConfigResourceDefaults(t *testing.T) {
+	cfg := normalizeConfig(Config{})
+	if cfg.StateDir == "" {
+		t.Fatal("expected default state dir")
+	}
+	if cfg.ResourceProfile != "auto" {
+		t.Fatalf("resource profile = %q, want auto", cfg.ResourceProfile)
+	}
+	if cfg.CommandTimeoutSeconds != 20 {
+		t.Fatalf("command timeout = %d, want 20", cfg.CommandTimeoutSeconds)
+	}
+	if cfg.RestartCommand != "auto" {
+		t.Fatalf("restart command = %q, want auto", cfg.RestartCommand)
+	}
+	if cfg.ReloadCommand != "auto" {
+		t.Fatalf("reload command = %q, want auto", cfg.ReloadCommand)
+	}
+	if cfg.TimeSyncCommand != "auto" || cfg.TimeSyncIntervalSeconds != 86400 {
+		t.Fatalf("time sync defaults = %q/%d, want auto/86400", cfg.TimeSyncCommand, cfg.TimeSyncIntervalSeconds)
+	}
+}
+
+func TestExecuteDeploymentTaskReturnsOneReadableResult(t *testing.T) {
+	dir := t.TempDir()
+	config := `{"log":{"level":"warn"}}`
+	if err := os.WriteFile(filepath.Join(dir, "sing-box.json"), []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := New(Config{StateDir: dir, TimeSyncCommand: "none"})
+	payload := model.DeploymentTaskPayload{
+		Version:       42,
+		Config:        model.ApplyCoreConfigTaskPayload{Config: config},
+		ConfigChanged: false,
+		PortForwards:  model.PortForwardPlan{Version: 42},
+		Tunnels:       model.TunnelPlan{Version: 42},
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, resultJSON := r.ExecuteAgentTask(model.AgentTask{Type: model.AgentTaskTypeApplyDeployment, PayloadJSON: string(raw), ConfigVersion: 42})
+	if status != "succeeded" {
+		t.Fatalf("deployment status = %q, result=%s", status, resultJSON)
+	}
+	var result struct {
+		Message string `json:"message"`
+		Summary struct {
+			Total   int `json:"total"`
+			Skipped int `json:"skipped"`
+		} `json:"summary"`
+		Steps []struct {
+			Key    string `json:"key"`
+			Status string `json:"status"`
+		} `json:"steps"`
+	}
+	if err := json.Unmarshal([]byte(resultJSON), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Message != "部署已完成" || result.Summary.Total != 6 || result.Summary.Skipped != 2 || len(result.Steps) != 6 {
+		t.Fatalf("unexpected aggregated deployment result: %#v", result)
+	}
+	if result.Steps[0].Key != "managed_assets" || result.Steps[0].Status != "skipped" || result.Steps[1].Key != "config" || result.Steps[1].Status != "skipped" {
+		t.Fatalf("unchanged config step was not readable: %#v", result.Steps)
+	}
+}
+
+func TestDeploymentRepairsMissingCoreConfigDespiteUnchangedHint(t *testing.T) {
+	dir := t.TempDir()
+	r := New(Config{StateDir: dir, TimeSyncCommand: "none", ReloadCommand: "none", RestartCommand: "none", ResourceProfile: "large"})
+	payload := model.DeploymentTaskPayload{
+		Version:       43,
+		Config:        model.ApplyCoreConfigTaskPayload{Config: `{"log":{"level":"warn"}}`},
+		ConfigChanged: false,
+		PortForwards:  model.PortForwardPlan{Version: 43},
+		Tunnels:       model.TunnelPlan{Version: 43},
+	}
+	status, result := r.executeDeploymentTask(payload)
+	if status != "succeeded" {
+		t.Fatalf("deployment did not repair missing config: %s", result)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "sing-box.json")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDeploymentCriticalForwardFailureStopsLaterMutations(t *testing.T) {
+	dir := t.TempDir()
+	r := New(Config{StateDir: dir, TimeSyncCommand: "none"})
+	payload := model.DeploymentTaskPayload{
+		Version:       44,
+		ConfigChanged: false,
+		PortForwards: model.PortForwardPlan{Version: 44, Rules: []model.PortForward{{
+			ID: 1, Name: "invalid-backend", Backend: model.ForwardBackend("unsupported"), Enabled: true,
+		}}},
+		Tunnels:     model.TunnelPlan{Version: 44},
+		SSHInbounds: model.SSHInboundPlan{Version: 44},
+	}
+	status, resultJSON := r.executeDeploymentTask(payload)
+	if status != "failed" {
+		t.Fatalf("deployment status = %q, result=%s", status, resultJSON)
+	}
+	var result struct {
+		Steps []deploymentStepResult `json:"steps"`
+	}
+	if err := json.Unmarshal([]byte(resultJSON), &result); err != nil {
+		t.Fatal(err)
+	}
+	seenForwardFailure := false
+	for _, step := range result.Steps {
+		switch step.Key {
+		case "port_forwards":
+			seenForwardFailure = step.Status == "failed"
+		case "tunnels", "ssh_inbounds":
+			t.Fatalf("later mutating step %q ran after critical forward failure: %#v", step.Key, result.Steps)
+		}
+	}
+	if !seenForwardFailure {
+		t.Fatalf("forward failure missing from deployment steps: %#v", result.Steps)
+	}
+	for _, path := range []string{filepath.Join(dir, tunnelsCurrent), filepath.Join(dir, sshInboundsCurrent)} {
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("later component state %s was mutated: %v", path, err)
+		}
+	}
+}
+
+func TestRemovedStandaloneTaskTypesAreRejected(t *testing.T) {
+	r := New(Config{})
+	for _, taskType := range []string{
+		"sync_time",
+		"restart_sing_box",
+		"apply_port_forwards",
+		"apply_tunnels",
+		"request_warp_config",
+		"prune_subscription_nodes",
+	} {
+		status, result := r.ExecuteAgentTask(model.AgentTask{Type: taskType, PayloadJSON: `{}`})
+		if status != "failed" || !strings.Contains(result, "unknown task type") {
+			t.Fatalf("removed task %q was accepted: status=%q result=%s", taskType, status, result)
+		}
+	}
+}
+
+func TestStandaloneDNSBenchmarkTaskAcceptsPlan(t *testing.T) {
+	r := New(Config{})
+	status, result := r.ExecuteAgentTask(model.AgentTask{Type: model.AgentTaskTypeBenchmarkDNS, PayloadJSON: `{}`})
+	if status != "succeeded" || !strings.Contains(result, "empty dns benchmark plan") {
+		t.Fatalf("dns benchmark task was not accepted safely: status=%q result=%s", status, result)
+	}
+}
+
+func TestBestDNSBenchmarksReturnsTwoUsableCandidates(t *testing.T) {
+	items := []dnsBenchmarkItem{{Tag: "failed", Error: "timeout", LatencyMS: 2000}, {Tag: "one", LatencyMS: 11}, {Tag: "two", LatencyMS: 18}, {Tag: "three", LatencyMS: 25}}
+	best := bestDNSBenchmarks(items, 2)
+	if len(best) != 2 || best[0].Tag != "one" || best[1].Tag != "two" {
+		t.Fatalf("best = %#v", best)
+	}
+}
+
+func TestDNSProbeRequiresAValidResponse(t *testing.T) {
+	query, err := buildDNSProbeQuery(42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := append([]byte(nil), query...)
+	response[2] |= 0x80
+	if err := validateDNSProbeResponse(response, 42); err != nil {
+		t.Fatalf("valid response rejected: %v", err)
+	}
+	if err := validateDNSProbeResponse(response, 43); err == nil {
+		t.Fatal("mismatched DNS response id was accepted")
+	}
+	if err := validateDNSProbeResponse(query, 42); err == nil {
+		t.Fatal("query packet was accepted as a response")
+	}
+}
+
+func TestConfigRejectsUnsafeRuntimeSettings(t *testing.T) {
+	base := normalizeConfig(Config{})
+	for _, mutate := range []func(*Config){
+		func(cfg *Config) { cfg.CommandTimeoutSeconds = 4 },
+		func(cfg *Config) { cfg.CommandTimeoutSeconds = 121 },
+		func(cfg *Config) { cfg.TimeSyncIntervalSeconds = 299 },
+		func(cfg *Config) { cfg.TimeSyncIntervalSeconds = 30*24*60*60 + 1 },
+		func(cfg *Config) { cfg.RestartCommand = "sh -c reboot" },
+	} {
+		cfg := base
+		mutate(&cfg)
+		if err := cfg.Validate(); err == nil {
+			t.Fatalf("unsafe config was accepted: %#v", cfg)
+		}
+	}
+	if err := base.Validate(); err != nil {
+		t.Fatalf("default config should be valid: %v", err)
+	}
+}
+
+func TestRunnerConfigSnapshotsAreAtomic(t *testing.T) {
+	r := New(Config{AgentID: "a", AgentToken: "a", ResourceProfile: "large"})
+	const iterations = 5000
+	var wg sync.WaitGroup
+	wg.Add(3)
+	go func() {
+		defer wg.Done()
+		for i := range iterations {
+			value := "a"
+			if i%2 == 1 {
+				value = "b"
+			}
+			cfg := r.Config()
+			cfg.AgentID = value
+			cfg.AgentToken = value
+			r.storeConfig(cfg)
+		}
+	}()
+	for range 2 {
+		go func() {
+			defer wg.Done()
+			for range iterations {
+				cfg := r.Config()
+				if cfg.AgentID != cfg.AgentToken {
+					t.Errorf("torn config snapshot: %#v", cfg)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+func TestSaveConfigRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nested", "agent.json")
+	want := Config{ControllerURL: "https://controller.example", ServerID: 17, AgentID: "agent-1", StateDir: "/var/lib/oboard-agent"}
+	if err := SaveConfig(path, want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ControllerURL != want.ControllerURL || got.ServerID != want.ServerID || got.AgentID != want.AgentID || got.StateDir != want.StateDir {
+		t.Fatalf("saved config = %#v, want %#v", got, want)
+	}
+}
+
+func TestUpdateAgentControllerURLReportsResultThroughNewBasePath(t *testing.T) {
+	reported := make(chan string, 1)
+	controller := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		reported <- req.URL.Path
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	}))
+	defer controller.Close()
+	configPath := filepath.Join(t.TempDir(), "agent.json")
+	runner := New(Config{
+		ControllerURL:           controller.URL + "/old",
+		AgentID:                 "agent-1",
+		AgentToken:              "token-1",
+		StateDir:                t.TempDir(),
+		ConfigPath:              configPath,
+		AllowInsecureController: true,
+	})
+	payload, _ := json.Marshal(map[string]any{"controller_url": controller.URL + "/new"})
+	status, result := runner.ExecuteAgentTask(model.AgentTask{ID: 91, Type: model.AgentTaskTypeUpdateAgentConfig, PayloadJSON: string(payload), ConfigVersion: 10})
+	if status != "succeeded" {
+		t.Fatalf("update status = %s; result=%s", status, result)
+	}
+	stored, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.ControllerURL != controller.URL+"/new" || runner.Config().ControllerURL != controller.URL+"/new" {
+		t.Fatalf("Controller URL was not switched: stored=%q runtime=%q", stored.ControllerURL, runner.Config().ControllerURL)
+	}
+	if err := runner.ReportTaskResult(context.Background(), 91, status, result, nil); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case path := <-reported:
+		if path != "/new/api/v1/agent/task-results" {
+			t.Fatalf("task result path = %q; want new base path", path)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("new Controller path did not receive task result")
+	}
+}
+
+func TestConnectClosesSocketWhenTaskResultReportFails(t *testing.T) {
+	token := "agent-token"
+	task := model.AgentTask{ID: 42, ServerID: 1, Type: "unknown", PayloadJSON: "{}", ConfigVersion: 1, Nonce: "task-nonce"}
+	signature := security.SignTaskEnvelope(security.HashSecret(token), security.TaskEnvelope{ID: task.ID, ServerID: task.ServerID, Type: task.Type, ConfigVersion: task.ConfigVersion, Nonce: task.Nonce, PayloadJSON: task.PayloadJSON})
+	afterTask := make(chan string, 1)
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/agent/connect":
+			conn, err := upgrader.Upgrade(w, r, nil)
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+			_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+			var initial map[string]any
+			if err := conn.ReadJSON(&initial); err != nil {
+				afterTask <- ""
+				return
+			}
+			if err := conn.WriteJSON(map[string]any{"type": "hello", "server_id": task.ServerID}); err != nil {
+				afterTask <- ""
+				return
+			}
+			if err := conn.WriteJSON(map[string]any{"type": "task_request", "task": task, "signature_version": 2, "signature": signature}); err != nil {
+				afterTask <- ""
+				return
+			}
+			_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+			var next struct {
+				Type string `json:"type"`
+			}
+			if err := conn.ReadJSON(&next); err != nil {
+				afterTask <- ""
+				return
+			}
+			afterTask <- next.Type
+		case "/api/v1/agent/task-results":
+			http.Error(w, "temporary failure", http.StatusInternalServerError)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	r := New(Config{ControllerURL: server.URL, AgentID: "agent-1", AgentToken: token, StateDir: t.TempDir()})
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := r.connect(ctx); err == nil {
+		t.Fatal("expected task result report error")
+	}
+	select {
+	case message := <-afterTask:
+		if message != "" {
+			t.Fatalf("unexpected websocket message after report failure: %q", message)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("websocket handler did not observe the client disconnect")
+	}
+}
+
+func TestConnectAcknowledgesReportedTaskOnWebSocket(t *testing.T) {
+	t.Setenv("OBOARD_DISABLE_PUBLIC_IP_DETECT", "1")
+	token := "agent-token"
+	task := model.AgentTask{ID: 43, ServerID: 1, Type: "unknown", PayloadJSON: "{}", ConfigVersion: 1, Nonce: "task-nonce"}
+	signature := security.SignTaskEnvelope(security.HashSecret(token), security.TaskEnvelope{ID: task.ID, ServerID: task.ServerID, Type: task.Type, ConfigVersion: task.ConfigVersion, Nonce: task.Nonce, PayloadJSON: task.PayloadJSON})
+	ack := make(chan map[string]any, 1)
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		switch req.URL.Path {
+		case "/api/v1/agent/connect":
+			conn, err := upgrader.Upgrade(w, req, nil)
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+			var initial map[string]any
+			if conn.ReadJSON(&initial) != nil {
+				return
+			}
+			if conn.WriteJSON(map[string]any{"type": "hello", "server_id": task.ServerID}) != nil {
+				return
+			}
+			if conn.WriteJSON(map[string]any{"type": "task_request", "task": task, "signature_version": 2, "signature": signature}) != nil {
+				return
+			}
+			var message map[string]any
+			if conn.ReadJSON(&message) == nil {
+				ack <- message
+			}
+		case "/api/v1/agent/task-results":
+			var body model.AgentTaskResultReport
+			if json.NewDecoder(req.Body).Decode(&body) != nil || body.TaskID != task.ID || body.HealthReport == nil {
+				http.Error(w, "invalid result", http.StatusBadRequest)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		default:
+			http.NotFound(w, req)
+		}
+	}))
+	defer server.Close()
+
+	r := New(Config{ControllerURL: server.URL, AgentID: "agent-1", AgentToken: token, StateDir: t.TempDir()})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	connectErr := r.connect(ctx)
+	select {
+	case message := <-ack:
+		if message["type"] != "task_ack" || message["task_id"] != float64(task.ID) {
+			t.Fatalf("unexpected task acknowledgement: %#v", message)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatalf("task acknowledgement was not sent; connect error: %v", connectErr)
+	}
+}
+
+func TestConnectRejectsLegacyTaskSignatureVersion(t *testing.T) {
+	t.Setenv("OBOARD_DISABLE_PUBLIC_IP_DETECT", "1")
+	token := "agent-token"
+	task := model.AgentTask{ID: 44, ServerID: 9, Type: "unknown", PayloadJSON: "{}", ConfigVersion: 1, Nonce: "legacy-signature"}
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.URL.Path != "/api/v1/agent/connect" {
+			http.NotFound(w, req)
+			return
+		}
+		conn, err := upgrader.Upgrade(w, req, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		var initial map[string]any
+		if conn.ReadJSON(&initial) != nil {
+			return
+		}
+		_ = conn.WriteJSON(map[string]any{"type": "hello", "server_id": task.ServerID})
+		_ = conn.WriteJSON(map[string]any{"type": "task_request", "task": task, "signature_version": 1, "signature": "legacy"})
+	}))
+	defer server.Close()
+	r := New(Config{ControllerURL: server.URL, AgentID: "agent-1", AgentToken: token, StateDir: t.TempDir()})
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := r.connect(ctx); err == nil || !strings.Contains(err.Error(), "signature version 1") {
+		t.Fatalf("legacy signature version was not rejected: %v", err)
+	}
+}
+
+func TestWGCFProfileToSingBoxEmitsCurrentWireGuardEndpointSchema(t *testing.T) {
+	profile := `[Interface]
+PrivateKey = private-key
+Address = 172.16.0.2/32, 2606:4700:110:abcd::2/128
+MTU = 1280
+Reserved = 1, 2, 3
+
+[Peer]
+PublicKey = public-key
+AllowedIPs = 0.0.0.0/0, ::/0
+Endpoint = engage.cloudflareclient.com:2408
+`
+	endpoint, err := wgcfProfileToSingBox(profile, model.WARPRequestPlan{ProfileID: 42, IPStack: model.IPStackDualStack, DNSStrategy: "prefer_ipv6"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if endpoint["type"] != "wireguard" || endpoint["tag"] != "warp-42" {
+		t.Fatalf("unexpected endpoint identity: %#v", endpoint)
+	}
+	for _, key := range []string{"local_address", "server", "server_port", "peer_public_key", "network"} {
+		if _, ok := endpoint[key]; ok {
+			t.Fatalf("endpoint should not emit deprecated wireguard outbound field %s: %#v", key, endpoint)
+		}
+	}
+	peers, ok := endpoint["peers"].([]map[string]any)
+	if !ok || len(peers) != 1 {
+		t.Fatalf("unexpected peers: %#v", endpoint["peers"])
+	}
+	if peers[0]["address"] != "engage.cloudflareclient.com" || peers[0]["port"] != 2408 || peers[0]["public_key"] != "public-key" {
+		t.Fatalf("peer was not normalized to endpoint schema: %#v", peers[0])
+	}
+	reserved, ok := peers[0]["reserved"].([]int)
+	if !ok || len(reserved) != 3 || reserved[0] != 1 || reserved[1] != 2 || reserved[2] != 3 {
+		t.Fatalf("WARP reserved bytes must be attached to the peer: %#v", peers[0])
+	}
+	resolver, ok := endpoint["domain_resolver"].(map[string]any)
+	if !ok || resolver["server"] != "bootstrap" || resolver["strategy"] != "prefer_ipv6" {
+		t.Fatalf("domain_resolver was not normalized: %#v", endpoint["domain_resolver"])
+	}
+	encoded, err := json.Marshal(endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "local_address") || strings.Contains(string(encoded), "peer_public_key") {
+		t.Fatalf("encoded endpoint contains deprecated fields: %s", encoded)
+	}
+}
+
+func TestRegisterWARPWireGuardWithoutWGCF(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.Header.Get("CF-Client-Version") != "a-6.10-2158" {
+			t.Fatalf("unexpected WARP registration request: method=%s headers=%v", r.Method, r.Header)
+		}
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload["key"] == "" || payload["install_id"] == "" || payload["tos"] == "" {
+			t.Fatalf("registration payload is incomplete: %#v", payload)
+		}
+		w.Header().Set("content-type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"device-id","config":{"client_id":"AQID","interface":{"addresses":{"v4":"172.16.0.2/32","v6":"2606:4700:110:abcd::2/128"}}}}`))
+	}))
+	defer server.Close()
+
+	endpoint, err := registerWARPWireGuard(context.Background(), server.Client(), server.URL, model.WARPRequestPlan{ProfileID: 7, DNSStrategy: "prefer_ipv6"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if endpoint["type"] != "wireguard" || endpoint["tag"] != "warp-7" || endpoint["mtu"] != 1280 {
+		t.Fatalf("unexpected WARP endpoint: %#v", endpoint)
+	}
+	if key, _ := endpoint["private_key"].(string); len(key) != 44 {
+		t.Fatalf("invalid generated private key: %q", key)
+	}
+	peers := endpoint["peers"].([]map[string]any)
+	reserved := peers[0]["reserved"].([]int)
+	if len(reserved) != 3 || reserved[0] != 1 || reserved[1] != 2 || reserved[2] != 3 {
+		t.Fatalf("native WARP reserved bytes = %#v, want [1 2 3]", reserved)
+	}
+	if peers[0]["public_key"] != warpPeerPublicKey {
+		t.Fatalf("native WARP peer public key = %#v", peers[0]["public_key"])
+	}
+}
+
+func TestWARPReservedBytesFallback(t *testing.T) {
+	for _, clientID := range []string{"", "not-base64"} {
+		reserved, err := warpReservedBytes(clientID)
+		if err != nil || len(reserved) != 3 || reserved[0] != 0 || reserved[1] != 0 || reserved[2] != 0 {
+			t.Fatalf("client_id %q fallback = %#v, %v; want [0 0 0]", clientID, reserved, err)
+		}
+	}
+}
+
+func TestRunnerProbeUsesCachedFullProbe(t *testing.T) {
+	t.Setenv("OBOARD_DISABLE_PUBLIC_IP_DETECT", "1")
+	dir := t.TempDir()
+	counter := filepath.Join(dir, "counter")
+	binary := filepath.Join(dir, "fake-sb")
+	script := "#!/bin/sh\necho hit >> \"" + counter + "\"\necho fake-sing-box-1.0\n"
+	if err := os.WriteFile(binary, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	r := New(Config{
+		AgentID:               "agent-test",
+		CoreBinary:            binary,
+		ResourceProfile:       "large",
+		CommandTimeoutSeconds: 2,
+		RestartCommand:        "none",
+	})
+	first := r.Probe(true)
+	second := r.Probe(false)
+
+	if first.SingBoxVersion != "fake-sing-box-1.0" || second.SingBoxVersion != "fake-sing-box-1.0" {
+		t.Fatalf("unexpected versions: %q / %q", first.SingBoxVersion, second.SingBoxVersion)
+	}
+	b, err := os.ReadFile(counter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Count(string(b), "hit"); got != 1 {
+		t.Fatalf("probe command executions = %d, want 1", got)
+	}
+}
+
+func TestRunnerMonitoringPolicyModes(t *testing.T) {
+	r := New(Config{ResourceProfile: "large", CommandTimeoutSeconds: 20})
+	r.setMonitoringPolicy("standard", true)
+	r.mu.Lock()
+	mode, enabled := r.monitoringMode, r.connectivityProbeEnabled
+	r.mu.Unlock()
+	if mode != "standard" || !enabled {
+		t.Fatalf("standard policy mode=%q enabled=%t", mode, enabled)
+	}
+	r.setMonitoringPolicy("unknown", false)
+	r.mu.Lock()
+	mode, enabled = r.monitoringMode, r.connectivityProbeEnabled
+	r.mu.Unlock()
+	if mode != "lightweight" || enabled {
+		t.Fatalf("fallback policy mode=%q enabled=%t", mode, enabled)
+	}
+}
+
+func TestCommandOutputIsBounded(t *testing.T) {
+	out, err := commandOutput(2*time.Second, "sh", "-c", "i=0; while [ $i -lt 20000 ]; do printf 0123456789; i=$((i+1)); done")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != commandOutputLimit {
+		t.Fatalf("bounded output length = %d, want %d", len(out), commandOutputLimit)
+	}
+}
+
+func TestRunnerExecuteCollectLogs(t *testing.T) {
+	r := New(Config{CoreBinary: "missing-oboard-sb-for-test"})
+	status, resultJSON := r.ExecuteAgentTask(model.AgentTask{Type: model.AgentTaskTypeCollectLogs, PayloadJSON: `{"lines":20,"services":"agent"}`})
+	if status != "succeeded" {
+		t.Fatalf("status = %s result=%s", status, resultJSON)
+	}
+	var result map[string]any
+	if err := json.Unmarshal([]byte(resultJSON), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result["message"] != "logs collected" || result["agent_build"] == "" {
+		t.Fatalf("unexpected collect logs result: %#v", result)
+	}
+	if _, ok := result["logs"].(map[string]any)["agent"]; !ok {
+		t.Fatalf("agent log section missing: %#v", result)
+	}
+}
+
+func TestReadDiagnosticTail(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "service.log")
+	if err := os.WriteFile(path, []byte("one\ntwo\nthree\nfour\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := readDiagnosticTail(path, 2)
+	if ok, _ := got["ok"].(bool); !ok {
+		t.Fatalf("tail read failed: %#v", got)
+	}
+	if content := got["content"]; content != "three\nfour" {
+		t.Fatalf("content = %#v, want tail lines", content)
+	}
+}
+
+func TestReadDiagnosticTailMatching(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "messages")
+	body := "kernel: ready\noboard-agent: connected\ncron: tick\noboard-sb: started\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := readDiagnosticTailMatching(path, []string{"oboard-agent", "oboard-sb"}, 10)
+	if ok, _ := got["ok"].(bool); !ok {
+		t.Fatalf("tail match failed: %#v", got)
+	}
+	if content := got["content"]; content != "oboard-agent: connected\noboard-sb: started" {
+		t.Fatalf("content = %#v, want matching lines", content)
+	}
+}
+
+func TestReadMemoryLimit(t *testing.T) {
+	dir := t.TempDir()
+	cases := []struct {
+		name string
+		body string
+		want int64
+	}{
+		{name: "cgroup-v2-max", body: "max", want: 0},
+		{name: "empty", body: "", want: 0},
+		{name: "invalid", body: "not-a-number", want: 0},
+		{name: "huge-sentinel", body: "9223372036854771712", want: 0},
+		{name: "valid", body: "67108864", want: 67108864},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(dir, tc.name)
+			if err := os.WriteFile(path, []byte(tc.body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if got := readMemoryLimit(path); got != tc.want {
+				t.Fatalf("readMemoryLimit() = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRestartCommandNoneSkipsProcessManager(t *testing.T) {
+	r := New(Config{RestartCommand: "none", ResourceProfile: "large"})
+	if err := r.restartCore(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestReloadCommandNoneSkipsProcessManager(t *testing.T) {
+	r := New(Config{ReloadCommand: "none", ResourceProfile: "large"})
+	if err := r.reloadCore(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOBoardCoreDoesNotClaimHotReloadSupport(t *testing.T) {
+	r := New(Config{CoreBinary: "/usr/local/bin/oboard-sb", CoreService: "oboard-sb", ResourceProfile: "large"})
+	if r.coreHotReloadSupported() {
+		t.Fatal("oboard-sb must use a verified managed restart")
+	}
+}
+
+func TestApplyCoreConfigHotReloadNoop(t *testing.T) {
+	dir := t.TempDir()
+	r := New(Config{StateDir: dir, CoreBinary: filepath.Join(dir, "missing-sb"), ReloadCommand: "none", RestartCommand: "none", ResourceProfile: "large"})
+	result, err := r.applyCoreConfigTask(42, model.ApplyCoreConfigTaskPayload{Config: `{"log":{"level":"info"}}`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result["reload_strategy"] != "hot_reload" || result["connection_draining"] != true {
+		t.Fatalf("unexpected apply result: %#v", result)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "sing-box.json")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCoreRuntimeMetadataComparisonIgnoresOnlyOBoardBlock(t *testing.T) {
+	previous := []byte(`{"log":{"level":"warn"},"_oboard":{"rate_limits":{"users":{"alice":{"user_id":7,"used_baseline_bytes":4}}}}}`)
+	next := []byte(`{"_oboard":{"rate_limits":{"users":{"alice":{"user_id":7,"used_baseline_bytes":10}}}},"log":{"level":"warn"}}`)
+	onlyRuntime, err := coreRuntimeMetadataOnlyChange(previous, next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !onlyRuntime {
+		t.Fatal("runtime metadata-only change was not recognized")
+	}
+	operational := []byte(`{"log":{"level":"error"},"_oboard":{"rate_limits":{"users":{"alice":{"user_id":7,"used_baseline_bytes":10}}}}}`)
+	onlyRuntime, err = coreRuntimeMetadataOnlyChange(previous, operational)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if onlyRuntime {
+		t.Fatal("operational config change was mistaken for runtime metadata")
+	}
+}
+
+func TestApplyCoreConfigUpdatesRuntimeMetadataWithoutReload(t *testing.T) {
+	dir := t.TempDir()
+	previous := `{"log":{"level":"warn"},"_oboard":{"rate_limits":{}}}`
+	if err := os.WriteFile(filepath.Join(dir, "sing-box.json"), []byte(previous), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	next := `{"log":{"level":"warn"},"_oboard":{"rate_limits":{"users":{}}}}`
+	r := New(Config{StateDir: dir, CoreBinary: filepath.Join(dir, "missing-sb"), ReloadCommand: "none", RestartCommand: "none", ResourceProfile: "large"})
+	result, err := r.applyCoreConfigTask(44, model.ApplyCoreConfigTaskPayload{Config: next})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result["reload_strategy"] != "runtime_policy_only" || result["connection_draining"] != false {
+		t.Fatalf("runtime metadata update reloaded core: %#v", result)
+	}
+	current, err := os.ReadFile(filepath.Join(dir, "sing-box.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var currentValue, nextValue any
+	if err := json.Unmarshal(current, &currentValue); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(next), &nextValue); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(currentValue, nextValue) {
+		t.Fatalf("runtime metadata was not persisted: %s", current)
+	}
+}
+
+func TestApplyCoreRuntimeMetadataPartitionsLeaseWithSSH(t *testing.T) {
+	dir := t.TempDir()
+	previous := `{"log":{"level":"warn"},"_oboard":{"rate_limits":{"users":{"alice":{"user_id":7,"billable":true,"lease_enforced":true,"lease_bytes":100,"reset_lease_bytes":80}}}}}`
+	if err := os.WriteFile(filepath.Join(dir, "sing-box.json"), []byte(previous), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	socketFile, err := os.CreateTemp("/tmp", "oboard-core-*.sock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	socket := socketFile.Name()
+	_ = socketFile.Close()
+	_ = os.Remove(socket)
+	t.Cleanup(func() { _ = os.Remove(socket) })
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var received model.TrafficRuntimePolicy
+	coreServer := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		var body struct {
+			Policies map[string]model.TrafficRuntimePolicy `json:"policies"`
+		}
+		if request.URL.Path != "/traffic/policy" || json.NewDecoder(request.Body).Decode(&body) != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		received = body.Policies["user:7"]
+		_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+	})}
+	go func() { _ = coreServer.Serve(listener) }()
+	t.Cleanup(func() { _ = coreServer.Close() })
+
+	counter := &sshInboundCounter{}
+	counter.setPolicy(model.TrafficRuntimePolicy{UserID: 7, InboundID: 17, Billable: true, LeaseEnforced: true, LeaseBytes: 50, ResetLeaseBytes: 40})
+	r := New(Config{StateDir: dir, CoreBinary: filepath.Join(dir, "missing-sb"), ReloadCommand: "none", RestartCommand: "none", ResourceProfile: "large"})
+	r.coreClient = unixHTTPClient(socket)
+	r.sshInboundManager = &sshInboundManager{listeners: map[int64]*managedSSHInbound{17: {plan: model.SSHInbound{InboundID: 17}, counters: map[int64]*sshInboundCounter{7: counter}}}}
+	next := `{"log":{"level":"warn"},"_oboard":{"rate_limits":{"users":{"alice":{"user_id":7,"billable":true,"lease_enforced":true,"lease_bytes":80,"reset_lease_bytes":60}}}}}`
+	result, err := r.applyCoreConfigTask(45, model.ApplyCoreConfigTaskPayload{Config: next})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result["reload_strategy"] != "runtime_policy_only" {
+		t.Fatalf("unexpected apply result: %#v", result)
+	}
+	sshPolicy := counter.currentPolicy()
+	if received.LeaseBytes != 40 || received.ResetLeaseBytes != 30 || sshPolicy.LeaseBytes != 40 || sshPolicy.ResetLeaseBytes != 30 {
+		t.Fatalf("runtime lease was not partitioned: core=%#v ssh=%#v", received, sshPolicy)
+	}
+}
+
+func TestEmbeddedCoreTrafficPoliciesUseUserIdentity(t *testing.T) {
+	policies, err := embeddedCoreTrafficPolicies([]byte(`{"_oboard":{"rate_limits":{"users":{"alice":{"user_id":7,"billable":true,"lease_enforced":true}},"inbounds":{"path":{"user_id":9,"inbound_id":3,"billable":true}}}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(policies) != 2 || policies["user:7"] == nil || policies["user:9"] == nil {
+		t.Fatalf("unexpected embedded policies: %#v", policies)
+	}
+}
+
+func TestApplyCoreConfigRejectsRollbackAndPersistsVersion(t *testing.T) {
+	dir := t.TempDir()
+	cfg := Config{StateDir: dir, CoreBinary: filepath.Join(dir, "missing-sb"), ReloadCommand: "none", RestartCommand: "none", ResourceProfile: "large"}
+	r := New(cfg)
+	newConfig := `{"log":{"level":"warn"}}`
+	if _, err := r.applyCoreConfigTask(20, model.ApplyCoreConfigTaskPayload{Config: newConfig}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.applyCoreConfigTask(19, model.ApplyCoreConfigTaskPayload{Config: `{"log":{"level":"debug"}}`}); err == nil || !strings.Contains(err.Error(), "older") {
+		t.Fatalf("older config was not rejected: %v", err)
+	}
+	current, err := os.ReadFile(filepath.Join(dir, "sing-box.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(current) != newConfig {
+		t.Fatalf("older config changed current file: %s", current)
+	}
+
+	restarted := New(cfg)
+	if _, err := restarted.applyCoreConfigTask(19, model.ApplyCoreConfigTaskPayload{Config: `{"log":{"level":"error"}}`}); err == nil || !strings.Contains(err.Error(), "older") {
+		t.Fatalf("version rollback after restart was not rejected: %v", err)
+	}
+	result, err := restarted.applyCoreConfigTask(20, model.ApplyCoreConfigTaskPayload{Config: newConfig})
+	if err != nil || result["idempotent_replay"] != true {
+		t.Fatalf("same-version replay was not idempotent: result=%#v err=%v", result, err)
+	}
+	if _, err := restarted.applyCoreConfigTask(20, model.ApplyCoreConfigTaskPayload{Config: `{"log":{"level":"info"}}`}); err == nil || !strings.Contains(err.Error(), "different content") {
+		t.Fatalf("same-version content replacement was not rejected: %v", err)
+	}
+}
+
+func TestDeploymentVersionGateCoversUnchangedConfigPlans(t *testing.T) {
+	dir := t.TempDir()
+	r := New(Config{StateDir: dir, ReloadCommand: "none", RestartCommand: "none", ResourceProfile: "large"})
+	payload := func(version int64) model.DeploymentTaskPayload {
+		return model.DeploymentTaskPayload{Version: version, ConfigChanged: false, PortForwards: model.PortForwardPlan{Version: version}, Tunnels: model.TunnelPlan{Version: version}}
+	}
+	if status, result := r.executeDeploymentTask(payload(30)); status != "succeeded" {
+		t.Fatalf("new deployment failed: %s", result)
+	}
+	if status, result := r.executeDeploymentTask(payload(29)); status != "failed" || !strings.Contains(result, "older") {
+		t.Fatalf("older deployment was not rejected: status=%s result=%s", status, result)
+	}
+	restarted := New(Config{StateDir: dir, ReloadCommand: "none", RestartCommand: "none", ResourceProfile: "large"})
+	if status, result := restarted.executeDeploymentTask(payload(29)); status != "failed" || !strings.Contains(result, "older") {
+		t.Fatalf("persisted deployment gate failed: status=%s result=%s", status, result)
+	}
+}
+
+func TestTaskServerIdentityMustMatchEnrollment(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "agent.json")
+	r := New(Config{ConfigPath: configPath, AgentID: "agent-a", AgentToken: "token-a", StateDir: dir})
+	if err := r.bindServerIdentity(7); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.validateTaskServerID(model.AgentTask{ID: 1, ServerID: 7}); err != nil {
+		t.Fatalf("matching task rejected: %v", err)
+	}
+	if err := r.validateTaskServerID(model.AgentTask{ID: 2, ServerID: 8}); err == nil {
+		t.Fatal("task for another server was accepted")
+	}
+	if err := r.bindServerIdentity(8); err == nil {
+		t.Fatal("conflicting hello server identity was accepted")
+	}
+	reloaded, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.ServerID != 7 {
+		t.Fatalf("bound server ID was not persisted: %#v", reloaded)
+	}
+}
+
+func TestApplyCoreConfigRestartsWhenInboundListenRemoved(t *testing.T) {
+	dir := t.TempDir()
+	current := `{"inbounds":[{"type":"vless","tag":"in-1","listen":"0.0.0.0","listen_port":21001},{"type":"vless","tag":"in-2","listen":"0.0.0.0","listen_port":21002}],"outbounds":[{"type":"direct","tag":"direct"}]}`
+	if err := os.WriteFile(filepath.Join(dir, "sing-box.json"), []byte(current), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	next := `{"inbounds":[{"type":"vless","tag":"in-1","listen":"0.0.0.0","listen_port":21001}],"outbounds":[{"type":"direct","tag":"direct"}]}`
+	r := New(Config{StateDir: dir, CoreBinary: filepath.Join(dir, "missing-sb"), ReloadCommand: "none", RestartCommand: "none", ResourceProfile: "large"})
+	result, err := r.applyCoreConfigTask(43, model.ApplyCoreConfigTaskPayload{Config: next})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result["reload_strategy"] != "restart_fallback" || result["connection_draining"] != false {
+		t.Fatalf("unexpected apply result: %#v", result)
+	}
+	removed, ok := result["removed_listen_resources"].([]string)
+	if !ok || len(removed) != 1 || !strings.Contains(removed[0], "21002") {
+		t.Fatalf("removed resources = %#v", result["removed_listen_resources"])
+	}
+}
+
+func TestTimeSyncCommandNoneSkips(t *testing.T) {
+	dir := t.TempDir()
+	r := New(Config{StateDir: dir, TimeSyncCommand: "none", ResourceProfile: "large"})
+	result, err := r.runTimeSyncTask(context.Background(), model.TimeSyncPlan{Mode: "first_apply"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result["skipped"] != true {
+		t.Fatalf("expected skipped time sync, got %#v", result)
+	}
+}
+
+func TestDNSBenchmarkFirstApplySkipsWhenAlreadyRun(t *testing.T) {
+	dir := t.TempDir()
+	r := New(Config{StateDir: dir, RestartCommand: "none", ResourceProfile: "large"})
+	plan := testDNSBenchmarkPlan()
+	state := dnsBenchmarkLocalState{LastRun: map[string]time.Time{dnsBenchmarkPlanKey(plan): time.Now().UTC()}}
+	if err := r.saveDNSBenchmarkState(state); err != nil {
+		t.Fatal(err)
+	}
+	result, err := r.runDNSBenchmarkTask(context.Background(), plan, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result["skipped"] != true {
+		t.Fatalf("expected first_apply benchmark to skip, got %#v", result)
+	}
+}
+
+func TestDNSBenchmarkFailsWhenStateCannotBeRead(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(stateDir, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := New(Config{StateDir: stateDir, ResourceProfile: "large"})
+	_, err := r.runDNSBenchmarkTask(context.Background(), testDNSBenchmarkPlan(), false)
+	if err == nil {
+		t.Fatal("expected state read failure")
+	}
+}
+
+func testDNSBenchmarkPlan() model.DNSBenchmarkPlan {
+	return model.DNSBenchmarkPlan{
+		ServerID: 7, PolicyRevision: 3, EncryptedListID: 11, EncryptedListRevision: 4, BootstrapListID: 12, BootstrapListRevision: 5,
+		Mode: model.DNSAutoTestFirstApply,
+		EncryptedCandidates: []model.DNSCandidate{
+			{Tag: "encrypted-one", Transport: model.DNSTransportDoH, Server: "dns.google", Port: 443, Path: "/dns-query", TLSName: "dns.google"},
+			{Tag: "encrypted-two", Transport: model.DNSTransportDoT, Server: "dns.quad9.net", Port: 853, TLSName: "dns.quad9.net"},
+		},
+		BootstrapCandidates: []model.DNSCandidate{
+			{Tag: "bootstrap-one", Transport: model.DNSTransportUDP, Server: "1.1.1.1", Port: 53},
+			{Tag: "bootstrap-two", Transport: model.DNSTransportTCP, Server: "8.8.8.8", Port: 53},
+		},
+	}
+}
+
+func TestGenerateRealmConfig(t *testing.T) {
+	rules := []forwardRule{{PortForward: model.PortForward{ID: 1, Name: "a-to-b", ListenIP: "127.0.0.1", ListenPort: 443, TargetAddress: "203.0.113.2", TargetPort: 8443, Protocol: model.ForwardProtocolTCP, Priority: 10}, ResolvedBackend: model.ForwardBackendRealm}}
+	config, err := generateRealmConfig(rules)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`listen = "127.0.0.1:443"`, `remote = "203.0.113.2:8443"`, `[[endpoints]]`} {
+		if !strings.Contains(config, want) {
+			t.Fatalf("realm config missing %q:\n%s", want, config)
+		}
+	}
+}
+
+func TestGenerateNFTConfig(t *testing.T) {
+	rules := []forwardRule{{PortForward: model.PortForward{ID: 1, Name: "a-to-b", ListenPort: 443, TargetAddress: "203.0.113.2", TargetPort: 8443, Protocol: model.ForwardProtocolTCPUDP}, ResolvedBackend: model.ForwardBackendNFT}}
+	config, err := generateNFTConfig(rules)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"table inet oboard_forward", "tcp dport 443 dnat ip to 203.0.113.2:8443", "udp dport 443 dnat ip to 203.0.113.2:8443", "masquerade"} {
+		if !strings.Contains(config, want) {
+			t.Fatalf("nft config missing %q:\n%s", want, config)
+		}
+	}
+}
+
+func TestResolveForwardBackends(t *testing.T) {
+	rules := []model.PortForward{{ID: 1, Name: "auto", Backend: model.ForwardBackendAuto}}
+	resolved, err := resolveForwardBackends(rules, map[string]bool{"realm": true, "nft": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved[0].ResolvedBackend != model.ForwardBackendRealm {
+		t.Fatalf("auto backend = %s, want realm", resolved[0].ResolvedBackend)
+	}
+	if _, err := resolveForwardBackends(rules, map[string]bool{}); err == nil {
+		t.Fatal("expected auto backend without capabilities to fail")
+	}
+	for _, protocol := range []model.ForwardProtocol{model.ForwardProtocolTCP, model.ForwardProtocolUDP, model.ForwardProtocolTCPUDP} {
+		resolved, err := resolveForwardBackends([]model.PortForward{{ID: 2, Name: "builtin", Protocol: protocol, Backend: model.ForwardBackendBuiltin}}, map[string]bool{"builtin": true})
+		if err != nil || resolved[0].ResolvedBackend != model.ForwardBackendBuiltin {
+			t.Fatalf("builtin protocol %s: resolved=%#v err=%v", protocol, resolved, err)
+		}
+	}
+}
+
+func TestBuiltinUDPForwardPreservesSessionTraffic(t *testing.T) {
+	target, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer target.Close()
+	go func() {
+		buf := make([]byte, 2048)
+		for {
+			n, addr, err := target.ReadFromUDP(buf)
+			if err != nil {
+				return
+			}
+			_, _ = target.WriteToUDP(append([]byte("echo:"), buf[:n]...), addr)
+		}
+	}()
+
+	portProbe, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	listenPort := portProbe.LocalAddr().(*net.UDPAddr).Port
+	_ = portProbe.Close()
+	r := New(Config{StateDir: t.TempDir()})
+	stop, err := r.startBuiltinForward(forwardRule{PortForward: model.PortForward{ID: 9, Name: "udp", ListenIP: "127.0.0.1", ListenPort: listenPort, TargetAddress: "127.0.0.1", TargetPort: target.LocalAddr().(*net.UDPAddr).Port, Protocol: model.ForwardProtocolUDP}, ResolvedBackend: model.ForwardBackendBuiltin})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+	client, err := net.DialUDP("udp", nil, &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: listenPort})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	_ = client.SetDeadline(time.Now().Add(2 * time.Second))
+	if _, err := client.Write([]byte("hello")); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 64)
+	n, err := client.Read(buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(buf[:n]); got != "echo:hello" {
+		t.Fatalf("response = %q, want echo:hello", got)
+	}
+}
+
+func TestApplyPortForwardsKeepsExistingRulesWhenCurrentPlanIsUnreadable(t *testing.T) {
+	stateDir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(stateDir, portForwardsCurrent), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	r := New(Config{StateDir: stateDir})
+	stopped := false
+	r.builtinForwardStops = map[int64]func(){1: func() { stopped = true }}
+	if _, err := r.applyPortForwards(model.PortForwardPlan{}); err == nil {
+		t.Fatal("expected unreadable current plan error")
+	}
+	if stopped {
+		t.Fatal("active forwarding rule was stopped after the current plan could not be read")
+	}
+}
+
+func TestForwardHandoffSuspendsConflictingBuiltinForwardAndCanRollback(t *testing.T) {
+	stateDir := t.TempDir()
+	portProbe, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	listenPort := portProbe.Addr().(*net.TCPAddr).Port
+	_ = portProbe.Close()
+
+	r := New(Config{StateDir: stateDir})
+	plan := model.PortForwardPlan{Version: 1, Rules: []model.PortForward{{
+		ID: 1, Name: "transparent-vless", ListenIP: "127.0.0.1", ListenPort: listenPort,
+		TargetAddress: "127.0.0.1", TargetPort: listenPort + 1, Protocol: model.ForwardProtocolTCP,
+		Backend: model.ForwardBackendBuiltin, Enabled: true,
+	}}}
+	if _, err := r.applyPortForwards(plan); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		r.forwardLifecycleMu.Lock()
+		defer r.forwardLifecycleMu.Unlock()
+		_ = r.applyResolvedForwards(nil, &forwardApplyResult{})
+	}()
+
+	r.forwardLifecycleMu.Lock()
+	handoff, err := r.suspendConflictingForwards([]byte(fmt.Sprintf(`{"inbounds":[{"type":"vless","listen":"127.0.0.1","listen_port":%d}]}`, listenPort)))
+	if err != nil {
+		r.forwardLifecycleMu.Unlock()
+		t.Fatal(err)
+	}
+	if handoff == nil || len(handoff.conflicts) != 1 || handoff.conflicts[0].ID != 1 {
+		r.forwardLifecycleMu.Unlock()
+		t.Fatalf("unexpected handoff: %#v", handoff)
+	}
+	available, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", fmt.Sprint(listenPort)))
+	if err != nil {
+		r.forwardLifecycleMu.Unlock()
+		t.Fatalf("conflicting forward still owns port %d: %v", listenPort, err)
+	}
+	_ = available.Close()
+	if err := r.rollbackForwardHandoff(handoff); err != nil {
+		r.forwardLifecycleMu.Unlock()
+		t.Fatal(err)
+	}
+	r.forwardLifecycleMu.Unlock()
+
+	blocked, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", fmt.Sprint(listenPort)))
+	if err == nil {
+		_ = blocked.Close()
+		t.Fatalf("rollback did not restore forward listener on %d", listenPort)
+	}
+}
+
+func TestPortForwardDesiredStateSkipsVersionOnlyUpdate(t *testing.T) {
+	stateDir := t.TempDir()
+	port := availableTCPUDPPort(t)
+	r := New(Config{StateDir: stateDir})
+	plan := model.PortForwardPlan{Version: 1, Rules: []model.PortForward{{ID: 99, Name: "stable", ListenIP: "127.0.0.1", ListenPort: port, TargetAddress: "127.0.0.1", TargetPort: port + 1, Protocol: model.ForwardProtocolTCP, Backend: model.ForwardBackendBuiltin, Enabled: true}}}
+	if _, err := r.applyPortForwards(plan); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		r.forwardLifecycleMu.Lock()
+		defer r.forwardLifecycleMu.Unlock()
+		_ = r.applyResolvedForwards(nil, &forwardApplyResult{})
+	}()
+	plan.Version = 2
+	result, err := r.applyPortForwards(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Unchanged {
+		t.Fatalf("version-only desired state update was applied: %#v", result)
+	}
+}
+
+func TestRestoreManagedBuiltinPortForwardsOnStartup(t *testing.T) {
+	stateDir := t.TempDir()
+	port := availableTCPUDPPort(t)
+	plan := model.PortForwardPlan{Version: 7, Rules: []model.PortForward{{ID: 77, Name: "restore", ListenIP: "127.0.0.1", ListenPort: port, TargetAddress: "127.0.0.1", TargetPort: port + 1, Protocol: model.ForwardProtocolTCP, Backend: model.ForwardBackendBuiltin, Enabled: true}}}
+	b, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, portForwardsCurrent), b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := New(Config{StateDir: stateDir})
+	if err := r.restoreManagedPortForwardsOnStartup(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		r.forwardLifecycleMu.Lock()
+		defer r.forwardLifecycleMu.Unlock()
+		_ = r.applyResolvedForwards(nil, &forwardApplyResult{})
+	}()
+	listener, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", fmt.Sprint(port)))
+	if err == nil {
+		_ = listener.Close()
+		t.Fatalf("restored builtin forward did not own port %d", port)
+	}
+}
+
+func TestDesiredStateIDsIgnorePlanVersion(t *testing.T) {
+	forwardOne, err := portForwardDesiredStateID(model.PortForwardPlan{Version: 1, Rules: []model.PortForward{{ID: 1}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	forwardTwo, _ := portForwardDesiredStateID(model.PortForwardPlan{Version: 2, Rules: []model.PortForward{{ID: 1}}})
+	tunnelOne, _ := tunnelDesiredStateID(model.TunnelPlan{Version: 1, Tunnels: []model.Tunnel{{ID: 1}}})
+	tunnelTwo, _ := tunnelDesiredStateID(model.TunnelPlan{Version: 2, Tunnels: []model.Tunnel{{ID: 1}}})
+	sshOne, _ := sshInboundDesiredStateID(model.SSHInboundPlan{Version: 1, Inbounds: []model.SSHInbound{{InboundID: 1}}})
+	sshTwo, _ := sshInboundDesiredStateID(model.SSHInboundPlan{Version: 2, Inbounds: []model.SSHInbound{{InboundID: 1}}})
+	if forwardOne != forwardTwo || tunnelOne != tunnelTwo || sshOne != sshTwo {
+		t.Fatal("plan desired-state IDs must ignore version fields")
+	}
+}
+
+func TestForwardHandoffCommitRemovesOnlyConflictingRules(t *testing.T) {
+	stateDir := t.TempDir()
+	r := New(Config{StateDir: stateDir})
+	listenPort := availableTCPUDPPort(t)
+	plan := model.PortForwardPlan{Version: 9, Rules: []model.PortForward{
+		{ID: 1, Name: "tcp-conflict", ListenIP: "127.0.0.1", ListenPort: listenPort, TargetAddress: "127.0.0.1", TargetPort: listenPort + 1, Protocol: model.ForwardProtocolTCP, Backend: model.ForwardBackendBuiltin, Enabled: true},
+		{ID: 2, Name: "udp-same-port", ListenIP: "127.0.0.1", ListenPort: listenPort, TargetAddress: "127.0.0.1", TargetPort: listenPort + 2, Protocol: model.ForwardProtocolUDP, Backend: model.ForwardBackendBuiltin, Enabled: true},
+	}}
+	b, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, portForwardsCurrent), b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	r.forwardLifecycleMu.Lock()
+	handoff, err := r.suspendConflictingForwards([]byte(fmt.Sprintf(`{"inbounds":[{"type":"vless","listen_port":%d}]}`, listenPort)))
+	if err != nil {
+		r.forwardLifecycleMu.Unlock()
+		t.Fatal(err)
+	}
+	if err := r.commitForwardHandoff(handoff); err != nil {
+		r.forwardLifecycleMu.Unlock()
+		t.Fatal(err)
+	}
+	r.forwardLifecycleMu.Unlock()
+	defer func() {
+		r.forwardLifecycleMu.Lock()
+		defer r.forwardLifecycleMu.Unlock()
+		_ = r.applyResolvedForwards(nil, &forwardApplyResult{})
+	}()
+
+	stored, err := os.ReadFile(filepath.Join(stateDir, portForwardsCurrent))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var current model.PortForwardPlan
+	if err := json.Unmarshal(stored, &current); err != nil {
+		t.Fatal(err)
+	}
+	if len(current.Rules) != 1 || current.Rules[0].ID != 2 {
+		t.Fatalf("retained rules = %#v, want only UDP rule 2", current.Rules)
+	}
+}
+
+func TestInboundListenEndpointsMatchForwardTransports(t *testing.T) {
+	cases := []struct {
+		name     string
+		config   string
+		protocol model.ForwardProtocol
+		want     bool
+	}{
+		{name: "vless tcp", config: `{"inbounds":[{"type":"vless","listen_port":443}]}`, protocol: model.ForwardProtocolTCP, want: true},
+		{name: "vless does not conflict udp", config: `{"inbounds":[{"type":"vless","listen_port":443}]}`, protocol: model.ForwardProtocolUDP, want: false},
+		{name: "hy2 udp", config: `{"inbounds":[{"type":"hysteria2","listen_port":443}]}`, protocol: model.ForwardProtocolUDP, want: true},
+		{name: "ss both", config: `{"inbounds":[{"type":"shadowsocks","listen_port":443}]}`, protocol: model.ForwardProtocolTCPUDP, want: true},
+		{name: "ss tcp only does not conflict udp", config: `{"inbounds":[{"type":"shadowsocks","network":"tcp","listen_port":443}]}`, protocol: model.ForwardProtocolUDP, want: false},
+		{name: "different specific address", config: `{"inbounds":[{"type":"vless","listen":"192.0.2.10","listen_port":443}]}`, protocol: model.ForwardProtocolTCP, want: false},
+		{name: "wildcard overlaps specific address", config: `{"inbounds":[{"type":"vless","listen":"0.0.0.0","listen_port":443}]}`, protocol: model.ForwardProtocolTCP, want: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rule := model.PortForward{ListenIP: "192.0.2.11", ListenPort: 443, Protocol: tc.protocol}
+			if tc.name != "different specific address" && tc.name != "wildcard overlaps specific address" {
+				rule.ListenIP = ""
+			}
+			got := forwardConflictsWithInbounds(rule, inboundListenEndpoints([]byte(tc.config)))
+			if got != tc.want {
+				t.Fatalf("conflict = %t, want %t", got, tc.want)
+			}
+		})
+	}
+}
+
+func availableTCPUDPPort(t *testing.T) int {
+	t.Helper()
+	for attempt := 0; attempt < 20; attempt++ {
+		tcp, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		port := tcp.Addr().(*net.TCPAddr).Port
+		udp, udpErr := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: port})
+		_ = tcp.Close()
+		if udpErr == nil {
+			_ = udp.Close()
+			return port
+		}
+	}
+	t.Fatal("could not find a port available for both TCP and UDP")
+	return 0
+}
+
+func TestValidateTunnelSetRejectsInvalidConfigBeforeApplying(t *testing.T) {
+	err := validateTunnelSet([]model.Tunnel{{Name: "invalid", Type: model.TunnelTypeSSH, ConfigJSON: `{}`}}, map[string]bool{"ssh": true})
+	if err == nil {
+		t.Fatal("expected invalid tunnel config to be rejected")
+	}
+}
+
+func TestValidateTunnelSetRequiresAvailableBackend(t *testing.T) {
+	err := validateTunnelSet([]model.Tunnel{{Name: "ssh", Type: model.TunnelTypeSSH, ConfigJSON: `{"user":"root"}`}}, map[string]bool{})
+	if err == nil {
+		t.Fatal("expected unavailable ssh backend to be rejected")
+	}
+}
+
+func TestValidateTunnelSetRejectsMissingSSHEndpoint(t *testing.T) {
+	err := validateTunnelSet([]model.Tunnel{{Name: "ssh", Type: model.TunnelTypeSSH, ConfigJSON: `{"user":"root"}`}}, map[string]bool{"ssh": true})
+	if err == nil {
+		t.Fatal("expected missing ssh endpoint to be rejected")
+	}
+}
+
+func TestNormalizeMTUPlanDefaults(t *testing.T) {
+	plan := normalizeMTUPlan(model.MTUDetectionPlan{Mode: model.MTUModeDisabled, OverheadBytes: -1, SampleCount: 99, TimeoutMS: 9000})
+	if plan.Mode != model.MTUModeDetect {
+		t.Fatalf("mode = %s, want detect", plan.Mode)
+	}
+	if plan.TargetHost != "1.1.1.1" || plan.TargetPort != 443 {
+		t.Fatalf("target = %s:%d", plan.TargetHost, plan.TargetPort)
+	}
+	if plan.SampleCount != 3 || plan.TimeoutMS != 1200 || plan.MinMTU != 1280 || plan.MaxMTU != 9000 {
+		t.Fatalf("unexpected probe defaults: %#v", plan)
+	}
+	if plan.OverheadBytes != 0 {
+		t.Fatalf("overhead = %d, want 0", plan.OverheadBytes)
+	}
+}
+
+func TestRecommendMTUUsesLowestVerifiedSignalAndOverhead(t *testing.T) {
+	if got := recommendMTU(1500, 1480, 80, 1280, 9000); got != 1400 {
+		t.Fatalf("recommendMTU() = %d, want 1400", got)
+	}
+	if got := recommendMTU(1500, 0, 250, 1280, 9000); got != 1280 {
+		t.Fatalf("recommendMTU clamp = %d, want 1280", got)
+	}
+	if got := recommendMTU(0, 0, 0, 1280, 9000); got != 0 {
+		t.Fatalf("recommendMTU empty = %d, want 0", got)
+	}
+}
+
+func TestFormatCoreVersionJSON(t *testing.T) {
+	got := formatCoreVersion(`{"name":"oboard-sb","version":"0.1.0-dev","build":"20260705225905","sing_box_version":"1.13.14"}`)
+	want := "oboard-sb 0.1.0-dev / build 20260705225905 / sing-box 1.13.14"
+	if got != want {
+		t.Fatalf("formatCoreVersion() = %q, want %q", got, want)
+	}
+}

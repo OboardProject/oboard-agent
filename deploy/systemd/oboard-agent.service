@@ -1,0 +1,33 @@
+[Unit]
+Description=OBoard Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Intentionally privileged host-management service; see README privilege boundary.
+User=root
+ExecStart=/usr/local/bin/oboard-agent -config /etc/oboard-agent/config.json
+StandardOutput=append:/var/log/oboard-agent.log
+StandardError=append:/var/log/oboard-agent.log
+Restart=always
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+# Agent reconciles tunnel prerequisites and its dedicated SSH account.
+ProtectSystem=false
+ProtectHome=true
+ReadWritePaths=/usr/local/bin /etc/oboard-agent /var/lib/oboard-agent /var/log /run
+LockPersonality=true
+MemoryDenyWriteExecute=true
+ProtectClock=true
+ProtectHostname=true
+ProtectKernelLogs=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target

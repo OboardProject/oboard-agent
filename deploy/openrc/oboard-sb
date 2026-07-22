@@ -1,0 +1,18 @@
+#!/sbin/openrc-run
+
+description="OBoard slim sing-box kernel"
+command="/usr/local/bin/oboard-sb"
+command_args="-config /var/lib/oboard-agent/sing-box.json -api unix:/run/oboard-sb.sock"
+command_background=true
+pidfile="/run/${RC_SVCNAME}.pid"
+output_log="/var/log/${RC_SVCNAME}.log"
+error_log="/var/log/${RC_SVCNAME}.log"
+
+depend() {
+	need net
+	after firewall
+}
+
+start_pre() {
+	checkpath -d -m 0700 /var/lib/oboard-agent
+}

@@ -1,0 +1,237 @@
+package agent
+
+import (
+	"context"
+	"sync"
+	"testing"
+	"time"
+)
+
+func TestParseOSReleaseDebianUbuntuAlpine(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+		id      string
+		version string
+		pretty  string
+	}{
+		{
+			name: "debian",
+			content: `PRETTY_NAME="Debian GNU/Linux 12 (bookworm)"
+NAME="Debian GNU/Linux"
+VERSION_ID="12"
+ID=debian`,
+			id:      "debian",
+			version: "12",
+			pretty:  "Debian GNU/Linux 12 (bookworm)",
+		},
+		{
+			name: "ubuntu",
+			content: `PRETTY_NAME="Ubuntu 24.04.2 LTS"
+NAME="Ubuntu"
+VERSION_ID="24.04"
+ID=ubuntu`,
+			id:      "ubuntu",
+			version: "24.04",
+			pretty:  "Ubuntu 24.04.2 LTS",
+		},
+		{
+			name: "alpine",
+			content: `NAME="Alpine Linux"
+ID=alpine
+VERSION_ID=3.20.0
+PRETTY_NAME="Alpine Linux v3.20"`,
+			id:      "alpine",
+			version: "3.20.0",
+			pretty:  "Alpine Linux v3.20",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := parseOSRelease(tc.content)
+			if got.ID != tc.id || got.Version != tc.version || got.Name != tc.pretty {
+				t.Fatalf("parseOSRelease() = %#v, want id=%q version=%q pretty=%q", got, tc.id, tc.version, tc.pretty)
+			}
+		})
+	}
+}
+
+func TestParseOSReleaseMinimalAndQuoted(t *testing.T) {
+	got := parseOSRelease("ID='custom-linux'\nNAME=Custom\\\"OS\n")
+	if got.ID != "custom-linux" {
+		t.Fatalf("id = %q, want custom-linux", got.ID)
+	}
+	if got.Name != `Custom"OS` {
+		t.Fatalf("name = %q", got.Name)
+	}
+}
+
+func TestParsePublicIPRequiresRequestedPublicFamily(t *testing.T) {
+	cases := []struct {
+		name   string
+		value  string
+		family string
+		want   string
+	}{
+		{name: "ipv4", value: "8.8.8.8\n", family: "ipv4", want: "8.8.8.8"},
+		{name: "ipv6", value: "2606:4700:4700::1111", family: "ipv6", want: "2606:4700:4700::1111"},
+		{name: "wrong family", value: "8.8.8.8", family: "ipv6"},
+		{name: "private", value: "10.0.0.1", family: "ipv4"},
+		{name: "link local", value: "fe80::1", family: "ipv6"},
+		{name: "invalid", value: "not-an-ip", family: "ipv4"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := parsePublicIP(tc.value, tc.family); got != tc.want {
+				t.Fatalf("parsePublicIP(%q, %q) = %q, want %q", tc.value, tc.family, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestDetectPublicIPsRunsFamiliesConcurrently(t *testing.T) {
+	var started sync.WaitGroup
+	started.Add(2)
+	release := make(chan struct{})
+	go func() {
+		started.Wait()
+		close(release)
+	}()
+	probe := func(ctx context.Context, family string, _ []string) string {
+		started.Done()
+		select {
+		case <-release:
+			if family == "ipv4" {
+				return "8.8.8.8"
+			}
+			return "2606:4700:4700::1111"
+		case <-ctx.Done():
+			return ""
+		}
+	}
+	ipv4, ipv6 := detectPublicIPsWithProbe(time.Second, probe)
+	if ipv4 != "8.8.8.8" || ipv6 != "2606:4700:4700::1111" {
+		t.Fatalf("addresses = %q / %q", ipv4, ipv6)
+	}
+}
+
+func TestDetectPublicIPsUsesSingleOverallTimeout(t *testing.T) {
+	probe := func(ctx context.Context, _ string, _ []string) string {
+		<-ctx.Done()
+		return ""
+	}
+	started := time.Now()
+	ipv4, ipv6 := detectPublicIPsWithProbe(40*time.Millisecond, probe)
+	if ipv4 != "" || ipv6 != "" {
+		t.Fatalf("unexpected addresses = %q / %q", ipv4, ipv6)
+	}
+	if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
+		t.Fatalf("overall timeout took %s", elapsed)
+	}
+}
+
+func TestCPUUsageBetweenSamples(t *testing.T) {
+	got, ok := cpuUsageBetween(procCPU{idle: 40, total: 100}, procCPU{idle: 50, total: 200})
+	if !ok || got != 90 {
+		t.Fatalf("cpu usage = %v, %t; want 90, true", got, ok)
+	}
+	if _, ok := cpuUsageBetween(procCPU{}, procCPU{idle: 50, total: 200}); ok {
+		t.Fatal("first sample should not report CPU usage")
+	}
+	// Idle regression must not produce a wild percentage.
+	if _, ok := cpuUsageBetween(procCPU{idle: 80, total: 100}, procCPU{idle: 10, total: 200}); ok {
+		t.Fatal("idle regression should be invalid")
+	}
+}
+
+func TestClampCPUPercent(t *testing.T) {
+	if got := clampCPUPercent(-1); got != 0 {
+		t.Fatalf("negative = %v", got)
+	}
+	if got := clampCPUPercent(150); got != 100 {
+		t.Fatalf("over = %v", got)
+	}
+	if got := clampCPUPercent(12.34); got != 12.3 {
+		t.Fatalf("round = %v", got)
+	}
+}
+
+func TestProbeRefreshesLocalMetricsWhileThrottlingPublicIP(t *testing.T) {
+	r := New(Config{AgentID: "agent-1", ResourceProfile: "large", CommandTimeoutSeconds: 1})
+	r.resources = ResourceInfo{Profile: ResourceProfileLarge, EffectiveMemoryBytes: 2 << 30}
+	// Seed a previous CPU sample so the next local sample can compute usage
+	// without depending on a 250ms first-window sleep alone.
+	r.lastCPUSample = procCPU{idle: 100, total: 1000}
+	r.lastPublicIPv4 = "203.0.113.10"
+	r.lastPublicIPv6 = "2001:db8::10"
+	r.lastPublicIPAt = time.Now().UTC()
+	r.lastCoreVersion = "oboard-sb test"
+	r.lastCoreVersionAt = time.Now().UTC()
+	// Force public-IP path to stay cached by setting interval far in the future via lastPublicIPAt=now.
+	// Disable live public IP detect for safety.
+	t.Setenv("OBOARD_DISABLE_PUBLIC_IP_DETECT", "1")
+
+	first := r.Probe(false)
+	if first.AgentID != "agent-1" {
+		t.Fatalf("agent id = %q", first.AgentID)
+	}
+	if first.PublicIPv4 != "203.0.113.10" {
+		t.Fatalf("public ipv4 should stay cached, got %q", first.PublicIPv4)
+	}
+	// Local metrics should have been sampled (memory/cpu fields populated on Linux;
+	// on non-Linux agent memory is still filled from runtime).
+	if first.AgentMemoryBytes == 0 {
+		t.Fatal("agent memory should be sampled")
+	}
+	// Second probe within local min interval reuses local metrics values.
+	r.lastLocalMetricsAt = time.Now().UTC()
+	r.lastProbe = first
+	second := r.Probe(false)
+	if second.CPUUsagePercent != first.CPUUsagePercent {
+		t.Fatalf("local metrics should be reused inside min interval: %v vs %v", second.CPUUsagePercent, first.CPUUsagePercent)
+	}
+	if second.PublicIPv4 != first.PublicIPv4 {
+		t.Fatalf("public ip changed unexpectedly: %q", second.PublicIPv4)
+	}
+	// Expire local interval; public still fresh.
+	r.lastLocalMetricsAt = time.Now().UTC().Add(-time.Minute)
+	third := r.Probe(false)
+	if third.PublicIPv4 != "203.0.113.10" {
+		t.Fatalf("public ip should remain cached across local refresh, got %q", third.PublicIPv4)
+	}
+}
+
+func TestParseLinuxNetworkTotalsExcludesVirtualInterfaces(t *testing.T) {
+	raw := `Inter-|   Receive                                                |  Transmit
+ face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed
+  eth0: 2000 1 0 0 0 0 0 0 1000 1 0 0 0 0 0 0
+    lo: 9000 1 0 0 0 0 0 0 9000 1 0 0 0 0 0 0
+docker0: 8000 1 0 0 0 0 0 0 7000 1 0 0 0 0 0 0
+  ens3: 4000 1 0 0 0 0 0 0 3000 1 0 0 0 0 0 0`
+	upload, download, ok := parseLinuxNetworkTotals(raw)
+	if !ok || upload != 4000 || download != 6000 {
+		t.Fatalf("totals upload=%d download=%d ok=%t", upload, download, ok)
+	}
+}
+
+func TestNetworkRateUsesCounterDeltaAndRejectsReset(t *testing.T) {
+	now := time.Now()
+	previous := networkCounterSample{UploadBytes: 1000, DownloadBytes: 2000, SampledAt: now.Add(-10 * time.Second), Valid: true}
+	upload, download := networkRatesBetween(previous, networkCounterSample{UploadBytes: 1600, DownloadBytes: 3200, SampledAt: now, Valid: true})
+	if upload != 60 || download != 120 {
+		t.Fatalf("rates upload=%d download=%d", upload, download)
+	}
+	upload, download = networkRatesBetween(previous, networkCounterSample{UploadBytes: 10, DownloadBytes: 20, SampledAt: now, Valid: true})
+	if upload != 0 || download != 0 {
+		t.Fatalf("counter reset rates upload=%d download=%d", upload, download)
+	}
+}
+
+func TestMonitoringModeLocalIntervals(t *testing.T) {
+	if got := monitoringLocalMetricsInterval("standard"); got != 9*time.Second {
+		t.Fatalf("standard interval = %s", got)
+	}
+	if got := monitoringLocalMetricsInterval("lightweight"); got != 19*time.Second {
+		t.Fatalf("lightweight interval = %s", got)
+	}
+}

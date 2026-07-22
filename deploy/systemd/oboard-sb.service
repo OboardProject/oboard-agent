@@ -1,0 +1,23 @@
+[Unit]
+Description=OBoard slim sing-box kernel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/oboard-sb -config /var/lib/oboard-agent/sing-box.json -api unix:/run/oboard-sb.sock
+StandardOutput=append:/var/log/oboard-sb.log
+StandardError=append:/var/log/oboard-sb.log
+Restart=always
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/var/lib/oboard-agent /var/log /run
+LockPersonality=true
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target

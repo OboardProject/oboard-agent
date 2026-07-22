@@ -1,0 +1,18 @@
+#!/sbin/openrc-run
+
+description="OBoard Agent"
+command="/usr/local/bin/oboard-agent"
+command_args="-config /etc/oboard-agent/config.json"
+command_background=true
+pidfile="/run/${RC_SVCNAME}.pid"
+output_log="/var/log/${RC_SVCNAME}.log"
+error_log="/var/log/${RC_SVCNAME}.log"
+
+depend() {
+	need net
+	after firewall
+}
+
+start_pre() {
+	checkpath -d -m 0700 /etc/oboard-agent /var/lib/oboard-agent
+}
