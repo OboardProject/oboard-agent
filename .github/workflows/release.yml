@@ -1,0 +1,80 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version matching VERSION, for example 0.2.0 or 0.2.0-rc.1
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    name: Publish immutable Agent release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+      - name: Validate version and compute metadata
+        id: meta
+        shell: bash
+        run: |
+          version=$(tr -d '[:space:]' < VERSION)
+          if [ "$version" != "${{ inputs.version }}" ]; then
+            echo "VERSION file is $version but workflow input is ${{ inputs.version }}" >&2
+            exit 1
+          fi
+          if [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            prerelease=false
+          elif [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-(alpha|beta|rc)\.[0-9]+$ ]]; then
+            prerelease=true
+          else
+            echo "Version must be stable x.y.z or alpha/beta/rc prerelease" >&2
+            exit 1
+          fi
+          {
+            echo "version=$version"
+            echo "prerelease=$prerelease"
+            echo "build=$(date -u +%Y%m%d%H%M%S)"
+            echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.25.11'
+          cache-dependency-path: |
+            go.sum
+            kernel/oboard-sb/go.sum
+      - name: Require Agent release signing key
+        env:
+          SIGNING_KEY: ${{ secrets.OBOARD_RELEASE_SIGNING_KEY }}
+        run: test -n "$SIGNING_KEY" || { echo "Configure OBOARD_RELEASE_SIGNING_KEY in the Agent repository" >&2; exit 1; }
+      - name: Build signed Agent release
+        env:
+          OBOARD_RELEASE_SIGNING_KEY: ${{ secrets.OBOARD_RELEASE_SIGNING_KEY }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          BUILD: ${{ steps.meta.outputs.build }}
+          COMMIT: ${{ github.sha }}
+          DATE: ${{ steps.meta.outputs.date }}
+        run: ./scripts/build-release.sh
+      - name: Create immutable git tag
+        run: |
+          tag="v${{ steps.meta.outputs.version }}"
+          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+            echo "Tag $tag already exists and releases are immutable" >&2
+            exit 1
+          fi
+          git config user.name OboardProject
+          git config user.email OboardProject@users.noreply.github.com
+          git tag -a "$tag" -m "OBoard Agent $tag" "$GITHUB_SHA"
+          git push origin "refs/tags/$tag"
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          args=(release create "v${{ steps.meta.outputs.version }}" dist/release/oboard-agent-* dist/release/oboard-sb-* dist/release/release-manifest.json dist/release/release-manifest.json.sig dist/release/sha256sums.txt --title "OBoard Agent v${{ steps.meta.outputs.version }}" --generate-notes)
+          if [ "${{ steps.meta.outputs.prerelease }}" = true ]; then args+=(--prerelease); else args+=(--latest); fi
+          gh "${args[@]}"

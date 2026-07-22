@@ -1,0 +1,61 @@
+name: Development release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    name: Publish mutable development release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.25.11'
+          cache-dependency-path: |
+            go.sum
+            kernel/oboard-sb/go.sum
+      - name: Compute development metadata
+        id: meta
+        shell: bash
+        run: |
+          {
+            echo "version=dev-${GITHUB_SHA::12}"
+            echo "build=$(date -u +%Y%m%d%H%M%S)"
+            echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } >> "$GITHUB_OUTPUT"
+      - name: Require Agent release signing key
+        env:
+          SIGNING_KEY: ${{ secrets.OBOARD_RELEASE_SIGNING_KEY }}
+        run: test -n "$SIGNING_KEY" || { echo "Configure OBOARD_RELEASE_SIGNING_KEY in the Agent repository" >&2; exit 1; }
+      - name: Build signed Agent release
+        env:
+          OBOARD_RELEASE_SIGNING_KEY: ${{ secrets.OBOARD_RELEASE_SIGNING_KEY }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          BUILD: ${{ steps.meta.outputs.build }}
+          COMMIT: ${{ github.sha }}
+          DATE: ${{ steps.meta.outputs.date }}
+        run: ./scripts/build-release.sh
+      - name: Move development tag
+        run: |
+          git config user.name OboardProject
+          git config user.email OboardProject@users.noreply.github.com
+          git tag -f dev "$GITHUB_SHA"
+          git push origin refs/tags/dev --force
+      - name: Publish development GitHub prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view dev >/dev/null 2>&1; then
+            gh release upload dev dist/release/oboard-agent-* dist/release/oboard-sb-* dist/release/release-manifest.json dist/release/release-manifest.json.sig dist/release/sha256sums.txt --clobber
+            gh release edit dev --title "OBoard Agent development" --prerelease --target "$GITHUB_SHA"
+          else
+            gh release create dev dist/release/oboard-agent-* dist/release/oboard-sb-* dist/release/release-manifest.json dist/release/release-manifest.json.sig dist/release/sha256sums.txt --title "OBoard Agent development" --prerelease --target "$GITHUB_SHA"
+          fi
