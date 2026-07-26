@@ -298,7 +298,10 @@ func resolveDNSBenchmarkHost(ctx context.Context, bootstrap model.DNSCandidate, 
 	}
 	address := net.JoinHostPort(bootstrap.Server, fmt.Sprint(port))
 	for _, recordType := range []dnsmessage.Type{dnsmessage.TypeA, dnsmessage.TypeAAAA} {
-		queryID := uint16(time.Now().UnixNano())
+		queryID, err := randomDNSQueryID()
+		if err != nil {
+			return "", err
+		}
 		query, err := buildDNSLookupQuery(queryID, host, recordType)
 		if err != nil {
 			return "", err
@@ -319,6 +322,18 @@ func resolveDNSBenchmarkHost(ctx context.Context, bootstrap model.DNSCandidate, 
 }
 
 var errDNSNoAddress = errors.New("dns response has no IP address")
+
+// randomDNSQueryID returns an unpredictable DNS transaction ID. A clock-derived
+// ID is guessable, which weakens the response check against an off-path
+// spoofer; bootstrap lookups act on the resolved address, so the ID is the only
+// entropy binding a plaintext UDP response to its query.
+func randomDNSQueryID() (uint16, error) {
+	var buf [2]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return 0, err
+	}
+	return binary.BigEndian.Uint16(buf[:]), nil
+}
 
 func buildDNSLookupQuery(id uint16, host string, recordType dnsmessage.Type) ([]byte, error) {
 	name, err := dnsmessage.NewName(strings.TrimSuffix(host, ".") + ".")
@@ -413,7 +428,10 @@ func probeDNSCandidateAt(ctx context.Context, candidate model.DNSCandidate, targ
 		}
 	}
 	address := net.JoinHostPort(target, fmt.Sprint(port))
-	queryID := uint16(time.Now().UnixNano())
+	queryID, err := randomDNSQueryID()
+	if err != nil {
+		return err
+	}
 	query, err := buildDNSProbeQuery(queryID)
 	if err != nil {
 		return err
@@ -552,7 +570,7 @@ func exchangeDNSStream(stream io.ReadWriter, query []byte) ([]byte, error) {
 		return nil, errors.New("dns query is too large")
 	}
 	packet := make([]byte, 2+len(query))
-	binary.BigEndian.PutUint16(packet, uint16(len(query)))
+	binary.BigEndian.PutUint16(packet, uint16(len(query))) // #nosec G115 -- the length is bounded above.
 	copy(packet[2:], query)
 	if _, err := stream.Write(packet); err != nil {
 		return nil, err

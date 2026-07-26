@@ -1363,3 +1363,75 @@ func TestFormatCoreVersionJSON(t *testing.T) {
 		t.Fatalf("formatCoreVersion() = %q, want %q", got, want)
 	}
 }
+
+// TestCoreBinaryMustLiveInSystemDirectory pins that the root-executed kernel
+// binary cannot be redirected into a user-writable directory. A matching base
+// name alone is not enough: a local user who can create /tmp/oboard-sb would
+// otherwise get root the next time the Agent starts the core.
+func TestCoreBinaryMustLiveInSystemDirectory(t *testing.T) {
+	for _, path := range []string{"/usr/local/bin/oboard-sb", "/usr/bin/sing-box", "/opt/oboard/oboard-sb"} {
+		if err := validateManagedPath("core_binary", path); err != nil {
+			t.Fatalf("legitimate core binary %q rejected: %v", path, err)
+		}
+	}
+	for _, path := range []string{"/tmp/oboard-sb", "/home/user/oboard-sb", "/var/tmp/sing-box", "/dev/shm/oboard-sb"} {
+		if err := validateManagedPath("core_binary", path); err == nil {
+			t.Fatalf("writable-directory core binary %q was accepted", path)
+		}
+	}
+	// The base-name constraint must still hold inside allowed directories.
+	if err := validateManagedPath("core_binary", "/usr/local/bin/curl"); err == nil {
+		t.Fatal("arbitrary system binary was accepted as the core binary")
+	}
+	if err := validateWarpCommand("/tmp/wgcf"); err == nil {
+		t.Fatal("writable-directory warp command was accepted")
+	}
+	if err := validateWarpCommand("/usr/local/bin/wgcf"); err != nil {
+		t.Fatalf("legitimate warp command rejected: %v", err)
+	}
+}
+
+// TestControllerCannotGrantPanelUpdateConsent pins that allow_panel_update is
+// owned by the host operator. A Controller may withdraw it but must not grant
+// itself permission to install binaries it serves.
+func TestControllerCannotGrantPanelUpdateConsent(t *testing.T) {
+	dir := t.TempDir()
+	runner := New(Config{
+		ConfigPath:       filepath.Join(dir, "agent.json"),
+		StateDir:         filepath.Join(dir, "state"),
+		AgentID:          "agent-1",
+		AgentToken:       "token-1",
+		ControllerURL:    "https://panel.example",
+		UpdateSource:     "github",
+		AllowPanelUpdate: false,
+	})
+
+	// A Controller asking to enable panel updates must be ignored.
+	patch := Config{UpdateSource: "panel", AllowPanelUpdate: true}
+	fields := map[string]json.RawMessage{"update_source": json.RawMessage(`"panel"`), "allow_panel_update": json.RawMessage(`true`)}
+	if _, err := runner.updateAgentConfig(patch, fields); err != nil {
+		t.Fatalf("config patch rejected: %v", err)
+	}
+	if runner.Config().AllowPanelUpdate {
+		t.Fatal("Controller granted itself panel update consent")
+	}
+
+	// Withdrawing consent remains possible.
+	granted := New(Config{
+		ConfigPath:       filepath.Join(dir, "agent2.json"),
+		StateDir:         filepath.Join(dir, "state2"),
+		AgentID:          "agent-2",
+		AgentToken:       "token-2",
+		ControllerURL:    "https://panel.example",
+		UpdateSource:     "panel",
+		AllowPanelUpdate: true,
+	})
+	revoke := Config{UpdateSource: "panel", AllowPanelUpdate: false}
+	revokeFields := map[string]json.RawMessage{"update_source": json.RawMessage(`"panel"`), "allow_panel_update": json.RawMessage(`false`)}
+	if _, err := granted.updateAgentConfig(revoke, revokeFields); err != nil {
+		t.Fatalf("consent withdrawal rejected: %v", err)
+	}
+	if granted.Config().AllowPanelUpdate {
+		t.Fatal("consent withdrawal was ignored")
+	}
+}

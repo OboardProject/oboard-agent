@@ -312,8 +312,25 @@ func validateManagedPath(field, value string) error {
 		if base != "oboard-sb" && base != "sing-box" {
 			return fmt.Errorf("core_binary base name must be oboard-sb or sing-box")
 		}
+		// The Agent executes this path as root, so a matching base name is not
+		// sufficient: a writable directory such as /tmp lets a local user plant
+		// the file and gain root. Restrict it to root-owned system locations.
+		if !allowedCoreBinaryDir(filepath.Dir(cleaned)) {
+			return fmt.Errorf("core_binary must live in a system binary directory")
+		}
 	}
 	return nil
+}
+
+// allowedCoreBinaryDir reports whether a directory is an acceptable location
+// for the root-executed kernel binary.
+func allowedCoreBinaryDir(dir string) bool {
+	for _, allowed := range []string{"/usr/local/bin", "/usr/local/sbin", "/usr/bin", "/usr/sbin", "/bin", "/sbin", "/opt/oboard"} {
+		if dir == allowed {
+			return true
+		}
+	}
+	return false
 }
 
 func validateWarpCommand(value string) error {
@@ -331,6 +348,10 @@ func validateWarpCommand(value string) error {
 		}
 		if filepath.Base(cleaned) != "wgcf" {
 			return fmt.Errorf("warp_command custom binary base name must be wgcf")
+		}
+		// Executed as root, so the directory must not be user-writable.
+		if !allowedCoreBinaryDir(filepath.Dir(cleaned)) {
+			return fmt.Errorf("warp_command must live in a system binary directory")
 		}
 		return nil
 	}
@@ -837,7 +858,13 @@ func (r *Runner) updateAgentConfig(patch Config, fields map[string]json.RawMessa
 	}
 	if strings.TrimSpace(patch.UpdateSource) != "" {
 		next.UpdateSource = strings.TrimSpace(patch.UpdateSource)
-		next.AllowPanelUpdate = patch.AllowPanelUpdate
+		// allow_panel_update records the host operator's consent to install
+		// binaries served by the Controller. Letting a Controller task raise it
+		// would let the Controller grant itself a permission the operator
+		// withheld, so it may only be lowered remotely.
+		if !patch.AllowPanelUpdate {
+			next.AllowPanelUpdate = false
+		}
 	}
 	if strings.TrimSpace(patch.UpdateRepo) != "" {
 		next.UpdateRepo = strings.TrimSpace(patch.UpdateRepo)
