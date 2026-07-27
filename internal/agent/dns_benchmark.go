@@ -246,17 +246,6 @@ func failedDNSBenchmarkItems(candidates []model.DNSCandidate, message string, la
 	return out
 }
 
-func bestDNSBenchmark(items []dnsBenchmarkItem) dnsBenchmarkItem {
-	best := bestDNSBenchmarks(items, 1)
-	if len(best) > 0 {
-		return best[0]
-	}
-	if len(items) > 0 {
-		return items[0]
-	}
-	return dnsBenchmarkItem{}
-}
-
 func bestDNSBenchmarks(items []dnsBenchmarkItem, limit int) []dnsBenchmarkItem {
 	out := make([]dnsBenchmarkItem, 0, limit)
 	for _, item := range items {
