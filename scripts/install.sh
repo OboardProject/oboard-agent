@@ -1,5 +1,6 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/sh
+set -eu
+(set -o pipefail) 2>/dev/null && set -o pipefail
 
 CONTROLLER_URL=${OBOARD_CONTROLLER_URL:-${1:-}}
 CONTROLLER_URL=${CONTROLLER_URL%/}
@@ -9,7 +10,7 @@ ENROLL_TOKEN=${OBOARD_ENROLL_TOKEN:-${3:-}}
 if [ -z "$CONTROLLER_URL" ]; then
   echo "缺少主控地址。" >&2
   echo "请从面板复制服务器安装命令，或按下面的格式执行：" >&2
-  echo "  curl -fsSL https://raw.githubusercontent.com/OboardProject/oboard-agent/main/scripts/install.sh | sudo env OBOARD_CONTROLLER_URL='https://panel.example.com' OBOARD_ENROLL_TOKEN='安装令牌' bash" >&2
+  echo "  curl -fsSL https://raw.githubusercontent.com/OboardProject/oboard-agent/main/scripts/install.sh | sudo env OBOARD_CONTROLLER_URL='https://panel.example.com' OBOARD_ENROLL_TOKEN='安装令牌' sh" >&2
   exit 1
 fi
 
@@ -55,4 +56,4 @@ curl -fsSL "$CONTROLLER_URL/install/agent.sh" | env \
   OBOARD_ALLOW_PANEL_UPDATE="${OBOARD_ALLOW_PANEL_UPDATE:-}" \
   OBOARD_UPDATE_SOURCE="${OBOARD_UPDATE_SOURCE:-}" \
   OBOARD_UPDATE_REPO="$OBOARD_UPDATE_REPO" \
-  bash
+  sh

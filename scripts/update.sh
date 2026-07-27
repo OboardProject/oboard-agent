@@ -1,5 +1,6 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/sh
+set -eu
+(set -o pipefail) 2>/dev/null && set -o pipefail
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 export OBOARD_ACTION=update
@@ -15,4 +16,4 @@ if [ -x "$SCRIPT_DIR/install.sh" ]; then
 fi
 
 curl --proto '=https' --tlsv1.2 -fsSL "${CONTROLLER_URL%/}/install/agent.sh" | \
-  env OBOARD_ACTION=update OBOARD_CONTROLLER_URL="${CONTROLLER_URL%/}" bash
+  env OBOARD_ACTION=update OBOARD_CONTROLLER_URL="${CONTROLLER_URL%/}" sh
