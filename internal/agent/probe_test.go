@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"math"
 	"sync"
 	"testing"
 	"time"
@@ -153,6 +154,32 @@ func TestClampCPUPercent(t *testing.T) {
 	}
 	if got := clampCPUPercent(12.34); got != 12.3 {
 		t.Fatalf("round = %v", got)
+	}
+}
+
+func TestDiskUsedBytesValidatesAndSaturates(t *testing.T) {
+	if got := diskUsedBytes(100, 25, 4096); got != 75*4096 {
+		t.Fatalf("used bytes = %d", got)
+	}
+	for _, test := range []struct {
+		name      string
+		blocks    uint64
+		free      uint64
+		blockSize int64
+	}{
+		{name: "no used blocks", blocks: 10, free: 10, blockSize: 4096},
+		{name: "invalid free blocks", blocks: 10, free: 11, blockSize: 4096},
+		{name: "zero block size", blocks: 10, free: 1, blockSize: 0},
+		{name: "negative block size", blocks: 10, free: 1, blockSize: -1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := diskUsedBytes(test.blocks, test.free, test.blockSize); got != 0 {
+				t.Fatalf("used bytes = %d, want 0", got)
+			}
+		})
+	}
+	if got := diskUsedBytes(math.MaxUint64, 0, 2); got != math.MaxUint64 {
+		t.Fatalf("overflow result = %d, want saturation", got)
 	}
 }
 

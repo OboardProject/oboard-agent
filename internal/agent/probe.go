@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"math"
 	"os"
 	"os/exec"
 	"runtime"
@@ -120,16 +121,21 @@ func linuxDiskUsed(path string) uint64 {
 	if err := syscall.Statfs(path, &st); err != nil {
 		return 0
 	}
+	return diskUsedBytes(st.Blocks, st.Bfree, int64(st.Bsize))
+}
+
+func diskUsedBytes(blocks, free uint64, blockSize int64) uint64 {
 	// Blocks - Bfree = used blocks including reserved space, which matches the
 	// "disk pressure" view operators expect better than Bavail alone.
-	if st.Blocks <= st.Bfree {
+	if blocks <= free || blockSize <= 0 {
 		return 0
 	}
-	bsize := uint64(st.Bsize)
-	if bsize == 0 {
-		return 0
+	bsize := uint64(blockSize)
+	used := blocks - free
+	if used > math.MaxUint64/bsize {
+		return math.MaxUint64
 	}
-	return (st.Blocks - st.Bfree) * bsize
+	return used * bsize
 }
 
 func linuxCPUName() string {
