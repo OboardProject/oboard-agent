@@ -41,6 +41,7 @@ type forwardApplyResult struct {
 	RealmRules   int               `json:"realm_rules"`
 	NFTRules     int               `json:"nft_rules"`
 	BuiltinRules int               `json:"builtin_rules"`
+	TrustedRules int               `json:"trusted_rules"`
 	Capabilities map[string]bool   `json:"capabilities"`
 	Warnings     []string          `json:"warnings,omitempty"`
 	Backends     map[string]string `json:"backends,omitempty"`
@@ -245,6 +246,15 @@ func inboundListenEndpoints(raw []byte) []inboundListenEndpoint {
 	}
 	var cfg struct {
 		Inbounds []map[string]any `json:"inbounds"`
+		OBoard   struct {
+			TrustedForward struct {
+				Receivers []struct {
+					Listen     string `json:"listen"`
+					ListenPort int    `json:"listen_port"`
+					Network    string `json:"network"`
+				} `json:"receivers"`
+			} `json:"trusted_forward"`
+		} `json:"_oboard"`
 	}
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		return nil
@@ -273,6 +283,22 @@ func inboundListenEndpoints(raw []byte) []inboundListenEndpoint {
 			}
 		default:
 			endpoint.TCP = true
+		}
+		endpoints = append(endpoints, endpoint)
+	}
+	for _, receiver := range cfg.OBoard.TrustedForward.Receivers {
+		if receiver.ListenPort <= 0 {
+			continue
+		}
+		endpoint := inboundListenEndpoint{Address: normalizeForwardListenAddress(receiver.Listen), Port: receiver.ListenPort}
+		switch receiver.Network {
+		case string(model.ForwardProtocolTCP):
+			endpoint.TCP = true
+		case string(model.ForwardProtocolUDP):
+			endpoint.UDP = true
+		default:
+			endpoint.TCP = true
+			endpoint.UDP = true
 		}
 		endpoints = append(endpoints, endpoint)
 	}
@@ -382,6 +408,9 @@ func (r *Runner) applyResolvedForwards(rules []forwardRule, result *forwardApply
 	nftRules := make([]forwardRule, 0)
 	builtinRules := make([]forwardRule, 0)
 	for _, rule := range rules {
+		if rule.TrustedForward != nil && result != nil {
+			result.TrustedRules++
+		}
 		switch rule.ResolvedBackend {
 		case model.ForwardBackendRealm:
 			realmRules = append(realmRules, rule)
@@ -414,6 +443,12 @@ func resolveForwardBackends(rules []model.PortForward, caps map[string]bool) ([]
 	out := make([]forwardRule, 0, len(rules))
 	for _, rule := range rules {
 		backend := rule.Backend
+		if rule.TrustedForward != nil {
+			if _, err := trustedForwardKey(rule.TrustedForward); err != nil {
+				return nil, fmt.Errorf("port forward %q: %w", rule.Name, err)
+			}
+			backend = model.ForwardBackendBuiltin
+		}
 		if backend == "" || backend == model.ForwardBackendAuto {
 			switch {
 			case caps["realm"]:
@@ -452,11 +487,12 @@ func detectForwardCapabilities() map[string]bool {
 	_, nftErr := exec.LookPath("nft")
 	root := runningAsRoot()
 	return map[string]bool{
-		"realm":   realmErr == nil,
-		"nft":     runtime.GOOS == "linux" && nftErr == nil && root,
-		"builtin": true,
-		"linux":   runtime.GOOS == "linux",
-		"root":    root,
+		"realm":              realmErr == nil,
+		"nft":                runtime.GOOS == "linux" && nftErr == nil && root,
+		"builtin":            true,
+		"trusted_forward_v1": true,
+		"linux":              runtime.GOOS == "linux",
+		"root":               root,
 	}
 }
 
@@ -532,9 +568,11 @@ func (r *Runner) startBuiltinTCPForward(rule forwardRule) (func(), error) {
 }
 
 type builtinUDPSession struct {
-	conn     *net.UDPConn
-	client   *net.UDPAddr
-	lastSeen time.Time
+	conn      *net.UDPConn
+	client    *net.UDPAddr
+	lastSeen  time.Time
+	sessionID [8]byte
+	counter   uint32
 }
 
 func (r *Runner) startBuiltinUDPForward(rule forwardRule) (func(), error) {
@@ -571,6 +609,12 @@ func (r *Runner) startBuiltinUDPForward(rule forwardRule) (func(), error) {
 			return nil, err
 		}
 		session := &builtinUDPSession{conn: conn, client: client, lastSeen: time.Now()}
+		if rule.TrustedForward != nil {
+			if _, err := rand.Read(session.sessionID[:]); err != nil {
+				_ = conn.Close()
+				return nil, err
+			}
+		}
 		key := client.String()
 		go func() {
 			buf := make([]byte, 64*1024)
@@ -609,10 +653,32 @@ func (r *Runner) startBuiltinUDPForward(rule forwardRule) (func(), error) {
 			}
 			if session != nil {
 				session.lastSeen = time.Now()
+				if rule.TrustedForward != nil {
+					session.counter++
+					if session.counter == 0 {
+						closeSession(key, session)
+						session = nil
+					}
+				}
+			}
+			counter := uint32(0)
+			if session != nil {
+				counter = session.counter
 			}
 			mu.Unlock()
 			if err == nil && session != nil {
-				_, _ = session.conn.Write(buf[:n])
+				payload := buf[:n]
+				if rule.TrustedForward != nil {
+					source, sourceErr := trustedForwardSource(client)
+					if sourceErr != nil {
+						continue
+					}
+					payload, err = encodeTrustedForwardUDP(rule.TrustedForward, source, session.sessionID, counter, payload, trustedForwardUDPData)
+					if err != nil {
+						continue
+					}
+				}
+				_, _ = session.conn.Write(payload)
 			}
 		}
 	}()
@@ -650,6 +716,24 @@ func (r *Runner) startBuiltinUDPForward(rule forwardRule) (func(), error) {
 
 func (r *Runner) handleBuiltinForwardConn(src net.Conn, rule forwardRule) {
 	defer src.Close()
+	var trustedPreface []byte
+	if rule.TrustedForward != nil {
+		_ = src.SetReadDeadline(time.Now().Add(5 * time.Second))
+		first := make([]byte, trustedForwardTCPFirstBytes)
+		n, err := src.Read(first)
+		_ = src.SetReadDeadline(time.Time{})
+		if err != nil || n == 0 {
+			return
+		}
+		source, err := trustedForwardSource(src.RemoteAddr())
+		if err != nil {
+			return
+		}
+		trustedPreface, err = encodeTrustedForwardTCP(rule.TrustedForward, source, first[:n], trustedForwardTCPData)
+		if err != nil {
+			return
+		}
+	}
 	start := time.Now()
 	target := net.JoinHostPort(rule.TargetAddress, fmt.Sprint(rule.TargetPort))
 	dst, err := net.DialTimeout("tcp", target, 5*time.Second)
@@ -666,6 +750,11 @@ func (r *Runner) handleBuiltinForwardConn(src net.Conn, rule forwardRule) {
 		return
 	}
 	defer dst.Close()
+	if len(trustedPreface) > 0 {
+		if err := writeTrustedForward(dst, trustedPreface); err != nil {
+			return
+		}
+	}
 	go func() { _, _ = io.Copy(dst, src); _ = dst.Close() }()
 	_, _ = io.Copy(src, dst)
 }
@@ -763,6 +852,9 @@ func (r *Runner) runForwardProbeTask(ctx context.Context, rules []model.PortForw
 }
 
 func probeForward(rule model.PortForward, mode string) model.PortForwardProbeResult {
+	if rule.TrustedForward != nil {
+		return probeTrustedForward(rule, mode)
+	}
 	res := model.PortForwardProbeResult{PortForwardID: rule.ID, Mode: mode, ResultJSON: "{}"}
 	if rule.Protocol == model.ForwardProtocolUDP {
 		listenerOK, listenerErr := udpPortBound(rule.ListenIP, rule.ListenPort)

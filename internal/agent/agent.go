@@ -1602,7 +1602,23 @@ func coreRuntimeMetadataOnlyChange(previous, next []byte) (bool, error) {
 		if err := json.Unmarshal(raw, &root); err != nil {
 			return nil, err
 		}
-		delete(root, "_oboard")
+		if rawMetadata, ok := root["_oboard"]; ok {
+			var metadata map[string]json.RawMessage
+			if err := json.Unmarshal(rawMetadata, &metadata); err != nil {
+				return nil, err
+			}
+			delete(metadata, "rate_limits")
+			delete(metadata, "connection_audit")
+			if len(metadata) == 0 {
+				delete(root, "_oboard")
+			} else {
+				encoded, err := json.Marshal(metadata)
+				if err != nil {
+					return nil, err
+				}
+				root["_oboard"] = encoded
+			}
+		}
 		return json.Marshal(root)
 	}
 	previousOperational, err := strip(previous)
@@ -1726,6 +1742,16 @@ func inboundListenResources(raw []byte) map[string]struct{} {
 	}
 	var cfg struct {
 		Inbounds []map[string]any `json:"inbounds"`
+		OBoard   struct {
+			TrustedForward struct {
+				Receivers []struct {
+					ID         string `json:"id"`
+					Network    string `json:"network"`
+					Listen     string `json:"listen"`
+					ListenPort int    `json:"listen_port"`
+				} `json:"receivers"`
+			} `json:"trusted_forward"`
+		} `json:"_oboard"`
 	}
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		return resources
@@ -1740,6 +1766,15 @@ func inboundListenResources(raw []byte) map[string]struct{} {
 			continue
 		}
 		resources[fmt.Sprintf("%s/%s/%s:%s", fmt.Sprint(inbound["tag"]), fmt.Sprint(inbound["type"]), listen, port)] = struct{}{}
+	}
+	for _, receiver := range cfg.OBoard.TrustedForward.Receivers {
+		listen := strings.TrimSpace(receiver.Listen)
+		if listen == "" {
+			listen = "0.0.0.0"
+		}
+		if receiver.ListenPort > 0 {
+			resources[fmt.Sprintf("%s/trusted-forward-%s/%s:%d", receiver.ID, receiver.Network, listen, receiver.ListenPort)] = struct{}{}
+		}
 	}
 	return resources
 }

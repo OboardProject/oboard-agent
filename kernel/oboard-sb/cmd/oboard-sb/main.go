@@ -90,7 +90,13 @@ func main() {
 	if err := b.Start(); err != nil {
 		log.Fatal(err)
 	}
+	trustedForward, err := minibox.StartTrustedForwardReceivers(ctx, runtimeMetadata.TrustedForward, tracker)
+	if err != nil {
+		_ = b.Close()
+		log.Fatal(err)
+	}
 	<-ctx.Done()
+	_ = trustedForward.Close()
 	if err := b.Close(); err != nil {
 		log.Println(err)
 	}
@@ -105,6 +111,7 @@ func printVersion() {
 		"built_at":            version.Date,
 		"sing_box_version":    C.Version,
 		"supported_protocols": minibox.SupportedProtocols,
+		"capabilities":        []string{"trusted_forward_v1"},
 	}
 	data, _ := json.MarshalIndent(payload, "", "  ")
 	fmt.Println(string(data))

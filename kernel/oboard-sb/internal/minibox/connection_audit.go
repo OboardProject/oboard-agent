@@ -40,10 +40,14 @@ func (t *RateLimitTracker) recordConnectionStart(state *runtimeState, metadata a
 		return ""
 	}
 	policy := state.currentConfig().policy
-	if policy.UserID <= 0 || !metadata.Source.Addr.IsValid() {
+	if policy.UserID <= 0 {
 		return ""
 	}
-	sourceIP := metadata.Source.Addr.Unmap().String()
+	sourceAddr, trustedSource, sourceOK := t.trustedAuditSource(metadata)
+	if !sourceOK {
+		return ""
+	}
+	sourceIP := sourceAddr.String()
 	destination := strings.TrimSpace(metadata.Destination.AddrString())
 	if len(destination) > 255 {
 		destination = destination[:255]
@@ -61,6 +65,9 @@ func (t *RateLimitTracker) recordConnectionStart(state *runtimeState, metadata a
 		outboundType = strings.TrimSpace(outbound.Type())
 	}
 	sourceGeoCode := strings.ToUpper(strings.TrimSpace(metadata.SourceGeoIPCode))
+	if trustedSource {
+		sourceGeoCode = ""
+	}
 	if len(sourceGeoCode) != 2 {
 		sourceGeoCode = ""
 	}

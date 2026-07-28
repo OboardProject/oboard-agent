@@ -737,6 +737,14 @@ func TestCoreRuntimeMetadataComparisonIgnoresOnlyOBoardBlock(t *testing.T) {
 	if onlyRuntime {
 		t.Fatal("operational config change was mistaken for runtime metadata")
 	}
+	trusted := []byte(`{"log":{"level":"warn"},"_oboard":{"rate_limits":{"users":{"alice":{"user_id":7,"used_baseline_bytes":10}}},"trusted_forward":{"receivers":[{"id":"one"}]}}}`)
+	onlyRuntime, err = coreRuntimeMetadataOnlyChange(next, trusted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if onlyRuntime {
+		t.Fatal("trusted forward change was mistaken for runtime-only metadata")
+	}
 }
 
 func TestApplyCoreConfigUpdatesRuntimeMetadataWithoutReload(t *testing.T) {

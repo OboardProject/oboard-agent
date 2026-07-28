@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"net/netip"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -30,6 +31,9 @@ type RateLimitTracker struct {
 	auditActiveByUser map[int64]int64
 	auditGeneration   uint64
 	auditEnabled      atomic.Bool
+	trustedMu         sync.RWMutex
+	trustedSources    map[string]netip.Addr
+	trustedInbounds   []string
 	activeTCP         atomic.Int64
 	socketGovernor    *SocketBufferGovernor
 }
@@ -96,6 +100,11 @@ type TrafficCounterAcknowledgement struct {
 func NewRateLimitTracker(metadata RuntimeMetadata) *RateLimitTracker {
 	tracker := &RateLimitTracker{states: map[string]*runtimeState{}, active: map[string]map[*trackedConn]struct{}{}, activePacket: map[string]map[*trackedPacketConn]struct{}{}}
 	tracker.auditEnabled.Store(metadata.ConnectionAudit != nil && metadata.ConnectionAudit.Enabled)
+	if metadata.TrustedForward != nil {
+		for _, receiver := range metadata.TrustedForward.Receivers {
+			tracker.trustedInbounds = append(tracker.trustedInbounds, receiver.InboundTag)
+		}
+	}
 	usageByUser := map[int64]*runtimeUserUsage{}
 	usageFor := func(userID int64) *runtimeUserUsage {
 		if userID <= 0 {
@@ -145,6 +154,47 @@ func (t *RateLimitTracker) SetConnectionAuditEnabled(enabled bool) {
 	t.auditActiveByUser = nil
 	t.auditGeneration++
 	t.auditMu.Unlock()
+	t.trustedMu.Lock()
+	t.trustedSources = nil
+	t.trustedMu.Unlock()
+}
+
+func (t *RateLimitTracker) RegisterTrustedSource(local net.Addr, source netip.Addr) {
+	if t == nil || local == nil || !source.IsValid() || !t.auditEnabled.Load() {
+		return
+	}
+	t.trustedMu.Lock()
+	if t.trustedSources == nil {
+		t.trustedSources = make(map[string]netip.Addr)
+	}
+	t.trustedSources[local.String()] = source.Unmap()
+	t.trustedMu.Unlock()
+}
+
+func (t *RateLimitTracker) RemoveTrustedSource(local net.Addr) {
+	if t == nil || local == nil {
+		return
+	}
+	t.trustedMu.Lock()
+	delete(t.trustedSources, local.String())
+	t.trustedMu.Unlock()
+}
+
+func (t *RateLimitTracker) trustedAuditSource(metadata adapter.InboundContext) (netip.Addr, bool, bool) {
+	trustedInbound := false
+	for _, tag := range t.trustedInbounds {
+		if metadata.Inbound == tag {
+			trustedInbound = true
+			break
+		}
+	}
+	if !trustedInbound {
+		return metadata.Source.Addr.Unmap(), false, metadata.Source.Addr.IsValid()
+	}
+	t.trustedMu.RLock()
+	source, ok := t.trustedSources[metadata.Source.String()]
+	t.trustedMu.RUnlock()
+	return source, true, ok && source.IsValid()
 }
 
 func (t *RateLimitTracker) ConnectionAuditEnabled() bool {

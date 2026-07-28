@@ -590,24 +590,32 @@ const (
 )
 
 type PortForward struct {
-	ID                   int64           `json:"id"`
-	Name                 string          `json:"name"`
-	SourceServerID       int64           `json:"source_server_id"`
-	TargetServerID       int64           `json:"target_server_id"`
-	ListenIP             string          `json:"listen_ip"`
-	ListenPort           int             `json:"listen_port"`
-	TargetAddress        string          `json:"target_address"`
-	TargetPort           int             `json:"target_port"`
-	Protocol             ForwardProtocol `json:"protocol"`
-	Backend              ForwardBackend  `json:"backend"`
-	ProbeMode            string          `json:"probe_mode"`
-	ProbeIntervalSeconds int             `json:"probe_interval_seconds"`
-	SampleRate           float64         `json:"sample_rate"`
-	Priority             int             `json:"priority"`
-	ConfigJSON           string          `json:"config_json"`
-	Enabled              bool            `json:"enabled"`
-	CreatedAt            time.Time       `json:"created_at"`
-	UpdatedAt            time.Time       `json:"updated_at"`
+	ID                   int64                 `json:"id"`
+	Name                 string                `json:"name"`
+	SourceServerID       int64                 `json:"source_server_id"`
+	TargetServerID       int64                 `json:"target_server_id"`
+	ListenIP             string                `json:"listen_ip"`
+	ListenPort           int                   `json:"listen_port"`
+	TargetAddress        string                `json:"target_address"`
+	TargetPort           int                   `json:"target_port"`
+	Protocol             ForwardProtocol       `json:"protocol"`
+	Backend              ForwardBackend        `json:"backend"`
+	ProbeMode            string                `json:"probe_mode"`
+	ProbeIntervalSeconds int                   `json:"probe_interval_seconds"`
+	SampleRate           float64               `json:"sample_rate"`
+	Priority             int                   `json:"priority"`
+	ConfigJSON           string                `json:"config_json"`
+	TrustedForward       *TrustedForwardSender `json:"trusted_forward,omitempty"`
+	Enabled              bool                  `json:"enabled"`
+	CreatedAt            time.Time             `json:"created_at"`
+	UpdatedAt            time.Time             `json:"updated_at"`
+}
+
+type TrustedForwardSender struct {
+	Version             int    `json:"version"`
+	ReceiverID          string `json:"receiver_id"`
+	Key                 string `json:"key"`
+	MaxClockSkewSeconds int    `json:"max_clock_skew_seconds"`
 }
 
 type TunnelType string
