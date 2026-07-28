@@ -43,13 +43,16 @@ func TestUserFacingInstallScripts(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		"Controller 和 Agent 相互独立，可以安装在同一台服务器上",
-		"不会覆盖 oboard-controller",
 		"/install/agent.sh",
 		"OBOARD_ENROLL_TOKEN",
+		"无法从主控下载安装程序",
+		`sh "$SCRIPT_TMP"`,
 	} {
 		if !strings.Contains(string(install), want) {
 			t.Fatalf("installer missing %q", want)
 		}
+	}
+	if strings.Contains(string(install), "OBoard Agent 安装程序") {
+		t.Fatal("bootstrap installer duplicates the controller-provided install UI")
 	}
 }

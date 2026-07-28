@@ -33,27 +33,32 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
-echo "OBoard Agent 安装程序"
-echo "====================="
-echo "主控地址：$CONTROLLER_URL"
-echo "操作：$ACTION"
-echo ""
-echo "Controller 和 Agent 相互独立，可以安装在同一台服务器上。"
-echo "Agent 使用独立的服务名和数据目录，不会覆盖 oboard-controller。"
-echo "兼容：Debian/Ubuntu、Alpine、CentOS/RHEL/Rocky/Alma、常见 LXC/KVM 模板（systemd 或 OpenRC）。"
-echo ""
-
 OBOARD_UPDATE_REPO=${OBOARD_UPDATE_REPO:-OboardProject/oboard-agent}
 case "$OBOARD_UPDATE_REPO" in
   [A-Za-z0-9_.-]*/[A-Za-z0-9_.-]*) ;;
-  *) echo "OBOARD_UPDATE_REPO must look like owner/name" >&2; exit 1 ;;
+  *) echo "更新仓库格式无效，请使用 owner/name 格式。" >&2; exit 1 ;;
 esac
 
-curl -fsSL "$CONTROLLER_URL/install/agent.sh" | env \
+SCRIPT_TMP=$(mktemp "${TMPDIR:-/tmp}/oboard-agent-install.XXXXXX") || {
+  echo "无法创建安装临时文件，请检查临时目录是否可用。" >&2
+  exit 1
+}
+cleanup() { rm -f "$SCRIPT_TMP"; }
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+if ! curl --proto '=http,https' --proto-redir '=https' --tlsv1.2 --connect-timeout 10 --max-time 60 -fsSL \
+  "$CONTROLLER_URL/install/agent.sh" -o "$SCRIPT_TMP"; then
+  echo "无法从主控下载安装程序，请确认主控地址和网络连接后重试。" >&2
+  exit 1
+fi
+
+env \
   OBOARD_ACTION="$ACTION" \
   OBOARD_CONTROLLER_URL="$CONTROLLER_URL" \
   OBOARD_ENROLL_TOKEN="$ENROLL_TOKEN" \
   OBOARD_ALLOW_PANEL_UPDATE="${OBOARD_ALLOW_PANEL_UPDATE:-}" \
   OBOARD_UPDATE_SOURCE="${OBOARD_UPDATE_SOURCE:-}" \
   OBOARD_UPDATE_REPO="$OBOARD_UPDATE_REPO" \
-  sh
+  sh "$SCRIPT_TMP"
