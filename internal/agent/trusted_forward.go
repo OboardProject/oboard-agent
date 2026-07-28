@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/netip"
 	"strconv"
@@ -98,14 +99,18 @@ func encodeTrustedForwardTCP(sender *model.TrustedForwardSender, source netip.Ad
 	if err != nil {
 		return nil, err
 	}
-	if len(payload) > trustedForwardTCPFirstBytes {
+	if len(payload) > trustedForwardTCPFirstBytes || len(payload) > math.MaxUint16 {
 		return nil, errors.New("trusted forward TCP preface payload is too large")
+	}
+	unixSeconds := time.Now().Unix()
+	if unixSeconds < 0 {
+		return nil, errors.New("trusted forward TCP timestamp is invalid")
 	}
 	frame := make([]byte, 0, 64+len(payload))
 	frame = append(frame, trustedForwardTCPMagic...)
 	frame = append(frame, trustedForwardVersion, frameType)
 	var timestamp [8]byte
-	binary.BigEndian.PutUint64(timestamp[:], uint64(time.Now().Unix()))
+	binary.BigEndian.PutUint64(timestamp[:], uint64(unixSeconds))
 	frame = append(frame, timestamp[:]...)
 	var nonce [16]byte
 	if _, err := rand.Read(nonce[:]); err != nil {
@@ -117,7 +122,11 @@ func encodeTrustedForwardTCP(sender *model.TrustedForwardSender, source netip.Ad
 		return nil, err
 	}
 	var size [2]byte
-	binary.BigEndian.PutUint16(size[:], uint16(len(payload)))
+	var payloadSize uint16
+	for range payload {
+		payloadSize++
+	}
+	binary.BigEndian.PutUint16(size[:], payloadSize)
 	frame = append(frame, size[:]...)
 	frame = append(frame, payload...)
 	return appendTrustedForwardMAC(frame, key, trustedForwardTCPMACSize), nil
@@ -128,11 +137,15 @@ func encodeTrustedForwardUDP(sender *model.TrustedForwardSender, source netip.Ad
 	if err != nil {
 		return nil, err
 	}
+	unixSeconds := time.Now().Unix()
+	if unixSeconds < 0 || unixSeconds > math.MaxUint32 {
+		return nil, errors.New("trusted forward UDP timestamp is invalid")
+	}
 	frame := make([]byte, 0, 48+len(payload))
 	frame = append(frame, trustedForwardUDPMagic...)
 	frame = append(frame, trustedForwardVersion<<4|frameType)
 	var timestamp [4]byte
-	binary.BigEndian.PutUint32(timestamp[:], uint32(time.Now().Unix()))
+	binary.BigEndian.PutUint32(timestamp[:], uint32(unixSeconds))
 	frame = append(frame, timestamp[:]...)
 	frame = append(frame, sessionID[:]...)
 	var sequence [4]byte

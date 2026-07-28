@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/netip"
 	"sync"
@@ -202,7 +203,11 @@ func readTrustedForwardTCP(reader io.Reader, key []byte) (byte, netip.AddrPort, 
 		return 0, netip.AddrPort{}, nil, nonce, 0, errors.New("trusted forward TCP prefix is invalid")
 	}
 	frameType := fixed[5]
-	timestamp := int64(binary.BigEndian.Uint64(fixed[6:14]))
+	rawTimestamp := binary.BigEndian.Uint64(fixed[6:14])
+	if rawTimestamp > math.MaxInt64 {
+		return 0, netip.AddrPort{}, nil, nonce, 0, errors.New("trusted forward TCP timestamp is invalid")
+	}
+	timestamp := int64(rawTimestamp)
 	copy(nonce[:], fixed[14:30])
 	addressSize := 0
 	switch fixed[30] {
