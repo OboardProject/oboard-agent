@@ -348,7 +348,6 @@ type RoutingRule struct {
 	OutboundID         *int64      `json:"outbound_id,omitempty"`
 	ExternalOutboundID *int64      `json:"external_outbound_id,omitempty"`
 	TargetServerID     *int64      `json:"target_server_id,omitempty"`
-	WARPProfileID      *int64      `json:"warp_profile_id,omitempty"`
 	OutboundTag        string      `json:"outbound_tag"`
 	Enabled            bool        `json:"enabled"`
 	CreatedAt          time.Time   `json:"created_at"`
@@ -395,6 +394,7 @@ type ProxyPathStepNodeType string
 const (
 	ProxyPathStepServerInbound ProxyPathStepNodeType = "server_inbound"
 	ProxyPathStepImported      ProxyPathStepNodeType = "imported"
+	ProxyPathStepWARP          ProxyPathStepNodeType = "warp"
 )
 
 type ProxyPathStepTransportMode string
@@ -486,7 +486,7 @@ type WARPRequestPlan struct {
 	Version     int64   `json:"version"`
 	ServerID    int64   `json:"server_id"`
 	ProfileID   int64   `json:"profile_id"`
-	Name        string  `json:"name"`
+	OutboundTag string  `json:"outbound_tag"`
 	IPStack     IPStack `json:"ip_stack"`
 	MTU         int     `json:"mtu"`
 	DNSStrategy string  `json:"dns_strategy"`

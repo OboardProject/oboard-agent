@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -33,7 +34,7 @@ func (r *Runner) executeDeploymentTask(payload model.DeploymentTaskPayload) (str
 		return "failed", jsonMap(map[string]any{"message": "deployment rejected", "version": payload.Version, "error": err.Error()})
 	}
 	if replay {
-		return "succeeded", jsonMap(map[string]any{"message": "部署已应用", "version": payload.Version, "idempotent_replay": true})
+		return r.deploymentReplayResponse(payload)
 	}
 	ctx := context.Background()
 	steps := make([]deploymentStepResult, 0, 11+len(payload.WARPRequests))
@@ -57,6 +58,7 @@ func (r *Runner) executeDeploymentTask(payload model.DeploymentTaskPayload) (str
 		steps = append(steps, step)
 	}
 
+	controllerConfig := payload.Config.Config
 	started := time.Now()
 	resolvedConfig, assetsChanged, assetErr := r.syncManagedAssets(ctx, payload.Config.Assets, payload.Config.Config)
 	add("managed_assets", "同步受管资产", true, started, map[string]any{"requested": len(payload.Config.Assets), "changed": assetsChanged}, assetErr, len(payload.Config.Assets) == 0 && assetErr == nil, "受管资产已就绪")
@@ -68,6 +70,7 @@ func (r *Runner) executeDeploymentTask(payload model.DeploymentTaskPayload) (str
 		payload.ConfigChanged = true
 	}
 
+	warpReports := make(map[int64]model.WARPConfigReport, len(payload.WARPRequests))
 	for _, plan := range payload.WARPRequests {
 		started := time.Now()
 		report := r.requestWARPConfig(ctx, plan)
@@ -78,7 +81,28 @@ func (r *Runner) executeDeploymentTask(payload model.DeploymentTaskPayload) (str
 				err = fmt.Errorf("WARP 配置申请失败")
 			}
 		}
-		add(fmt.Sprintf("warp_%d", plan.ProfileID), "准备 WARP", false, started, reportToMap(report), err, false, "WARP 配置已准备")
+		add(fmt.Sprintf("warp_%d", plan.ProfileID), "准备 WARP", true, started, reportToMap(report), err, false, "WARP 配置已准备")
+		if err != nil {
+			return deploymentTaskResponse(payload.Version, steps, criticalFailures, warnings)
+		}
+		warpReports[plan.ProfileID] = report
+	}
+	if len(payload.WARPRequests) > 0 {
+		payload.Config.Config, err = resolveDeploymentWARPConfig(payload.Config.Config, payload.WARPRequests, warpReports)
+		if err != nil {
+			add("warp_config", "写入 WARP 出口", true, time.Now(), nil, err, false, "WARP 出口已写入")
+			return deploymentTaskResponse(payload.Version, steps, criticalFailures, warnings)
+		}
+		controllerConfig, err = resolveDeploymentWARPConfig(controllerConfig, payload.WARPRequests, warpReports)
+		if err != nil {
+			add("warp_config", "写入 WARP 出口", true, time.Now(), nil, err, false, "WARP 出口已写入")
+			return deploymentTaskResponse(payload.Version, steps, criticalFailures, warnings)
+		}
+	}
+	effectiveConfigSHA256, hashErr := canonicalConfigSHA256(controllerConfig)
+	if hashErr != nil && strings.TrimSpace(controllerConfig) != "" {
+		add("config_digest", "校验配置摘要", true, time.Now(), nil, hashErr, false, "配置摘要已生成")
+		return deploymentTaskResponse(payload.Version, steps, criticalFailures, warnings)
 	}
 
 	if payload.TimeSync != nil {
@@ -102,6 +126,7 @@ func (r *Runner) executeDeploymentTask(payload model.DeploymentTaskPayload) (str
 		}
 	} else {
 		applyResult, err := r.applyCoreConfigUnlocked(payload.Version, payload.Config.Config)
+		applyResult["effective_config_sha256"] = effectiveConfigSHA256
 		result, configErr = applyResult, err
 		unchanged, _ = applyResult["unchanged"].(bool)
 	}
@@ -197,4 +222,111 @@ func deploymentTaskResponse(version int64, steps []deploymentStepResult, critica
 		},
 		"steps": steps,
 	})
+}
+
+func resolveDeploymentWARPConfig(config string, plans []model.WARPRequestPlan, reports map[int64]model.WARPConfigReport) (string, error) {
+	if len(plans) == 0 {
+		return config, nil
+	}
+	if strings.TrimSpace(config) == "" {
+		return "", errors.New("WARP deployment requires a core config")
+	}
+	var root map[string]any
+	if err := json.Unmarshal([]byte(config), &root); err != nil {
+		return "", fmt.Errorf("decode core config for WARP: %w", err)
+	}
+	endpoints, _ := root["endpoints"].([]any)
+	existing := map[string]int{}
+	for index, raw := range endpoints {
+		if endpoint, ok := raw.(map[string]any); ok {
+			existing[strings.TrimSpace(fmt.Sprint(endpoint["tag"]))] = index
+		}
+	}
+	for _, plan := range plans {
+		tag := strings.TrimSpace(plan.OutboundTag)
+		if tag == "" {
+			return "", fmt.Errorf("WARP profile %d is missing outbound_tag", plan.ProfileID)
+		}
+		report, ok := reports[plan.ProfileID]
+		if !ok || report.Status != model.WARPStatusReady || strings.TrimSpace(report.ConfigJSON) == "" {
+			return "", fmt.Errorf("WARP profile %d is not ready", plan.ProfileID)
+		}
+		var endpoint map[string]any
+		if err := json.Unmarshal([]byte(report.ConfigJSON), &endpoint); err != nil {
+			return "", fmt.Errorf("decode WARP profile %d: %w", plan.ProfileID, err)
+		}
+		if !strings.EqualFold(strings.TrimSpace(fmt.Sprint(endpoint["type"])), "wireguard") {
+			return "", fmt.Errorf("WARP profile %d is not a WireGuard endpoint", plan.ProfileID)
+		}
+		endpoint["tag"] = tag
+		if index, found := existing[tag]; found {
+			placeholder, _ := endpoints[index].(map[string]any)
+			if int64FromAny(placeholder["_oboard_warp_pending"]) != plan.ProfileID {
+				return "", fmt.Errorf("WARP outbound tag %q already exists", tag)
+			}
+			endpoints[index] = endpoint
+		} else {
+			endpoints = append(endpoints, endpoint)
+		}
+	}
+	root["endpoints"] = endpoints
+	out, err := json.MarshalIndent(root, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
+}
+
+func canonicalConfigSHA256(config string) (string, error) {
+	if strings.TrimSpace(config) == "" {
+		return "", nil
+	}
+	var value any
+	if err := json.Unmarshal([]byte(config), &value); err != nil {
+		return "", err
+	}
+	canonical, err := json.Marshal(value)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%x", sha256.Sum256(canonical)), nil
+}
+
+func int64FromAny(value any) int64 {
+	switch number := value.(type) {
+	case float64:
+		return int64(number)
+	case int64:
+		return number
+	case int:
+		return int64(number)
+	default:
+		return 0
+	}
+}
+
+func (r *Runner) deploymentReplayResponse(payload model.DeploymentTaskPayload) (string, string) {
+	reports := make(map[int64]model.WARPConfigReport, len(payload.WARPRequests))
+	steps := make([]deploymentStepResult, 0, len(payload.WARPRequests)+1)
+	for _, plan := range payload.WARPRequests {
+		report, err := r.loadPersistedWARPConfig(plan)
+		if err != nil {
+			steps = append(steps, deploymentStepResult{Key: fmt.Sprintf("warp_%d", plan.ProfileID), Label: "准备 WARP", Status: "failed", Error: "已应用版本缺少本地 WARP 状态"})
+			return deploymentTaskResponse(payload.Version, steps, 1, 0)
+		}
+		reports[plan.ProfileID] = report
+		steps = append(steps, deploymentStepResult{Key: fmt.Sprintf("warp_%d", plan.ProfileID), Label: "准备 WARP", Status: "succeeded", Message: "WARP 配置已恢复", Result: reportToMap(report)})
+	}
+	resolved, err := resolveDeploymentWARPConfig(payload.Config.Config, payload.WARPRequests, reports)
+	if err != nil {
+		steps = append(steps, deploymentStepResult{Key: "config", Label: "应用核心配置", Status: "failed", Error: err.Error()})
+		return deploymentTaskResponse(payload.Version, steps, 1, 0)
+	}
+	digest, err := canonicalConfigSHA256(resolved)
+	if err != nil {
+		steps = append(steps, deploymentStepResult{Key: "config", Label: "应用核心配置", Status: "failed", Error: err.Error()})
+		return deploymentTaskResponse(payload.Version, steps, 1, 0)
+	}
+	steps = append(steps, deploymentStepResult{Key: "config", Label: "应用核心配置", Status: "skipped", Message: "部署版本已应用", Result: map[string]any{"idempotent_replay": true, "effective_config_sha256": digest}})
+	return deploymentTaskResponse(payload.Version, steps, 0, 0)
 }
