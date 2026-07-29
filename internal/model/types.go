@@ -95,7 +95,6 @@ const (
 	RouteActionBlock    RouteAction = "block"
 	RouteActionOutbound RouteAction = "outbound"
 	RouteActionExternal RouteAction = "external"
-	RouteActionWARP     RouteAction = "warp"
 )
 
 type ExternalOutboundScope string
