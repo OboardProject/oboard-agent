@@ -7,15 +7,19 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/OboardProject/oboard-agent/internal/security"
 	"github.com/OboardProject/oboard-agent/internal/version"
@@ -102,6 +106,128 @@ func TestDownloadAndInstallSignedRelease(t *testing.T) {
 	}
 }
 
+func TestDownloadReleaseAssetRetriesTruncatedResponse(t *testing.T) {
+	data := []byte("complete-signed-binary")
+	expected := security.ReleaseManifestFile{SHA256: sha256Hex(data), Size: int64(len(data))}
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+		if requests.Add(1) == 1 {
+			_, _ = w.Write(data[:len(data)/2])
+			return
+		}
+		_, _ = w.Write(data)
+	}))
+	defer server.Close()
+
+	path := filepath.Join(t.TempDir(), "oboard-agent-linux-amd64")
+	policy := releaseDownloadPolicy{attempts: 3}
+	if err := downloadReleaseAssetWithPolicy(context.Background(), server.Client(), server.URL, path, maxReleaseBinaryBytes, &expected, policy); err != nil {
+		t.Fatal(err)
+	}
+	if got := requests.Load(); got != 2 {
+		t.Fatalf("requests = %d, want 2", got)
+	}
+	assertFileContent(t, path, data)
+}
+
+func TestDownloadReleaseAssetReportsExhaustedRetries(t *testing.T) {
+	data := []byte("complete-signed-binary")
+	expected := security.ReleaseManifestFile{SHA256: sha256Hex(data), Size: int64(len(data))}
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+		_, _ = w.Write(data[:len(data)/2])
+	}))
+	defer server.Close()
+
+	path := filepath.Join(t.TempDir(), "oboard-sb-linux-amd64")
+	policy := releaseDownloadPolicy{attempts: 3}
+	err := downloadReleaseAssetWithPolicy(context.Background(), server.Client(), server.URL, path, maxReleaseBinaryBytes, &expected, policy)
+	if err == nil || !strings.Contains(err.Error(), "download oboard-sb-linux-amd64 failed after 3 attempts") || !strings.Contains(err.Error(), "unexpected EOF") {
+		t.Fatalf("unexpected retry error: %v", err)
+	}
+	if got := requests.Load(); got != 3 {
+		t.Fatalf("requests = %d, want 3", got)
+	}
+	if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("partial download remains at %s: %v", path, statErr)
+	}
+}
+
+func TestDownloadReleaseAssetLimitsChunkedResponseToSignedSize(t *testing.T) {
+	expectedData := []byte("signed")
+	expected := security.ReleaseManifestFile{SHA256: sha256Hex(expectedData), Size: int64(len(expectedData))}
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		_, _ = w.Write([]byte("signed-with-untrusted-suffix"))
+	}))
+	defer server.Close()
+
+	path := filepath.Join(t.TempDir(), "oboard-agent-linux-amd64")
+	policy := releaseDownloadPolicy{attempts: 2}
+	err := downloadReleaseAssetWithPolicy(context.Background(), server.Client(), server.URL, path, maxReleaseBinaryBytes, &expected, policy)
+	if err == nil || !strings.Contains(err.Error(), "failed after 2 attempts: response exceeds signed size") {
+		t.Fatalf("unexpected signed size error: %v", err)
+	}
+	if got := requests.Load(); got != 2 {
+		t.Fatalf("requests = %d, want 2", got)
+	}
+	if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("oversized partial download remains at %s: %v", path, statErr)
+	}
+}
+
+func TestDownloadReleaseAssetDoesNotRetryPermanentStatus(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	path := filepath.Join(t.TempDir(), "release-manifest.json")
+	policy := releaseDownloadPolicy{attempts: 3}
+	err := downloadReleaseAssetWithPolicy(context.Background(), server.Client(), server.URL, path, maxReleaseManifestBytes, nil, policy)
+	if err == nil || !strings.Contains(err.Error(), "download release-manifest.json: returned 404 Not Found") {
+		t.Fatalf("unexpected permanent error: %v", err)
+	}
+	if got := requests.Load(); got != 1 {
+		t.Fatalf("requests = %d, want 1", got)
+	}
+}
+
+func TestDownloadReleaseAssetStopsDuringBackoff(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		http.Error(w, "temporary", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	path := filepath.Join(t.TempDir(), "release-manifest.json")
+	policy := releaseDownloadPolicy{attempts: 3, retryDelays: []time.Duration{time.Hour}}
+	err := downloadReleaseAssetWithPolicy(ctx, server.Client(), server.URL, path, maxReleaseManifestBytes, nil, policy)
+	if err == nil || !strings.Contains(err.Error(), "stopped after 1 attempts: context deadline exceeded") {
+		t.Fatalf("unexpected cancellation error: %v", err)
+	}
+	if got := requests.Load(); got != 1 {
+		t.Fatalf("requests = %d, want 1", got)
+	}
+}
+
+func TestReleaseUpdateTimeoutFitsControllerWindow(t *testing.T) {
+	if releaseUpdateTimeout >= 5*time.Minute {
+		t.Fatalf("release update timeout = %s, must remain below Controller task timeout", releaseUpdateTimeout)
+	}
+}
+
 func TestSignedReleaseRejectsTamperedBinaryBeforeInstall(t *testing.T) {
 	oldKey := version.ReleasePublicKey
 	defer func() { version.ReleasePublicKey = oldKey }()
@@ -121,6 +247,7 @@ func TestSignedReleaseRejectsTamperedBinaryBeforeInstall(t *testing.T) {
 		t.Fatal(err)
 	}
 	manifestJSON, _ := security.CanonicalReleaseManifest(manifest)
+	var agentRequests atomic.Int32
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/release-manifest.json":
@@ -128,6 +255,7 @@ func TestSignedReleaseRejectsTamperedBinaryBeforeInstall(t *testing.T) {
 		case "/release-manifest.json.sig":
 			_, _ = w.Write([]byte(signature))
 		case "/" + agentName:
+			agentRequests.Add(1)
 			_, _ = w.Write([]byte("tampered-agent"))
 		case "/" + coreName:
 			_, _ = w.Write([]byte("good-core"))
@@ -140,8 +268,12 @@ func TestSignedReleaseRejectsTamperedBinaryBeforeInstall(t *testing.T) {
 	targets := signedReleaseTargets{Agent: filepath.Join(dir, "oboard-agent"), Core: filepath.Join(dir, "oboard-sb")}
 	_ = os.WriteFile(targets.Agent, []byte("old-agent"), 0o755)
 	_ = os.WriteFile(targets.Core, []byte("old-core"), 0o755)
-	if _, err := downloadAndInstallSignedRelease(context.Background(), server.Client(), server.URL, manifest.Repo, manifest.Build, targets); err == nil {
-		t.Fatal("tampered signed release was installed")
+	_, err = downloadAndInstallSignedRelease(context.Background(), server.Client(), server.URL, manifest.Repo, manifest.Build, targets)
+	if err == nil || !strings.Contains(err.Error(), "failed after 3 attempts") {
+		t.Fatalf("unexpected tampered release error: %v", err)
+	}
+	if got := agentRequests.Load(); got != 3 {
+		t.Fatalf("agent binary requests = %d, want 3", got)
 	}
 	assertFileContent(t, targets.Agent, []byte("old-agent"))
 	assertFileContent(t, targets.Core, []byte("old-core"))

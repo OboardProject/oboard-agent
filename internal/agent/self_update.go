@@ -23,7 +23,24 @@ const (
 	maxReleaseManifestBytes  = 1 << 20
 	maxReleaseSignatureBytes = 16 << 10
 	maxReleaseBinaryBytes    = 256 << 20
+	releaseUpdateTimeout     = 4 * time.Minute
+	releaseDownloadAttempts  = 3
 )
+
+var (
+	errTooManyReleaseRedirects  = errors.New("too many release redirects")
+	errReleaseRedirectDowngrade = errors.New("release redirect attempted to downgrade HTTPS")
+)
+
+type releaseDownloadPolicy struct {
+	attempts    int
+	retryDelays []time.Duration
+}
+
+var defaultReleaseDownloadPolicy = releaseDownloadPolicy{
+	attempts:    releaseDownloadAttempts,
+	retryDelays: []time.Duration{time.Second, 2 * time.Second},
+}
 
 type signedReleaseTargets struct {
 	Agent string
@@ -74,6 +91,8 @@ func downloadAndInstallSignedRelease(ctx context.Context, baseClient *http.Clien
 	if targets.Agent == "" || targets.Core == "" || !filepath.IsAbs(targets.Agent) || !filepath.IsAbs(targets.Core) {
 		return security.ReleaseManifest{}, errors.New("release install targets must be absolute")
 	}
+	ctx, cancel := context.WithTimeout(ctx, releaseUpdateTimeout)
+	defer cancel()
 	client := releaseHTTPClient(baseClient, u.Scheme == "https")
 	tmpDir, err := os.MkdirTemp("", "oboard-signed-update.*")
 	if err != nil {
@@ -83,10 +102,10 @@ func downloadAndInstallSignedRelease(ctx context.Context, baseClient *http.Clien
 
 	manifestPath := filepath.Join(tmpDir, "release-manifest.json")
 	signaturePath := filepath.Join(tmpDir, "release-manifest.json.sig")
-	if err := downloadReleaseAsset(ctx, client, baseURL+"/release-manifest.json", manifestPath, maxReleaseManifestBytes); err != nil {
+	if err := downloadReleaseAsset(ctx, client, baseURL+"/release-manifest.json", manifestPath, maxReleaseManifestBytes, nil); err != nil {
 		return security.ReleaseManifest{}, err
 	}
-	if err := downloadReleaseAsset(ctx, client, baseURL+"/release-manifest.json.sig", signaturePath, maxReleaseSignatureBytes); err != nil {
+	if err := downloadReleaseAsset(ctx, client, baseURL+"/release-manifest.json.sig", signaturePath, maxReleaseSignatureBytes, nil); err != nil {
 		return security.ReleaseManifest{}, err
 	}
 	manifest, err := verifyDownloadedManifest(manifestPath, signaturePath, strings.TrimSpace(repo), strings.TrimSpace(expectedBuild))
@@ -95,19 +114,27 @@ func downloadAndInstallSignedRelease(ctx context.Context, baseClient *http.Clien
 	}
 	agentName := "oboard-agent-" + runtime.GOOS + "-" + runtime.GOARCH
 	coreName := "oboard-sb-" + runtime.GOOS + "-" + runtime.GOARCH
-	if err := validateManifestBinary(manifest, agentName, "agent"); err != nil {
+	agentFile, err := validateManifestBinary(manifest, agentName, "agent")
+	if err != nil {
 		return security.ReleaseManifest{}, err
 	}
-	if err := validateManifestBinary(manifest, coreName, "sb"); err != nil {
+	coreFile, err := validateManifestBinary(manifest, coreName, "sb")
+	if err != nil {
 		return security.ReleaseManifest{}, err
 	}
-	for _, name := range []string{agentName, coreName} {
-		if err := downloadReleaseAsset(ctx, client, baseURL+"/"+name, filepath.Join(tmpDir, name), maxReleaseBinaryBytes); err != nil {
+	for _, file := range []security.ReleaseManifestFile{agentFile, coreFile} {
+		if err := downloadReleaseAsset(ctx, client, baseURL+"/"+file.Name, filepath.Join(tmpDir, file.Name), maxReleaseBinaryBytes, &file); err != nil {
 			return security.ReleaseManifest{}, err
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return security.ReleaseManifest{}, fmt.Errorf("release update stopped before verification: %w", err)
+	}
 	if err := VerifyReleaseFiles(manifestPath, signaturePath, tmpDir, runtime.GOOS, runtime.GOARCH, []string{agentName, coreName}); err != nil {
 		return security.ReleaseManifest{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		return security.ReleaseManifest{}, fmt.Errorf("release update stopped before installation: %w", err)
 	}
 	if err := installVerifiedReleaseFiles(filepath.Join(tmpDir, agentName), filepath.Join(tmpDir, coreName), targets); err != nil {
 		return security.ReleaseManifest{}, err
@@ -122,49 +149,143 @@ func releaseHTTPClient(base *http.Client, requireHTTPS bool) *http.Client {
 	}
 	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		if len(via) >= 5 {
-			return errors.New("too many release redirects")
+			return errTooManyReleaseRedirects
 		}
 		if requireHTTPS && req.URL.Scheme != "https" {
-			return errors.New("release redirect attempted to downgrade HTTPS")
+			return errReleaseRedirectDowngrade
 		}
 		return nil
 	}
 	return client
 }
 
-func downloadReleaseAsset(ctx context.Context, client *http.Client, rawURL, path string, maxBytes int64) error {
+func downloadReleaseAsset(ctx context.Context, client *http.Client, rawURL, path string, maxBytes int64, expected *security.ReleaseManifestFile) error {
+	return downloadReleaseAssetWithPolicy(ctx, client, rawURL, path, maxBytes, expected, defaultReleaseDownloadPolicy)
+}
+
+func downloadReleaseAssetWithPolicy(ctx context.Context, client *http.Client, rawURL, path string, maxBytes int64, expected *security.ReleaseManifestFile, policy releaseDownloadPolicy) error {
+	name := filepath.Base(path)
+	attempts := policy.attempts
+	if attempts < 1 {
+		attempts = 1
+	}
+	var lastErr error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		retryable, err := downloadReleaseAssetOnce(ctx, client, rawURL, path, maxBytes, expected)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return fmt.Errorf("download %s stopped after %d attempts: %w", name, attempt, ctxErr)
+		}
+		if !retryable {
+			return fmt.Errorf("download %s: %w", name, err)
+		}
+		if attempt == attempts {
+			break
+		}
+		delay := time.Duration(0)
+		if attempt-1 < len(policy.retryDelays) {
+			delay = policy.retryDelays[attempt-1]
+		}
+		if err := waitReleaseRetry(ctx, delay); err != nil {
+			return fmt.Errorf("download %s stopped after %d attempts: %w", name, attempt, err)
+		}
+	}
+	return fmt.Errorf("download %s failed after %d attempts: %w", name, attempts, lastErr)
+}
+
+func downloadReleaseAssetOnce(ctx context.Context, client *http.Client, rawURL, path string, maxBytes int64, expected *security.ReleaseManifestFile) (bool, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
-		return err
+		return false, err
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return err
+		if ctx.Err() != nil || errors.Is(err, errTooManyReleaseRedirects) || errors.Is(err, errReleaseRedirectDowngrade) {
+			return false, err
+		}
+		return true, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("download %s returned %s", filepath.Base(path), resp.Status)
+		return retryableReleaseStatus(resp.StatusCode), fmt.Errorf("returned %s", resp.Status)
 	}
 	if resp.ContentLength > maxBytes {
-		return fmt.Errorf("download %s exceeds size limit", filepath.Base(path))
+		return false, errors.New("response exceeds size limit")
+	}
+	if expected != nil && resp.ContentLength >= 0 && resp.ContentLength != expected.Size {
+		return true, fmt.Errorf("response length %d does not match signed size %d", resp.ContentLength, expected.Size)
 	}
 	// #nosec G304 -- path is a fixed file inside a newly created private update directory.
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
-		return err
+		return false, err
 	}
-	written, copyErr := io.Copy(f, io.LimitReader(resp.Body, maxBytes+1))
+	complete := false
+	defer func() {
+		_ = f.Close()
+		if !complete {
+			_ = os.Remove(path)
+		}
+	}()
+	readLimit := maxBytes
+	if expected != nil && expected.Size < readLimit {
+		readLimit = expected.Size
+	}
+	written, copyErr := io.Copy(f, io.LimitReader(resp.Body, readLimit+1))
 	closeErr := f.Close()
 	if copyErr != nil {
-		return copyErr
+		var pathErr *os.PathError
+		return !errors.As(copyErr, &pathErr), copyErr
 	}
 	if closeErr != nil {
-		return closeErr
+		return false, closeErr
+	}
+	if written > readLimit && expected != nil {
+		return true, fmt.Errorf("response exceeds signed size %d", expected.Size)
 	}
 	if written > maxBytes {
-		return fmt.Errorf("download %s exceeds size limit", filepath.Base(path))
+		return false, errors.New("response exceeds size limit")
 	}
-	return nil
+	if resp.ContentLength >= 0 && written != resp.ContentLength {
+		return true, fmt.Errorf("received %d of %d bytes", written, resp.ContentLength)
+	}
+	if expected != nil {
+		sha, size, err := security.SHA256File(path)
+		if err != nil {
+			return false, err
+		}
+		if size != expected.Size || sha != expected.SHA256 {
+			return true, fmt.Errorf("downloaded file does not match signed size or checksum")
+		}
+	}
+	complete = true
+	return false, nil
+}
+
+func retryableReleaseStatus(status int) bool {
+	return status == http.StatusRequestTimeout || status == http.StatusTooEarly || status == http.StatusTooManyRequests || status >= http.StatusInternalServerError
+}
+
+func waitReleaseRetry(ctx context.Context, delay time.Duration) error {
+	if delay <= 0 {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			return nil
+		}
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func verifyDownloadedManifest(manifestPath, signaturePath, repo, expectedBuild string) (security.ReleaseManifest, error) {
@@ -199,17 +320,17 @@ func verifyDownloadedManifest(manifestPath, signaturePath, repo, expectedBuild s
 	return manifest, nil
 }
 
-func validateManifestBinary(manifest security.ReleaseManifest, name, component string) error {
+func validateManifestBinary(manifest security.ReleaseManifest, name, component string) (security.ReleaseManifestFile, error) {
 	for _, file := range manifest.Files {
 		if file.Name != name || file.OS != runtime.GOOS || file.Arch != runtime.GOARCH {
 			continue
 		}
 		if file.Component != component || file.Size <= 0 || file.Size > maxReleaseBinaryBytes {
-			return fmt.Errorf("release manifest has invalid metadata for %s", name)
+			return security.ReleaseManifestFile{}, fmt.Errorf("release manifest has invalid metadata for %s", name)
 		}
-		return nil
+		return file, nil
 	}
-	return fmt.Errorf("release manifest does not contain %s", name)
+	return security.ReleaseManifestFile{}, fmt.Errorf("release manifest does not contain %s", name)
 }
 
 type stagedReleaseFile struct {
