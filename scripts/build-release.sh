@@ -32,7 +32,20 @@ fi
 
 AGENT_LDFLAGS="-s -w -X github.com/OboardProject/oboard-agent/internal/version.Version=$VERSION_VALUE -X github.com/OboardProject/oboard-agent/internal/version.Build=$BUILD_VALUE -X github.com/OboardProject/oboard-agent/internal/version.Commit=$COMMIT_VALUE -X github.com/OboardProject/oboard-agent/internal/version.Date=$DATE_VALUE -X github.com/OboardProject/oboard-agent/internal/version.ReleasePublicKey=$RELEASE_PUBLIC_KEY"
 KERNEL_LDFLAGS="-s -w -X github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/version.Version=$VERSION_VALUE -X github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/version.Build=$BUILD_VALUE -X github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/version.Commit=$COMMIT_VALUE -X github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/version.Date=$DATE_VALUE -X github.com/sagernet/sing-box/constant.Version=$SING_BOX_VERSION_VALUE"
-KERNEL_TAGS=${OBOARD_SB_TAGS:-with_utls}
+KERNEL_TAGS=${OBOARD_SB_TAGS:-with_utls,with_gvisor}
+
+require_kernel_tag() {
+  local normalized=",${KERNEL_TAGS// /,},"
+  case "$normalized" in
+    *",$1,"*) ;;
+    *)
+      echo "OBOARD_SB_TAGS must include $1" >&2
+      exit 1
+      ;;
+  esac
+}
+require_kernel_tag with_utls
+require_kernel_tag with_gvisor
 
 rm -rf "$OUT_DIR"
 mkdir -p "$OUT_DIR/bin"

@@ -9,7 +9,7 @@ COMMIT_VALUE=${COMMIT:-$(git -C "$AGENT_DIR" rev-parse --short HEAD 2>/dev/null 
 DATE_VALUE=${DATE:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
 TARGET_OS=${GOOS:-$(go env GOOS)}
 TARGET_ARCH=${GOARCH:-$(go env GOARCH)}
-TAGS=${OBOARD_SB_TAGS:-with_utls}
+TAGS=${OBOARD_SB_TAGS:-with_utls,with_gvisor}
 OUT=${OUT:-$AGENT_DIR/dist/bin/$TARGET_OS-$TARGET_ARCH/oboard-sb}
 SING_BOX_MODULE_VERSION=${SING_BOX_VERSION:-$(go -C "$KERNEL_DIR" list -m -f '{{.Version}}' github.com/sagernet/sing-box)}
 SING_BOX_VERSION_VALUE=${SING_BOX_MODULE_VERSION#v}
@@ -20,6 +20,19 @@ case "$SING_BOX_VERSION_VALUE" in
     exit 1
     ;;
 esac
+
+require_kernel_tag() {
+  local normalized=",${TAGS// /,},"
+  case "$normalized" in
+    *",$1,"*) ;;
+    *)
+      echo "OBOARD_SB_TAGS must include $1" >&2
+      exit 1
+      ;;
+  esac
+}
+require_kernel_tag with_utls
+require_kernel_tag with_gvisor
 
 mkdir -p "$(dirname "$OUT")"
 LDFLAGS="-s -w -X github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/version.Version=$VERSION_VALUE -X github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/version.Build=$BUILD_VALUE -X github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/version.Commit=$COMMIT_VALUE -X github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/version.Date=$DATE_VALUE -X github.com/sagernet/sing-box/constant.Version=$SING_BOX_VERSION_VALUE"

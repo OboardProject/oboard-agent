@@ -4,6 +4,20 @@ set -euo pipefail
 AGENT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 KERNEL_DIR="$AGENT_DIR/kernel/oboard-sb"
 TARGET=${1:-latest}
+KERNEL_TAGS=${OBOARD_SB_TAGS:-with_utls,with_gvisor}
+
+require_kernel_tag() {
+  local normalized=",${KERNEL_TAGS// /,},"
+  case "$normalized" in
+    *",$1,"*) ;;
+    *)
+      echo "OBOARD_SB_TAGS must include $1" >&2
+      exit 1
+      ;;
+  esac
+}
+require_kernel_tag with_utls
+require_kernel_tag with_gvisor
 
 echo "==> Syncing sing-box dependency: $TARGET"
 go -C "$KERNEL_DIR" get "github.com/sagernet/sing-box@$TARGET"
@@ -30,7 +44,6 @@ for symbol in \
   go -C "$KERNEL_DIR" doc "github.com/sagernet/sing-box/$symbol" >/dev/null
 done
 
-KERNEL_TAGS=${OBOARD_SB_TAGS:-with_utls}
 go -C "$KERNEL_DIR" test -tags "$KERNEL_TAGS" ./...
 CGO_ENABLED=0 go -C "$KERNEL_DIR" build -trimpath -tags "$KERNEL_TAGS" -o "$KERNEL_DIR/oboard-sb.sync-check" ./cmd/oboard-sb
 rm -f "$KERNEL_DIR/oboard-sb.sync-check"
