@@ -21,12 +21,14 @@ import (
 	"github.com/sagernet/sing-box/protocol/socks"
 	"github.com/sagernet/sing-box/protocol/vless"
 	"github.com/sagernet/sing-box/protocol/wireguard"
+
+	"github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/protocol/mieru"
 )
 
 // SupportedProtocols is the intentionally small protocol surface exposed by the
 // OBoard sing-box kernel. Do not add protocols here unless the Controller can
 // generate, validate, audit, and subscribe them.
-var SupportedProtocols = []string{"vless", "hysteria2", "anytls", "shadowsocks", "socks", "wireguard"}
+var SupportedProtocols = []string{"vless", "hysteria2", "anytls", "shadowsocks", "mieru", "socks", "wireguard"}
 
 // Context returns a sing-box context with only the inbounds/outbounds that
 // OBoard supports in the first kernel line: VLESS, HY2, AnyTLS, and SS.
@@ -39,6 +41,7 @@ func Context(parent context.Context) context.Context {
 	hysteria2.RegisterInbound(inbounds)
 	anytls.RegisterInbound(inbounds)
 	shadowsocks.RegisterInbound(inbounds)
+	mieru.RegisterInbound(inbounds)
 
 	outbounds := outbound.NewRegistry()
 	direct.RegisterOutbound(outbounds)
@@ -48,6 +51,7 @@ func Context(parent context.Context) context.Context {
 	hysteria2.RegisterOutbound(outbounds)
 	anytls.RegisterOutbound(outbounds)
 	shadowsocks.RegisterOutbound(outbounds)
+	mieru.RegisterOutbound(outbounds)
 	socks.RegisterOutbound(outbounds)
 
 	endpoints := endpoint.NewRegistry()

@@ -7,10 +7,12 @@ import (
 	"testing"
 
 	"github.com/sagernet/sing-box/option"
+
+	mieruprotocol "github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/protocol/mieru"
 )
 
 func TestSupportedProtocolsRemainMinimal(t *testing.T) {
-	want := []string{"vless", "hysteria2", "anytls", "shadowsocks", "socks", "wireguard"}
+	want := []string{"vless", "hysteria2", "anytls", "shadowsocks", "mieru", "socks", "wireguard"}
 	if !slices.Equal(SupportedProtocols, want) {
 		t.Fatalf("supported protocols = %v, want %v", SupportedProtocols, want)
 	}
@@ -133,5 +135,49 @@ func TestLoadConfigAcceptsShadowsocksUoTContract(t *testing.T) {
 	outbound, ok := opts.Outbounds[0].Options.(*option.ShadowsocksOutboundOptions)
 	if !ok || outbound.UDPOverTCP == nil || !outbound.UDPOverTCP.Enabled {
 		t.Fatalf("shadowsocks outbound UoT was not decoded: %#v", opts.Outbounds[0].Options)
+	}
+}
+
+func TestLoadConfigAcceptsMieruOptionsFromLocalRegistry(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	raw := `{
+		"inbounds":[{
+			"type":"mieru",
+			"tag":"mieru-in",
+			"listen":"127.0.0.1",
+			"listen_port":8964,
+			"listen_ports":["8965-8966"],
+			"transport":"TCP",
+			"users":[{"name":"oboard-u7","password":"server-pass"}],
+			"user_hint_is_mandatory":true
+		}],
+		"outbounds":[{
+			"type":"mieru",
+			"tag":"mieru-out",
+			"server":"edge.example.com",
+			"server_port":8964,
+			"server_ports":["8965-8966"],
+			"transport":"TCP",
+			"username":"oboard-u7",
+			"password":"server-pass",
+			"multiplexing":"MULTIPLEXING_DEFAULT"
+		}],
+		"route":{"final":"mieru-out"}
+	}`
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	opts, _, err := LoadConfig(path, HY2Tuning{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inboundOptions, ok := opts.Inbounds[0].Options.(*mieruprotocol.InboundOptions)
+	if !ok || inboundOptions.Transport != "TCP" || len(inboundOptions.ListenPortRanges) != 1 {
+		t.Fatalf("mieru inbound options not decoded: %#v", opts.Inbounds[0].Options)
+	}
+	outboundOptions, ok := opts.Outbounds[0].Options.(*mieruprotocol.OutboundOptions)
+	if !ok || outboundOptions.Username != "oboard-u7" || len(outboundOptions.ServerPortRanges) != 1 {
+		t.Fatalf("mieru outbound options not decoded: %#v", opts.Outbounds[0].Options)
 	}
 }

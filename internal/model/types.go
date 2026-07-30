@@ -20,6 +20,7 @@ const (
 	ProtocolHY2    Protocol = "hy2"
 	ProtocolAnyTLS Protocol = "anytls"
 	ProtocolSS     Protocol = "shadowsocks"
+	ProtocolMieru  Protocol = "mieru"
 	ProtocolSocks  Protocol = "socks"
 	ProtocolSSH    Protocol = "ssh"
 )
@@ -868,13 +869,14 @@ type DiagnoseNetworkTaskPayload struct {
 }
 
 type InboundProbeTarget struct {
-	InboundID int64    `json:"inbound_id"`
-	Name      string   `json:"name"`
-	Protocol  Protocol `json:"protocol"`
-	Host      string   `json:"host"`
-	ListenIP  string   `json:"listen_ip"`
-	Port      int      `json:"port"`
-	Transport string   `json:"transport"`
+	InboundID   int64    `json:"inbound_id"`
+	Name        string   `json:"name"`
+	Protocol    Protocol `json:"protocol"`
+	Host        string   `json:"host"`
+	ListenIP    string   `json:"listen_ip"`
+	Port        int      `json:"port"`
+	Transport   string   `json:"transport"`
+	SampleCount int      `json:"sample_count,omitempty"`
 }
 
 type InboundProbePlan struct {

@@ -36,6 +36,8 @@ case "$VERSION" in
 esac
 
 for symbol in \
+  adapter/inbound.Register adapter/outbound.Register adapter.DNSRouter \
+  common/listener.Listener.ListenTCP common/listener.Listener.ListenUDP \
   protocol/vless.RegisterInbound protocol/vless.RegisterOutbound \
   protocol/hysteria2.RegisterInbound protocol/hysteria2.RegisterOutbound \
   protocol/anytls.RegisterInbound protocol/anytls.RegisterOutbound \
@@ -44,9 +46,19 @@ for symbol in \
   go -C "$KERNEL_DIR" doc "github.com/sagernet/sing-box/$symbol" >/dev/null
 done
 
+for symbol in \
+  apis/client.ClientConfig apis/common.DNSResolver \
+  apis/common.StreamListenerFactory apis/common.PacketListenerFactory \
+  apis/server.ServerConfig; do
+  go -C "$KERNEL_DIR" doc "github.com/enfein/mieru/v3/$symbol" >/dev/null
+done
+
 go -C "$KERNEL_DIR" test -tags "$KERNEL_TAGS" ./...
-CGO_ENABLED=0 go -C "$KERNEL_DIR" build -trimpath -tags "$KERNEL_TAGS" -o "$KERNEL_DIR/oboard-sb.sync-check" ./cmd/oboard-sb
-rm -f "$KERNEL_DIR/oboard-sb.sync-check"
+SYNC_CHECK=$(mktemp "${TMPDIR:-/tmp}/oboard-sb-sync-check.XXXXXX")
+trap 'rm -f "$SYNC_CHECK"' EXIT
+CGO_ENABLED=0 go -C "$KERNEL_DIR" build -trimpath -tags "$KERNEL_TAGS" -o "$SYNC_CHECK" ./cmd/oboard-sb
+rm -f "$SYNC_CHECK"
+trap - EXIT
 printf 'github.com/sagernet/sing-box %s\nchannel %s\nverified %s\n' \
   "$VERSION" "$CHANNEL" "$(date -u +%Y-%m-%d)" > "$KERNEL_DIR/UPSTREAM_VERSION"
 echo "==> sing-box $VERSION synced and verified"

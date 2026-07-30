@@ -28,7 +28,8 @@ func (r *Runner) runInboundProbeTask(ctx context.Context, plan model.InboundProb
 	results := make([]model.InboundProbeResult, 0, len(plan.EntryTargets))
 	var firstErr error
 	for _, target := range plan.EntryTargets {
-		result := probeLocalInbound(target, plan.Version, samples, interval, timeout)
+		targetSamples := clampProbeInt(target.SampleCount, samples, 1, 10)
+		result := probeLocalInbound(target, plan.Version, targetSamples, interval, timeout)
 		results = append(results, result)
 		if err := r.reportInboundProbe(ctx, result); err != nil && firstErr == nil {
 			firstErr = err
