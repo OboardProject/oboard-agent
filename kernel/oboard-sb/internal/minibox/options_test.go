@@ -3,10 +3,42 @@ package minibox
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/sagernet/sing-box/option"
 )
+
+func TestSupportedProtocolsRemainMinimal(t *testing.T) {
+	want := []string{"vless", "hysteria2", "anytls", "shadowsocks", "socks", "wireguard"}
+	if !slices.Equal(SupportedProtocols, want) {
+		t.Fatalf("supported protocols = %v, want %v", SupportedProtocols, want)
+	}
+}
+
+func TestLoadConfigRejectsExcludedProtocols(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{name: "vmess inbound", raw: `{"inbounds":[{"type":"vmess","tag":"excluded","listen":"127.0.0.1","listen_port":10001}]}`},
+		{name: "tuic inbound", raw: `{"inbounds":[{"type":"tuic","tag":"excluded","listen":"127.0.0.1","listen_port":10002}]}`},
+		{name: "http inbound", raw: `{"inbounds":[{"type":"http","tag":"excluded","listen":"127.0.0.1","listen_port":10003}]}`},
+		{name: "trojan outbound", raw: `{"outbounds":[{"type":"trojan","tag":"excluded","server":"127.0.0.1","server_port":443}]}`},
+		{name: "tailscale endpoint", raw: `{"endpoints":[{"type":"tailscale","tag":"excluded"}]}`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.json")
+			if err := os.WriteFile(path, []byte(test.raw), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := LoadConfig(path, HY2Tuning{}); err == nil {
+				t.Fatal("excluded protocol config was accepted")
+			}
+		})
+	}
+}
 
 func TestLoadConfigStripsRuntimeMetadata(t *testing.T) {
 	dir := t.TempDir()
