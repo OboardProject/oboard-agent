@@ -76,6 +76,78 @@ func TestSSHInboundAllowsOnlyPublicKeyAndDirectTCPIP(t *testing.T) {
 	}
 }
 
+func TestSSHInboundApplyReportsPersistentHostIdentity(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "state")
+	runner := New(Config{StateDir: stateDir})
+	first, err := runner.applySSHInbounds(model.SSHInboundPlan{Version: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hostKey, rest, _, _, err := ssh.ParseAuthorizedKey([]byte(first.HostPublicKey))
+	if err != nil || len(rest) != 0 {
+		t.Fatalf("host public key = %q, err=%v", first.HostPublicKey, err)
+	}
+	canonical := string(ssh.MarshalAuthorizedKey(hostKey))
+	if first.HostPublicKey != canonical[:len(canonical)-1] || first.HostKeyFingerprint != ssh.FingerprintSHA256(hostKey) {
+		t.Fatalf("host identity = %#v", first)
+	}
+	info, err := os.Stat(filepath.Join(stateDir, sshInboundHostKey))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("host private key mode = %o, want 600", info.Mode().Perm())
+	}
+
+	unchanged, err := runner.applySSHInbounds(model.SSHInboundPlan{Version: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !unchanged.Unchanged || unchanged.HostPublicKey != first.HostPublicKey || unchanged.HostKeyFingerprint != first.HostKeyFingerprint {
+		t.Fatalf("unchanged apply changed host identity: first=%#v unchanged=%#v", first, unchanged)
+	}
+
+	restarted := New(Config{StateDir: stateDir})
+	if err := restarted.restoreManagedSSHInboundsOnStartup(); err != nil {
+		t.Fatal(err)
+	}
+	afterRestart, err := restarted.applySSHInbounds(model.SSHInboundPlan{Version: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !afterRestart.Unchanged || afterRestart.HostPublicKey != first.HostPublicKey || afterRestart.HostKeyFingerprint != first.HostKeyFingerprint {
+		t.Fatalf("restart changed host identity: first=%#v restarted=%#v", first, afterRestart)
+	}
+}
+
+func TestDeploymentReplayIncludesSSHHostIdentity(t *testing.T) {
+	runner := New(Config{StateDir: t.TempDir()})
+	status, resultJSON := runner.deploymentReplayResponse(model.DeploymentTaskPayload{Version: 9, SSHInbounds: model.SSHInboundPlan{Version: 9}})
+	if status != "succeeded" {
+		t.Fatalf("replay status = %q, result=%s", status, resultJSON)
+	}
+	var result struct {
+		Steps []struct {
+			Key    string                `json:"key"`
+			Status string                `json:"status"`
+			Result sshInboundApplyResult `json:"result"`
+		} `json:"steps"`
+	}
+	if err := json.Unmarshal([]byte(resultJSON), &result); err != nil {
+		t.Fatal(err)
+	}
+	for _, step := range result.Steps {
+		if step.Key != "ssh_inbounds" {
+			continue
+		}
+		if step.Status != "skipped" || step.Result.HostPublicKey == "" || step.Result.HostKeyFingerprint == "" {
+			t.Fatalf("SSH replay step = %#v", step)
+		}
+		return
+	}
+	t.Fatalf("SSH replay step missing: %#v", result.Steps)
+}
+
 func TestSSHInboundTrafficUsesInboundAndUserPolicy(t *testing.T) {
 	counter := &sshInboundCounter{}
 	counter.setPolicy(model.TrafficRuntimePolicy{UserID: 7, InboundID: 17, Billable: true, PeriodKey: "2026-07", TrafficLimitBytes: 10, UsedBaselineBytes: 4})

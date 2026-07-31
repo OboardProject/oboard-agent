@@ -492,7 +492,7 @@ Endpoint = engage.cloudflareclient.com:2408
 		t.Fatalf("WARP reserved bytes must be attached to the peer: %#v", peers[0])
 	}
 	resolver, ok := endpoint["domain_resolver"].(map[string]any)
-	if !ok || resolver["server"] != "bootstrap" || resolver["strategy"] != "prefer_ipv6" {
+	if !ok || resolver["server"] != warpBootstrapResolverTag || resolver["strategy"] != "prefer_ipv6" {
 		t.Fatalf("domain_resolver was not normalized: %#v", endpoint["domain_resolver"])
 	}
 	encoded, err := json.Marshal(endpoint)
@@ -538,6 +538,10 @@ func TestRegisterWARPWireGuardWithoutWGCF(t *testing.T) {
 	}
 	if peers[0]["public_key"] != warpPeerPublicKey {
 		t.Fatalf("native WARP peer public key = %#v", peers[0]["public_key"])
+	}
+	resolver, ok := endpoint["domain_resolver"].(map[string]any)
+	if !ok || resolver["server"] != warpBootstrapResolverTag || resolver["strategy"] != "prefer_ipv6" {
+		t.Fatalf("native WARP domain_resolver = %#v", endpoint["domain_resolver"])
 	}
 }
 

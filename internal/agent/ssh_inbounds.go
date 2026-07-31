@@ -32,12 +32,14 @@ const (
 )
 
 type sshInboundApplyResult struct {
-	Version   int64    `json:"version"`
-	Unchanged bool     `json:"unchanged,omitempty"`
-	Applied   int      `json:"applied"`
-	Listeners int      `json:"listeners"`
-	Users     int      `json:"users"`
-	Warnings  []string `json:"warnings,omitempty"`
+	Version            int64    `json:"version"`
+	Unchanged          bool     `json:"unchanged,omitempty"`
+	Applied            int      `json:"applied"`
+	Listeners          int      `json:"listeners"`
+	Users              int      `json:"users"`
+	HostPublicKey      string   `json:"host_public_key"`
+	HostKeyFingerprint string   `json:"host_key_fingerprint"`
+	Warnings           []string `json:"warnings,omitempty"`
 }
 
 // sshInboundManager owns only the Agent-native SSH proxy listeners. Keeping
@@ -95,6 +97,15 @@ func (r *Runner) applySSHInbounds(plan model.SSHInboundPlan) (sshInboundApplyRes
 	defer r.sshInboundLifecycleMu.Unlock()
 
 	result := sshInboundApplyResult{Version: plan.Version}
+	if err := os.MkdirAll(r.stateDir(), 0o700); err != nil {
+		return result, err
+	}
+	hostSigner, err := r.loadSSHInboundHostSigner()
+	if err != nil {
+		return result, err
+	}
+	result.HostPublicKey = strings.TrimSpace(string(ssh.MarshalAuthorizedKey(hostSigner.PublicKey())))
+	result.HostKeyFingerprint = ssh.FingerprintSHA256(hostSigner.PublicKey())
 	desiredState, err := sshInboundDesiredStateID(plan)
 	if err != nil {
 		return result, err
@@ -110,9 +121,6 @@ func (r *Runner) applySSHInbounds(plan model.SSHInboundPlan) (sshInboundApplyRes
 		return result, err
 	}
 	if err := r.validateSSHInboundServerIDs(plan); err != nil {
-		return result, err
-	}
-	if err := os.MkdirAll(r.stateDir(), 0o700); err != nil {
 		return result, err
 	}
 	current := filepath.Join(r.stateDir(), sshInboundsCurrent)

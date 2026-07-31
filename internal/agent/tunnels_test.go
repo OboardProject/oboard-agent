@@ -165,7 +165,7 @@ func TestSetManagedSSHPasswordHashUsesNonLockedInvalidHash(t *testing.T) {
 	}
 }
 
-func TestLocalSSHServerListening(t *testing.T) {
+func TestManagedSSHServerPortRequiresExclusiveOwnership(t *testing.T) {
 	sshListener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -179,9 +179,8 @@ func TestLocalSSHServerListening(t *testing.T) {
 		}
 	}()
 	sshPort := sshListener.Addr().(*net.TCPAddr).Port
-	listening, err := localSSHServerListening(sshPort)
-	if err != nil || !listening {
-		t.Fatalf("SSH banner probe listening=%v error=%v", listening, err)
+	if err := managedSSHServerPortAvailable(sshPort); err == nil || !strings.Contains(err.Error(), "已被其他进程占用") {
+		t.Fatalf("SSH listener must not be reused: %v", err)
 	}
 
 	nonSSHListener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -197,8 +196,8 @@ func TestLocalSSHServerListening(t *testing.T) {
 		}
 	}()
 	nonSSHPort := nonSSHListener.Addr().(*net.TCPAddr).Port
-	if listening, err = localSSHServerListening(nonSSHPort); err == nil || listening || !strings.Contains(err.Error(), "非 SSH 服务") {
-		t.Fatalf("non-SSH probe listening=%v error=%v", listening, err)
+	if err := managedSSHServerPortAvailable(nonSSHPort); err == nil || !strings.Contains(err.Error(), "已被其他进程占用") {
+		t.Fatalf("non-SSH listener must be rejected: %v", err)
 	}
 
 	available, err := net.Listen("tcp", "127.0.0.1:0")
@@ -207,7 +206,23 @@ func TestLocalSSHServerListening(t *testing.T) {
 	}
 	availablePort := available.Addr().(*net.TCPAddr).Port
 	_ = available.Close()
-	if listening, err = localSSHServerListening(availablePort); err != nil || listening {
-		t.Fatalf("unused port probe listening=%v error=%v", listening, err)
+	if err := managedSSHServerPortAvailable(availablePort); err != nil {
+		t.Fatalf("unused port probe error=%v", err)
+	}
+}
+
+func TestManagedSSHServerPortValidationIgnoresClientTunnels(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	port := listener.Addr().(*net.TCPAddr).Port
+	tunnels := []model.Tunnel{{
+		Type:       model.TunnelTypeSSH,
+		ConfigJSON: fmt.Sprintf(`{"managed_pair":false,"role":"client","server_port":%d}`, port),
+	}}
+	if err := validateManagedSSHServerPortsAvailable(tunnels); err != nil {
+		t.Fatalf("manual SSH client tunnel was treated as a managed server: %v", err)
 	}
 }

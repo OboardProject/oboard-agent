@@ -23,8 +23,9 @@ import (
 )
 
 const (
-	warpRegistrationURL = "https://api.cloudflareclient.com/v0a2158/reg"
-	warpPeerPublicKey   = "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo="
+	warpRegistrationURL      = "https://api.cloudflareclient.com/v0a2158/reg"
+	warpPeerPublicKey        = "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo="
+	warpBootstrapResolverTag = "bootstrap-primary"
 )
 
 func resolveWarpCommand(raw string) (string, error) {
@@ -114,9 +115,15 @@ func (r *Runner) loadPersistedWARPConfig(plan model.WARPRequestPlan) (model.WARP
 	if err := json.Unmarshal(raw, &endpoint); err != nil || !strings.EqualFold(strings.TrimSpace(fmt.Sprint(endpoint["type"])), "wireguard") {
 		return model.WARPConfigReport{}, errors.New("persisted WARP endpoint is invalid")
 	}
+	resolverBefore, _ := json.Marshal(endpoint["domain_resolver"])
+	normalizeWARPDomainResolver(endpoint, plan)
+	resolverAfter, _ := json.Marshal(endpoint["domain_resolver"])
 	report := model.WARPConfigReport{ServerID: plan.ServerID, ProfileID: plan.ProfileID, Status: model.WARPStatusReady, ConfigJSON: string(raw), ResultJSON: string(raw), MTU: plan.MTU}
 	if mtu, ok := endpoint["mtu"].(float64); ok && mtu > 0 {
 		report.MTU = int(mtu)
+	}
+	if !bytes.Equal(resolverBefore, resolverAfter) {
+		return r.persistReadyWARPReport(report, endpoint), nil
 	}
 	return report, nil
 }
@@ -227,9 +234,7 @@ func registerWARPWireGuard(ctx context.Context, client *http.Client, endpoint st
 		"type": "wireguard", "tag": fmt.Sprintf("warp-%d", plan.ProfileID), "address": addresses,
 		"private_key": privateKey, "mtu": mtu, "peers": []map[string]any{peer},
 	}
-	if plan.DNSStrategy != "" && plan.DNSStrategy != "auto" {
-		out["domain_resolver"] = map[string]any{"server": "bootstrap", "strategy": plan.DNSStrategy}
-	}
+	normalizeWARPDomainResolver(out, plan)
 	return out, nil
 }
 
@@ -364,10 +369,17 @@ func wgcfProfileToSingBox(profile string, plan model.WARPRequestPlan) (map[strin
 		"mtu":         mtu,
 		"peers":       []map[string]any{peerConfig},
 	}
-	if plan.DNSStrategy != "" && plan.DNSStrategy != "auto" {
-		out["domain_resolver"] = map[string]any{"server": "bootstrap", "strategy": plan.DNSStrategy}
-	}
+	normalizeWARPDomainResolver(out, plan)
 	return out, nil
+}
+
+func normalizeWARPDomainResolver(endpoint map[string]any, plan model.WARPRequestPlan) {
+	strategy := strings.TrimSpace(plan.DNSStrategy)
+	if strategy == "" || strings.EqualFold(strategy, "auto") {
+		delete(endpoint, "domain_resolver")
+		return
+	}
+	endpoint["domain_resolver"] = map[string]any{"server": warpBootstrapResolverTag, "strategy": strategy}
 }
 
 func parseINI(raw string) map[string]map[string]string {

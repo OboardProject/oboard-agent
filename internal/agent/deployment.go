@@ -258,6 +258,7 @@ func resolveDeploymentWARPConfig(config string, plans []model.WARPRequestPlan, r
 		if !strings.EqualFold(strings.TrimSpace(fmt.Sprint(endpoint["type"])), "wireguard") {
 			return "", fmt.Errorf("WARP profile %d is not a WireGuard endpoint", plan.ProfileID)
 		}
+		normalizeWARPDomainResolver(endpoint, plan)
 		endpoint["tag"] = tag
 		if index, found := existing[tag]; found {
 			placeholder, _ := endpoints[index].(map[string]any)
@@ -328,5 +329,11 @@ func (r *Runner) deploymentReplayResponse(payload model.DeploymentTaskPayload) (
 		return deploymentTaskResponse(payload.Version, steps, 1, 0)
 	}
 	steps = append(steps, deploymentStepResult{Key: "config", Label: "应用核心配置", Status: "skipped", Message: "部署版本已应用", Result: map[string]any{"idempotent_replay": true, "effective_config_sha256": digest}})
+	sshResult, err := r.applySSHInbounds(payload.SSHInbounds)
+	if err != nil {
+		steps = append(steps, deploymentStepResult{Key: "ssh_inbounds", Label: "应用 SSH 入站", Status: "failed", Error: err.Error()})
+		return deploymentTaskResponse(payload.Version, steps, 1, 0)
+	}
+	steps = append(steps, deploymentStepResult{Key: "ssh_inbounds", Label: "应用 SSH 入站", Status: "skipped", Message: "受限 SSH 入站已应用", Result: sshResult})
 	return deploymentTaskResponse(payload.Version, steps, 0, 0)
 }

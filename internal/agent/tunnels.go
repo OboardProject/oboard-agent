@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -304,6 +303,9 @@ func (r *Runner) applyTunnelSet(tunnels []model.Tunnel, result *tunnelApplyResul
 	if err := r.stopManagedTunnels(dir, result); err != nil {
 		return err
 	}
+	if err := validateManagedSSHServerPortsAvailable(tunnels); err != nil {
+		return err
+	}
 	if err := r.reconcileSSHServerAccount(dir, tunnels); err != nil {
 		return err
 	}
@@ -507,7 +509,6 @@ func parseSSHTunnelConfig(raw string) sshTunnelConfig {
 
 func (r *Runner) reconcileSSHServerAccount(dir string, tunnels []model.Tunnel) error {
 	serverTunnels := make([]model.Tunnel, 0)
-	ports := map[int]bool{}
 	for _, tunnel := range tunnels {
 		if tunnel.Type != model.TunnelTypeSSH {
 			continue
@@ -515,7 +516,6 @@ func (r *Runner) reconcileSSHServerAccount(dir string, tunnels []model.Tunnel) e
 		cfg := parseSSHTunnelConfig(tunnel.ConfigJSON)
 		if cfg.ManagedPair && cfg.Role == "server" {
 			serverTunnels = append(serverTunnels, tunnel)
-			ports[cfg.ServerPort] = true
 		}
 	}
 	marker := filepath.Join(dir, "ssh-account-managed")
@@ -575,14 +575,11 @@ func (r *Runner) reconcileSSHServerAccount(dir string, tunnels []model.Tunnel) e
 	if err := os.Chown(authorizedKeys, uid, gid); err != nil {
 		return err
 	}
+	ports := map[int]bool{}
+	for _, tunnel := range serverTunnels {
+		ports[parseSSHTunnelConfig(tunnel.ConfigJSON).ServerPort] = true
+	}
 	for port := range ports {
-		listening, err := localSSHServerListening(port)
-		if err != nil {
-			return err
-		}
-		if listening {
-			continue
-		}
 		if err := startManagedSSHServer(dir, port); err != nil {
 			return err
 		}
@@ -590,32 +587,104 @@ func (r *Runner) reconcileSSHServerAccount(dir string, tunnels []model.Tunnel) e
 	return nil
 }
 
-func localSSHServerListening(port int) (bool, error) {
+func validateManagedSSHServerPortsAvailable(tunnels []model.Tunnel) error {
+	ports := map[int]bool{}
+	for _, tunnel := range tunnels {
+		if tunnel.Type != model.TunnelTypeSSH {
+			continue
+		}
+		cfg := parseSSHTunnelConfig(tunnel.ConfigJSON)
+		if cfg.ManagedPair && cfg.Role == "server" {
+			ports[cfg.ServerPort] = true
+		}
+	}
+	for port := range ports {
+		if err := managedSSHServerPortAvailable(port); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func managedSSHServerPortAvailable(port int) error {
 	if port <= 0 || port > 65535 {
-		return false, errors.New("managed SSH server port is invalid")
+		return errors.New("managed SSH server port is invalid")
 	}
-	address := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
-	conn, err := net.DialTimeout("tcp", address, 500*time.Millisecond)
+	addresses, err := managedSSHListenAddresses()
 	if err != nil {
-		return false, nil
+		return err
 	}
-	defer conn.Close()
-	if err := conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
-		return false, err
-	}
-	reader := bufio.NewReaderSize(conn, 1024)
-	read := 0
-	for read < 1024 {
-		line, readErr := reader.ReadString('\n')
-		read += len(line)
-		if strings.HasPrefix(strings.TrimSpace(line), "SSH-") {
-			return true, nil
+	for _, address := range addresses {
+		listener, err := net.Listen(address.network, net.JoinHostPort(address.host, strconv.Itoa(port)))
+		if err != nil {
+			return fmt.Errorf("目标端隧道服务端口 %d 已被其他进程占用", port)
 		}
-		if readErr != nil {
-			break
+		if err := listener.Close(); err != nil {
+			return err
 		}
 	}
-	return false, fmt.Errorf("SSH 端口 %d 已被非 SSH 服务占用", port)
+	return nil
+}
+
+type managedSSHListenAddress struct {
+	network string
+	host    string
+}
+
+func managedSSHListenAddresses() ([]managedSSHListenAddress, error) {
+	addresses := []managedSSHListenAddress{{network: "tcp4", host: "127.0.0.1"}, {network: "tcp4", host: "0.0.0.0"}}
+	seen := map[string]bool{"tcp4|127.0.0.1": true, "tcp4|0.0.0.0": true}
+	ipv6 := tcp6Available()
+	if ipv6 {
+		addresses = append(addresses, managedSSHListenAddress{network: "tcp6", host: "::1"}, managedSSHListenAddress{network: "tcp6", host: "::"})
+		seen["tcp6|::1"] = true
+		seen["tcp6|::"] = true
+	}
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return nil, fmt.Errorf("list local interfaces for managed SSH port check: %w", err)
+	}
+	for _, iface := range interfaces {
+		interfaceAddresses, err := iface.Addrs()
+		if err != nil {
+			return nil, fmt.Errorf("list addresses for interface %s: %w", iface.Name, err)
+		}
+		for _, raw := range interfaceAddresses {
+			var ip net.IP
+			switch address := raw.(type) {
+			case *net.IPNet:
+				ip = address.IP
+			case *net.IPAddr:
+				ip = address.IP
+			}
+			if ip == nil || ip.IsUnspecified() || ip.IsMulticast() {
+				continue
+			}
+			network, host := "tcp6", ip.String()
+			if ipv4 := ip.To4(); ipv4 != nil {
+				network, host = "tcp4", ipv4.String()
+			} else if !ipv6 {
+				continue
+			} else if ip.IsLinkLocalUnicast() {
+				host += "%" + iface.Name
+			}
+			key := network + "|" + host
+			if !seen[key] {
+				seen[key] = true
+				addresses = append(addresses, managedSSHListenAddress{network: network, host: host})
+			}
+		}
+	}
+	return addresses, nil
+}
+
+func tcp6Available() bool {
+	listener, err := net.Listen("tcp6", "[::]:0")
+	if err != nil {
+		return false
+	}
+	_ = listener.Close()
+	return true
 }
 
 func ensureManagedSSHAccount(marker string) (*user.User, error) {
