@@ -501,13 +501,13 @@ func (r *Runner) pushCoreTrafficPolicy(ctx context.Context, policies map[string]
 
 func unixHTTPClient(socket string) *http.Client {
 	dialer := &net.Dialer{Timeout: 3 * time.Second}
-	return &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{
+	return &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			return dialer.DialContext(ctx, "unix", socket)
 		},
-		MaxIdleConns:        1,
-		MaxIdleConnsPerHost: 1,
-		MaxConnsPerHost:     1,
+		MaxIdleConns:        4,
+		MaxIdleConnsPerHost: 4,
+		MaxConnsPerHost:     4,
 		IdleConnTimeout:     30 * time.Second,
 		DisableCompression:  true,
 	}}

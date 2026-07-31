@@ -650,6 +650,20 @@ func (r *Runner) ExecuteAgentTask(task model.AgentTask) (string, string) {
 			return "failed", jsonMap(map[string]any{"message": "inbound probe failed", "error": err.Error(), "probes": result})
 		}
 		return "succeeded", jsonMap(map[string]any{"message": "inbound probe completed", "probes": result})
+	case model.AgentTaskTypeProbeExternalEgress:
+		var plan model.ExternalEgressProbePlan
+		if err := json.Unmarshal([]byte(task.PayloadJSON), &plan); err != nil {
+			return "failed", jsonResult(err.Error())
+		}
+		result, err := r.runExternalEgressProbeTask(context.Background(), plan)
+		raw, marshalErr := json.Marshal(result)
+		if marshalErr != nil {
+			return "failed", jsonResult(marshalErr.Error())
+		}
+		if err != nil {
+			return "failed", string(raw)
+		}
+		return "succeeded", string(raw)
 	case model.AgentTaskTypeCollectLogs:
 		result := r.collectLogs(task.PayloadJSON)
 		return "succeeded", jsonMap(result)

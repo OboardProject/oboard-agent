@@ -37,7 +37,7 @@ func (r *Runner) executeDeploymentTask(payload model.DeploymentTaskPayload) (str
 		return r.deploymentReplayResponse(payload)
 	}
 	ctx := context.Background()
-	steps := make([]deploymentStepResult, 0, 11+len(payload.WARPRequests))
+	steps := make([]deploymentStepResult, 0, 12+len(payload.WARPRequests))
 	criticalFailures := 0
 	warnings := 0
 
@@ -192,6 +192,11 @@ func (r *Runner) executeDeploymentTask(payload model.DeploymentTaskPayload) (str
 			add("version_state", "记录部署版本", true, time.Now(), nil, err, false, "部署版本已记录")
 		}
 	}
+	if criticalFailures == 0 && payload.ExternalEgressProbe != nil {
+		started = time.Now()
+		result, err := r.runExternalEgressProbeTask(ctx, *payload.ExternalEgressProbe)
+		add("external_egress_probe", "识别第三方出口地区", false, started, result, err, false, "第三方出口地区已检查")
+	}
 
 	return deploymentTaskResponse(payload.Version, steps, criticalFailures, warnings)
 }
@@ -308,7 +313,7 @@ func int64FromAny(value any) int64 {
 
 func (r *Runner) deploymentReplayResponse(payload model.DeploymentTaskPayload) (string, string) {
 	reports := make(map[int64]model.WARPConfigReport, len(payload.WARPRequests))
-	steps := make([]deploymentStepResult, 0, len(payload.WARPRequests)+1)
+	steps := make([]deploymentStepResult, 0, len(payload.WARPRequests)+3)
 	for _, plan := range payload.WARPRequests {
 		report, err := r.loadPersistedWARPConfig(plan)
 		if err != nil {
@@ -335,5 +340,16 @@ func (r *Runner) deploymentReplayResponse(payload model.DeploymentTaskPayload) (
 		return deploymentTaskResponse(payload.Version, steps, 1, 0)
 	}
 	steps = append(steps, deploymentStepResult{Key: "ssh_inbounds", Label: "应用 SSH 入站", Status: "skipped", Message: "受限 SSH 入站已应用", Result: sshResult})
-	return deploymentTaskResponse(payload.Version, steps, 0, 0)
+	warnings := 0
+	if payload.ExternalEgressProbe != nil {
+		result, probeErr := r.runExternalEgressProbeTask(context.Background(), *payload.ExternalEgressProbe)
+		step := deploymentStepResult{Key: "external_egress_probe", Label: "识别第三方出口地区", Status: "succeeded", Message: "第三方出口地区已检查", Result: result}
+		if probeErr != nil {
+			step.Status = "warning"
+			step.Error = probeErr.Error()
+			warnings++
+		}
+		steps = append(steps, step)
+	}
+	return deploymentTaskResponse(payload.Version, steps, 0, warnings)
 }

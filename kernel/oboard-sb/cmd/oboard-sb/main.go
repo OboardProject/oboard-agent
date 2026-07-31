@@ -82,7 +82,7 @@ func main() {
 	tracker.SetSocketGovernor(socketGovernor)
 	if *api != "" {
 		go func() {
-			if err := serveHealth(ctx, *api, tracker, runtimeTuning, memoryReclaimer, socketGovernor); err != nil && ctx.Err() == nil {
+			if err := serveHealth(ctx, *api, b, tracker, runtimeTuning, memoryReclaimer, socketGovernor); err != nil && ctx.Err() == nil {
 				log.Println(err)
 			}
 		}()
@@ -111,17 +111,18 @@ func printVersion() {
 		"built_at":            version.Date,
 		"sing_box_version":    C.Version,
 		"supported_protocols": minibox.SupportedProtocols,
-		"capabilities":        []string{"trusted_forward_v1"},
+		"capabilities":        []string{"trusted_forward_v1", "outbound_egress_probe_v1"},
 	}
 	data, _ := json.MarshalIndent(payload, "", "  ")
 	fmt.Println(string(data))
 }
 
-func serveHealth(ctx context.Context, listen string, tracker *minibox.RateLimitTracker, tuning minibox.RuntimeTuning, memoryReclaimer *minibox.MemoryReclaimer, socketGovernor *minibox.SocketBufferGovernor) error {
+func serveHealth(ctx context.Context, listen string, instance *box.Box, tracker *minibox.RateLimitTracker, tuning minibox.RuntimeTuning, memoryReclaimer *minibox.MemoryReclaimer, socketGovernor *minibox.SocketBufferGovernor) error {
 	if err := validateLocalAPIListen(listen); err != nil {
 		return err
 	}
 	mux := http.NewServeMux()
+	registerOutboundEgressHandler(mux, instance)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) { _, _ = fmt.Fprintln(w, "ok") })
 	mux.HandleFunc("/version", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

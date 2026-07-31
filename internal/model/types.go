@@ -721,6 +721,7 @@ const (
 	AgentTaskTypeDiagnoseNetwork      = "diagnose_network"
 	AgentTaskTypeProbeInbounds        = "probe_inbounds"
 	AgentTaskTypeProbePortForwards    = "probe_port_forwards"
+	AgentTaskTypeProbeExternalEgress  = "probe_external_egress"
 	AgentTaskTypeDetectMTU            = "detect_mtu"
 	AgentTaskTypeBenchmarkDNS         = "benchmark_dns"
 	AgentTaskTypeCollectLogs          = "collect_logs"
@@ -776,10 +777,38 @@ type DeploymentTaskPayload struct {
 	InboundProbe         *InboundProbePlan          `json:"inbound_probe,omitempty"`
 	ExternalInboundProbe *InboundProbePlan          `json:"external_inbound_probe,omitempty"`
 	PortForwardProbe     *PortForwardPlan           `json:"port_forward_probe,omitempty"`
+	ExternalEgressProbe  *ExternalEgressProbePlan   `json:"external_egress_probe,omitempty"`
 	Tunnels              TunnelPlan                 `json:"tunnels"`
 	SSHInbounds          SSHInboundPlan             `json:"ssh_inbounds"`
 	DNSBenchmark         *DNSBenchmarkPlan          `json:"dns_benchmark,omitempty"`
 	MTUDetection         *MTUDetectionPlan          `json:"mtu_detection,omitempty"`
+}
+
+type ExternalEgressProbePlan struct {
+	Version               int64                       `json:"version"`
+	ExpectedConfigVersion int64                       `json:"expected_config_version,omitempty"`
+	TimeoutMS             int                         `json:"timeout_ms"`
+	Targets               []ExternalEgressProbeTarget `json:"targets"`
+}
+
+type ExternalEgressProbeTarget struct {
+	ProbeID             string `json:"probe_id"`
+	PathID              int64  `json:"path_id"`
+	ExternalOutboundID  int64  `json:"external_outbound_id"`
+	OwnerServerID       int64  `json:"owner_server_id"`
+	OutboundTag         string `json:"outbound_tag"`
+	TopologyFingerprint string `json:"topology_fingerprint"`
+}
+
+type ExternalEgressProbeItem struct {
+	ProbeID string `json:"probe_id"`
+	Status  string `json:"status"`
+	ExitIP  string `json:"exit_ip,omitempty"`
+	Error   string `json:"error,omitempty"`
+}
+
+type ExternalEgressProbeResult struct {
+	Items []ExternalEgressProbeItem `json:"items"`
 }
 
 type IssueCertificateHTTPTaskPayload struct {
