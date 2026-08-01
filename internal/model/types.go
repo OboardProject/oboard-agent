@@ -89,6 +89,14 @@ const (
 	MTUModeApply    MTUMode = "apply"
 )
 
+type TimeCorrectionMode string
+
+const (
+	TimeCorrectionOff  TimeCorrectionMode = "off"
+	TimeCorrectionAuto TimeCorrectionMode = "auto"
+	TimeCorrectionNTP  TimeCorrectionMode = "ntp"
+)
+
 type RouteAction string
 
 const (
@@ -725,6 +733,7 @@ const (
 	AgentTaskTypeBenchmarkDNS         = "benchmark_dns"
 	AgentTaskTypeCollectLogs          = "collect_logs"
 	AgentTaskTypeManageLogs           = "manage_logs"
+	AgentTaskTypeCheckTime            = "check_time"
 	AgentTaskTypeIssueCertificateHTTP = "issue_certificate_http01"
 )
 
@@ -771,7 +780,7 @@ type DeploymentTaskPayload struct {
 	Config               ApplyCoreConfigTaskPayload `json:"config"`
 	ConfigChanged        bool                       `json:"config_changed"`
 	WARPRequests         []WARPRequestPlan          `json:"warp_requests,omitempty"`
-	TimeSync             *TimeSyncPlan              `json:"time_sync,omitempty"`
+	TimeCheck            *TimeCheckPlan             `json:"time_check,omitempty"`
 	PortForwards         PortForwardPlan            `json:"port_forwards"`
 	InboundProbe         *InboundProbePlan          `json:"inbound_probe,omitempty"`
 	ExternalInboundProbe *InboundProbePlan          `json:"external_inbound_probe,omitempty"`
@@ -865,22 +874,22 @@ type AgentUpdateRequest struct {
 }
 
 type AgentConfigPatch struct {
-	ControllerURL           string `json:"controller_url,omitempty"`
-	StateDir                string `json:"state_dir,omitempty"`
-	CoreBinary              string `json:"core_binary,omitempty"`
-	CoreService             string `json:"core_service,omitempty"`
-	CommandTimeoutSeconds   int    `json:"command_timeout_seconds,omitempty"`
-	ReloadCommand           string `json:"reload_command,omitempty"`
-	RestartCommand          string `json:"restart_command,omitempty"`
-	TimeSyncCommand         string `json:"time_sync_command,omitempty"`
-	TimeSyncIntervalSeconds int    `json:"time_sync_interval_seconds,omitempty"`
-	LogMaxMB                int    `json:"log_max_mb,omitempty"`
-	LogBackups              int    `json:"log_backups,omitempty"`
-	CoreLogMaxMB            int    `json:"core_log_max_mb,omitempty"`
-	CoreLogBackups          int    `json:"core_log_backups,omitempty"`
-	UpdateSource            string `json:"update_source,omitempty"`
-	AllowPanelUpdate        bool   `json:"allow_panel_update,omitempty"`
-	UpdateRepo              string `json:"update_repo,omitempty"`
+	ControllerURL         string             `json:"controller_url,omitempty"`
+	StateDir              string             `json:"state_dir,omitempty"`
+	CoreBinary            string             `json:"core_binary,omitempty"`
+	CoreService           string             `json:"core_service,omitempty"`
+	CommandTimeoutSeconds int                `json:"command_timeout_seconds,omitempty"`
+	ReloadCommand         string             `json:"reload_command,omitempty"`
+	RestartCommand        string             `json:"restart_command,omitempty"`
+	TimeSyncCommand       string             `json:"time_sync_command,omitempty"`
+	TimeCorrectionMode    TimeCorrectionMode `json:"time_correction_mode,omitempty"`
+	LogMaxMB              int                `json:"log_max_mb,omitempty"`
+	LogBackups            int                `json:"log_backups,omitempty"`
+	CoreLogMaxMB          int                `json:"core_log_max_mb,omitempty"`
+	CoreLogBackups        int                `json:"core_log_backups,omitempty"`
+	UpdateSource          string             `json:"update_source,omitempty"`
+	AllowPanelUpdate      bool               `json:"allow_panel_update,omitempty"`
+	UpdateRepo            string             `json:"update_repo,omitempty"`
 }
 
 type DiagnosticTarget struct {
@@ -947,11 +956,27 @@ type ManageLogsTaskPayload struct {
 	Services string `json:"services"`
 }
 
-type TimeSyncPlan struct {
-	Version         int64    `json:"version"`
-	Mode            string   `json:"mode"`
-	IntervalSeconds int      `json:"interval_seconds"`
-	Servers         []string `json:"servers"`
+type TimeCheckPlan struct {
+	Version          int64              `json:"version"`
+	CorrectionMode   TimeCorrectionMode `json:"correction_mode"`
+	ThresholdSeconds int                `json:"threshold_seconds"`
+	NTPServers       []string           `json:"ntp_servers"`
+	Force            bool               `json:"force,omitempty"`
+}
+
+type TimeCheckResult struct {
+	Status               string             `json:"status"`
+	CorrectionMode       TimeCorrectionMode `json:"correction_mode"`
+	RawOffsetMS          int64              `json:"raw_offset_ms"`
+	EffectiveOffsetMS    int64              `json:"effective_offset_ms"`
+	Source               string             `json:"source"`
+	CheckedAt            time.Time          `json:"checked_at"`
+	SystemSyncAttempted  bool               `json:"system_sync_attempted"`
+	SystemSyncSucceeded  bool               `json:"system_sync_succeeded"`
+	SystemSyncError      string             `json:"system_sync_error,omitempty"`
+	LogicalTimeActive    bool               `json:"logical_time_active"`
+	UnsupportedTimePaths []string           `json:"unsupported_time_paths,omitempty"`
+	Error                string             `json:"error,omitempty"`
 }
 
 type NotificationChannel struct {

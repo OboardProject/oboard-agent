@@ -80,7 +80,7 @@ func (t *RateLimitTracker) recordConnectionStart(state *runtimeState, metadata a
 		outboundTag,
 		outboundType,
 	}, "\x00")
-	now := time.Now().UTC()
+	now := t.timeNow().UTC()
 
 	t.auditMu.Lock()
 	defer t.auditMu.Unlock()
@@ -140,7 +140,7 @@ func (t *RateLimitTracker) recordConnectionEnd(key string) {
 				delete(t.auditActiveByUser, bucket.UserID)
 			}
 		}
-		bucket.EndedAt = time.Now().UTC().Format(time.RFC3339Nano)
+		bucket.EndedAt = t.timeNow().UTC().Format(time.RFC3339Nano)
 	}
 }
 
@@ -152,7 +152,7 @@ func (t *RateLimitTracker) DrainConnectionAudits() []ConnectionAuditBucket {
 	}
 	t.auditMu.Lock()
 	defer t.auditMu.Unlock()
-	now := time.Now().UTC().Format(time.RFC3339Nano)
+	now := t.timeNow().UTC().Format(time.RFC3339Nano)
 	items := make([]ConnectionAuditBucket, 0, len(t.auditBuckets))
 	for key, bucket := range t.auditBuckets {
 		if bucket == nil {

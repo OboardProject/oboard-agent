@@ -15,6 +15,7 @@ import (
 	"github.com/sagernet/sing/common/bufio"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
+	"github.com/sagernet/sing/common/ntp"
 	"github.com/sagernet/sing/service"
 	"golang.org/x/time/rate"
 )
@@ -36,6 +37,14 @@ type RateLimitTracker struct {
 	trustedInbounds   []string
 	activeTCP         atomic.Int64
 	socketGovernor    *SocketBufferGovernor
+	now               func() time.Time
+}
+
+func (t *RateLimitTracker) timeNow() time.Time {
+	if t != nil && t.now != nil {
+		return t.now()
+	}
+	return time.Now()
 }
 
 func (t *RateLimitTracker) SetSocketGovernor(governor *SocketBufferGovernor) {
@@ -51,6 +60,7 @@ type runtimeState struct {
 	config   atomic.Pointer[runtimeConfig]
 	periodMu sync.Mutex
 	usage    *runtimeUserUsage
+	now      func() time.Time
 }
 
 type runtimeConfig struct {
@@ -98,7 +108,14 @@ type TrafficCounterAcknowledgement struct {
 }
 
 func NewRateLimitTracker(metadata RuntimeMetadata) *RateLimitTracker {
-	tracker := &RateLimitTracker{states: map[string]*runtimeState{}, active: map[string]map[*trackedConn]struct{}{}, activePacket: map[string]map[*trackedPacketConn]struct{}{}}
+	return newRateLimitTracker(metadata, time.Now)
+}
+
+func newRateLimitTracker(metadata RuntimeMetadata, now func() time.Time) *RateLimitTracker {
+	if now == nil {
+		now = time.Now
+	}
+	tracker := &RateLimitTracker{states: map[string]*runtimeState{}, active: map[string]map[*trackedConn]struct{}{}, activePacket: map[string]map[*trackedPacketConn]struct{}{}, now: now}
 	tracker.auditEnabled.Store(metadata.ConnectionAudit != nil && metadata.ConnectionAudit.Enabled)
 	if metadata.TrustedForward != nil {
 		for _, receiver := range metadata.TrustedForward.Receivers {
@@ -125,7 +142,7 @@ func NewRateLimitTracker(metadata RuntimeMetadata) *RateLimitTracker {
 			limit.Billable = true
 		}
 		key := "user:" + user
-		state := newRuntimeState(key, user, "", limit)
+		state := newRuntimeStateWithClock(key, user, "", limit, now)
 		state.usage = usageFor(limit.UserID)
 		tracker.states[key] = state
 	}
@@ -134,7 +151,7 @@ func NewRateLimitTracker(metadata RuntimeMetadata) *RateLimitTracker {
 			continue
 		}
 		key := "inbound:" + inbound
-		state := newRuntimeState(key, "", inbound, limit)
+		state := newRuntimeStateWithClock(key, "", inbound, limit, now)
 		state.usage = usageFor(limit.UserID)
 		tracker.states[key] = state
 	}
@@ -202,7 +219,14 @@ func (t *RateLimitTracker) ConnectionAuditEnabled() bool {
 }
 
 func newRuntimeState(key, user, inbound string, policy RuntimeUserLimit) *runtimeState {
-	state := &runtimeState{key: key, user: user, inbound: inbound}
+	return newRuntimeStateWithClock(key, user, inbound, policy, time.Now)
+}
+
+func newRuntimeStateWithClock(key, user, inbound string, policy RuntimeUserLimit, now func() time.Time) *runtimeState {
+	if now == nil {
+		now = time.Now
+	}
+	state := &runtimeState{key: key, user: user, inbound: inbound, now: now}
 	state.storePolicyLocked(policy, true)
 	return state
 }
@@ -224,7 +248,7 @@ func (s *runtimeState) currentConfig() *runtimeConfig {
 		return config
 	}
 	end, err := time.Parse(time.RFC3339Nano, config.policy.PeriodEnd)
-	if err != nil || time.Now().Before(end) {
+	if err != nil || s.now().Before(end) {
 		return config
 	}
 
@@ -233,7 +257,7 @@ func (s *runtimeState) currentConfig() *runtimeConfig {
 	config = s.loadedConfig()
 	policy := config.policy
 	end, err = time.Parse(time.RFC3339Nano, policy.PeriodEnd)
-	if err != nil || time.Now().Before(end) {
+	if err != nil || s.now().Before(end) {
 		return config
 	}
 	loc := time.FixedZone("Asia/Shanghai", 8*3600)
@@ -242,7 +266,7 @@ func (s *runtimeState) currentConfig() *runtimeConfig {
 			loc = loaded
 		}
 	}
-	periodKey, start, nextEnd := runtimeTrafficWindow(time.Now(), policy.ResetMode, policy.ResetDay, loc)
+	periodKey, start, nextEnd := runtimeTrafficWindow(s.now(), policy.ResetMode, policy.ResetDay, loc)
 	policy.PeriodKey = periodKey
 	policy.PeriodStart = start.UTC().Format(time.RFC3339Nano)
 	policy.PeriodEnd = nextEnd.UTC().Format(time.RFC3339Nano)
@@ -533,7 +557,7 @@ func newRuntimeLimiters(limit RuntimeUserLimit) (*rate.Limiter, *rate.Limiter) {
 }
 
 func AttachRuntimeTrackers(ctx context.Context, metadata RuntimeMetadata) *RateLimitTracker {
-	tracker := NewRateLimitTracker(metadata)
+	tracker := newRateLimitTracker(metadata, ntp.TimeFuncFromContext(ctx))
 	if !tracker.Enabled() {
 		return tracker
 	}

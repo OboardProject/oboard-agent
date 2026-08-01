@@ -73,6 +73,7 @@ func (r *Runner) runCoreWatchdogCheck(ctx context.Context, status *coreWatchdogS
 	r.coreLifecycleMu.Lock()
 	defer r.coreLifecycleMu.Unlock()
 	if err := r.coreServiceActive(); err == nil {
+		wasRunning := status.State == "running"
 		status.State = "running"
 		status.LastError = ""
 		if status.StableSince.IsZero() {
@@ -81,6 +82,9 @@ func (r *Runner) runCoreWatchdogCheck(ctx context.Context, status *coreWatchdogS
 		if now.Sub(status.StableSince) >= coreWatchdogStableReset {
 			status.Consecutive = 0
 			status.NextAttemptAt = time.Time{}
+		}
+		if !wasRunning {
+			_ = r.configureCoreClock(ctx)
 		}
 		r.writeCoreWatchdogStatus(*status)
 		return
@@ -126,6 +130,7 @@ func (r *Runner) runCoreWatchdogCheck(ctx context.Context, status *coreWatchdogS
 	status.State = "recovered"
 	status.LastError = ""
 	status.StableSince = time.Now().UTC()
+	_ = r.configureCoreClock(ctx)
 	status.NextAttemptAt = now.Add(coreWatchdogBackoff(status.Consecutive + 1))
 	log.Printf("core watchdog: %s recovered successfully", status.Service)
 	r.writeCoreWatchdogStatus(*status)

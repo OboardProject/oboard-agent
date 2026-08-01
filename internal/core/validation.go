@@ -103,7 +103,7 @@ func validateDNSCandidate(candidate model.DNSCandidate) error {
 		}
 	}
 	if candidate.Path != "" {
-		if !strings.HasPrefix(candidate.Path, "/") || strings.Contains(candidate.Path, "://") || strings.Contains(candidate.Path, "@") || len(candidate.Path) > 256 {
+		if !strings.HasPrefix(candidate.Path, "/") || strings.Contains(candidate.Path, "://") || len(candidate.Path) > 256 {
 			return errors.New("dns path must start with / and not contain unsafe characters")
 		}
 		for _, r := range candidate.Path {

@@ -333,7 +333,7 @@ func validTrustedForwardMAC(payload, received, key []byte) bool {
 }
 
 func (r *trustedForwardReceiver) validTimestamp(timestamp int64) bool {
-	now := time.Now().Unix()
+	now := r.tracker.timeNow().Unix()
 	delta := now - timestamp
 	if delta < 0 {
 		delta = -delta

@@ -3,6 +3,7 @@ package agent
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -31,32 +32,32 @@ import (
 )
 
 type Config struct {
-	ConfigPath              string `json:"-"`
-	ControllerURL           string `json:"controller_url"`
-	ServerID                int64  `json:"server_id"`
-	AgentID                 string `json:"agent_id"`
-	AgentToken              string `json:"agent_token"`
-	StateDir                string `json:"state_dir"`
-	CoreBinary              string `json:"core_binary"`
-	CoreService             string `json:"core_service"`
-	ResourceProfile         string `json:"resource_profile"`
-	CommandTimeoutSeconds   int    `json:"command_timeout_seconds"`
-	ReloadCommand           string `json:"reload_command"`
-	RestartCommand          string `json:"restart_command"`
-	TimeSyncCommand         string `json:"time_sync_command"`
-	TimeSyncIntervalSeconds int    `json:"time_sync_interval_seconds"`
-	LogMaxMB                int    `json:"log_max_mb"`
-	LogBackups              int    `json:"log_backups"`
-	CoreLogMaxMB            int    `json:"core_log_max_mb"`
-	CoreLogBackups          int    `json:"core_log_backups"`
-	LogBackupsSet           bool   `json:"-"`
-	CoreLogBackupsSet       bool   `json:"-"`
-	WarpCommand             string `json:"warp_command"`
-	UpdateSource            string `json:"update_source"`
-	AllowPanelUpdate        bool   `json:"allow_panel_update"`
-	AllowInsecureController bool   `json:"allow_insecure_controller"`
-	UpdateRepo              string `json:"update_repo,omitempty"`
-	ConnectionAuditEnabled  bool   `json:"connection_audit_enabled"`
+	ConfigPath              string                   `json:"-"`
+	ControllerURL           string                   `json:"controller_url"`
+	ServerID                int64                    `json:"server_id"`
+	AgentID                 string                   `json:"agent_id"`
+	AgentToken              string                   `json:"agent_token"`
+	StateDir                string                   `json:"state_dir"`
+	CoreBinary              string                   `json:"core_binary"`
+	CoreService             string                   `json:"core_service"`
+	ResourceProfile         string                   `json:"resource_profile"`
+	CommandTimeoutSeconds   int                      `json:"command_timeout_seconds"`
+	ReloadCommand           string                   `json:"reload_command"`
+	RestartCommand          string                   `json:"restart_command"`
+	TimeSyncCommand         string                   `json:"time_sync_command"`
+	TimeCorrectionMode      model.TimeCorrectionMode `json:"time_correction_mode"`
+	LogMaxMB                int                      `json:"log_max_mb"`
+	LogBackups              int                      `json:"log_backups"`
+	CoreLogMaxMB            int                      `json:"core_log_max_mb"`
+	CoreLogBackups          int                      `json:"core_log_backups"`
+	LogBackupsSet           bool                     `json:"-"`
+	CoreLogBackupsSet       bool                     `json:"-"`
+	WarpCommand             string                   `json:"warp_command"`
+	UpdateSource            string                   `json:"update_source"`
+	AllowPanelUpdate        bool                     `json:"allow_panel_update"`
+	AllowInsecureController bool                     `json:"allow_insecure_controller"`
+	UpdateRepo              string                   `json:"update_repo,omitempty"`
+	ConnectionAuditEnabled  bool                     `json:"connection_audit_enabled"`
 }
 
 type Runner struct {
@@ -106,7 +107,10 @@ type Runner struct {
 	builtinForwardStops        map[int64]func()
 	forwardProbeRules          []model.PortForward
 	lastForwardProbe           map[int64]time.Time
-	lastTimeSyncCheck          time.Time
+	clock                      *runtimeClock
+	controllerClockMu          sync.RWMutex
+	controllerReference        time.Time
+	controllerReferenceAnchor  time.Time
 	resources                  ResourceInfo
 	tuning                     RuntimeTuning
 	sshInboundManager          *sshInboundManager
@@ -126,7 +130,9 @@ func New(cfg Config) *Runner {
 	cfg = normalizeConfig(cfg)
 	resources := DetectResourceInfo(cfg.ResourceProfile)
 	tuning := ApplyRuntimeTuning(resources)
-	runner := &Runner{client: &http.Client{Timeout: 20 * time.Second, Transport: lowOverheadTransport()}, coreClient: unixHTTPClient(coreAPISocket), builtinForwardStops: map[int64]func(){}, lastForwardProbe: map[int64]time.Time{}, resources: resources, tuning: tuning, hostInfo: detectHostStaticInfo(), logDir: "/var/log", logMaintenanceEvery: logMaintenanceInterval, monitoringMode: "lightweight", connectionAudit: newConnectionAuditAccumulator(cfg.ConnectionAuditEnabled)}
+	clock := newRuntimeClock(cfg.StateDir)
+	runner := &Runner{coreClient: unixHTTPClient(coreAPISocket), builtinForwardStops: map[int64]func(){}, lastForwardProbe: map[int64]time.Time{}, resources: resources, tuning: tuning, hostInfo: detectHostStaticInfo(), logDir: "/var/log", logMaintenanceEvery: logMaintenanceInterval, monitoringMode: "lightweight", connectionAudit: newConnectionAuditAccumulator(cfg.ConnectionAuditEnabled), clock: clock}
+	runner.client = &http.Client{Timeout: 20 * time.Second, Transport: runner.lowOverheadTransport()}
 	runner.storeConfig(cfg)
 	return runner
 }
@@ -164,8 +170,8 @@ func (cfg Config) Validate() error {
 	if cfg.CommandTimeoutSeconds < 5 || cfg.CommandTimeoutSeconds > 120 {
 		return fmt.Errorf("command_timeout_seconds must be between 5 and 120")
 	}
-	if cfg.TimeSyncIntervalSeconds < 300 || cfg.TimeSyncIntervalSeconds > 30*24*60*60 {
-		return fmt.Errorf("time_sync_interval_seconds must be between 300 and 2592000")
+	if normalizeTimeCorrectionMode(cfg.TimeCorrectionMode) == "" {
+		return fmt.Errorf("time_correction_mode must be off, auto, or ntp")
 	}
 	if cfg.LogMaxMB < 1 || cfg.LogMaxMB > 1024 {
 		return fmt.Errorf("log_max_mb must be between 1 and 1024")
@@ -250,8 +256,8 @@ func normalizeConfig(cfg Config) Config {
 	if cfg.TimeSyncCommand == "" {
 		cfg.TimeSyncCommand = "auto"
 	}
-	if cfg.TimeSyncIntervalSeconds <= 0 {
-		cfg.TimeSyncIntervalSeconds = 86400
+	if normalizeTimeCorrectionMode(cfg.TimeCorrectionMode) == "" {
+		cfg.TimeCorrectionMode = model.TimeCorrectionOff
 	}
 	if cfg.LogMaxMB <= 0 {
 		cfg.LogMaxMB = 16
@@ -383,7 +389,15 @@ func ValidateManagedCommand(field, value string) error {
 	}
 }
 
+func (r *Runner) lowOverheadTransport() *http.Transport {
+	return lowOverheadTransportWithClock(r.clock.Now)
+}
+
 func lowOverheadTransport() *http.Transport {
+	return lowOverheadTransportWithClock(time.Now)
+}
+
+func lowOverheadTransportWithClock(now func() time.Time) *http.Transport {
 	return &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
 		MaxIdleConns:          2,
@@ -393,6 +407,7 @@ func lowOverheadTransport() *http.Transport {
 		TLSHandshakeTimeout:   10 * time.Second,
 		ResponseHeaderTimeout: 20 * time.Second,
 		DisableCompression:    true,
+		TLSClientConfig:       &tls.Config{MinVersion: tls.VersionTLS12, Time: now},
 	}
 }
 
@@ -439,6 +454,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	r.startLogMaintenance(ctx)
 	r.startTrafficLoop(ctx)
 	_ = r.configureCoreConnectionAudit(ctx, cfg.ConnectionAuditEnabled)
+	_ = r.configureCoreClock(ctx)
 	go r.startCoreWatchdog(ctx)
 	backoff := 5 * time.Second
 	for {
@@ -462,7 +478,7 @@ func (r *Runner) connect(ctx context.Context) error {
 		return err
 	}
 	header := http.Header{"Authorization": []string{"Bearer " + cfg.AgentToken}, "X-Agent-ID": []string{cfg.AgentID}}
-	dialer := websocket.Dialer{ReadBufferSize: 1024, WriteBufferSize: 1024, EnableCompression: false, HandshakeTimeout: 10 * time.Second}
+	dialer := websocket.Dialer{ReadBufferSize: 1024, WriteBufferSize: 1024, EnableCompression: false, HandshakeTimeout: 10 * time.Second, TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, Time: r.clock.Now}}
 	conn, _, err := dialer.DialContext(ctx, url, header)
 	if err != nil {
 		return err
@@ -489,9 +505,13 @@ func (r *Runner) connect(ctx context.Context) error {
 			MonitoringMode           string           `json:"monitoring_mode"`
 			ConnectivityProbeEnabled bool             `json:"connectivity_probe_enabled"`
 			ConnectionAuditEnabled   bool             `json:"connection_audit_enabled"`
+			ControllerTime           time.Time        `json:"ts"`
 		}
 		if err := conn.ReadJSON(&msg); err != nil {
 			return err
+		}
+		if !msg.ControllerTime.IsZero() {
+			r.setControllerReference(msg.ControllerTime)
 		}
 		switch msg.Type {
 		case "hello":
@@ -533,7 +553,6 @@ func (r *Runner) connect(ctx context.Context) error {
 			r.setConnectionAuditPolicy(msg.ConnectionAuditEnabled)
 			_ = r.maybeRunPeriodicDNSBenchmark(ctx)
 			_ = r.maybeRunPeriodicForwardProbes(ctx)
-			_ = r.maybeRunPeriodicTimeSync(ctx)
 			_ = conn.WriteJSON(map[string]any{"type": "health_report", "health_report": r.Probe(false)})
 		}
 	}
@@ -674,6 +693,20 @@ func (r *Runner) ExecuteAgentTask(task model.AgentTask) (string, string) {
 			return "failed", jsonMap(result)
 		}
 		return "succeeded", jsonMap(result)
+	case model.AgentTaskTypeCheckTime:
+		var plan model.TimeCheckPlan
+		if err := json.Unmarshal([]byte(task.PayloadJSON), &plan); err != nil {
+			return "failed", jsonResult(err.Error())
+		}
+		result, err := r.runTimeCheckTask(context.Background(), plan)
+		raw, marshalErr := json.Marshal(result)
+		if marshalErr != nil {
+			return "failed", jsonResult(marshalErr.Error())
+		}
+		if err != nil {
+			return "failed", string(raw)
+		}
+		return "succeeded", string(raw)
 	case model.AgentTaskTypeDetectMTU:
 		var plan model.MTUDetectionPlan
 		if err := json.Unmarshal([]byte(task.PayloadJSON), &plan); err != nil {
@@ -850,8 +883,8 @@ func (r *Runner) updateAgentConfig(patch Config, fields map[string]json.RawMessa
 	if strings.TrimSpace(patch.TimeSyncCommand) != "" {
 		next.TimeSyncCommand = strings.TrimSpace(patch.TimeSyncCommand)
 	}
-	if patch.TimeSyncIntervalSeconds > 0 {
-		next.TimeSyncIntervalSeconds = patch.TimeSyncIntervalSeconds
+	if normalizeTimeCorrectionMode(patch.TimeCorrectionMode) != "" {
+		next.TimeCorrectionMode = normalizeTimeCorrectionMode(patch.TimeCorrectionMode)
 	}
 	if _, ok := fields["log_max_mb"]; ok {
 		next.LogMaxMB = patch.LogMaxMB
@@ -1421,6 +1454,9 @@ func (r *Runner) applyCoreConfigUnlocked(version int64, config string) (map[stri
 		if err := r.reconcileSharedCoreAndSSHTrafficPolicies(context.Background(), []byte(config)); err != nil {
 			result["runtime_policy_error"] = err.Error()
 			return result, fmt.Errorf("sync shared core/SSH runtime policy: %w", err)
+		}
+		if err := r.configureCoreClock(context.Background()); err != nil {
+			result["runtime_clock_error"] = err.Error()
 		}
 		return result, nil
 	}

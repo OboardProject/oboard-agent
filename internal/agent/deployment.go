@@ -105,11 +105,10 @@ func (r *Runner) executeDeploymentTask(payload model.DeploymentTaskPayload) (str
 		return deploymentTaskResponse(payload.Version, steps, criticalFailures, warnings)
 	}
 
-	if payload.TimeSync != nil {
+	if payload.TimeCheck != nil {
 		started := time.Now()
-		result, err := r.runTimeSyncTask(ctx, *payload.TimeSync)
-		skipped, _ := result["skipped"].(bool)
-		add("time_sync", "同步时间", false, started, result, err, skipped, "系统时间已检查")
+		result, err := r.runTimeCheckTask(ctx, *payload.TimeCheck)
+		add("time_check", "检测时间", false, started, result, err, false, "系统时间已检查")
 	}
 
 	started = time.Now()

@@ -11,6 +11,7 @@ import (
 	"syscall"
 
 	"github.com/OboardProject/oboard-agent/internal/agent"
+	"github.com/OboardProject/oboard-agent/internal/model"
 	"github.com/OboardProject/oboard-agent/internal/version"
 )
 
@@ -30,7 +31,7 @@ func main() {
 	reloadCommand := flag.String("reload-command", "auto", "core hot reload preset: auto, none, systemd-reload, or openrc-reload")
 	restartCommand := flag.String("restart-command", "auto", "core restart preset: auto, none, systemd-restart, or openrc-restart")
 	timeSyncCommand := flag.String("time-sync-command", "auto", "time sync preset: auto, none, chrony, or systemd-timesyncd")
-	timeSyncInterval := flag.Int("time-sync-interval", 86400, "periodic time sync interval in seconds")
+	timeCorrectionMode := flag.String("time-correction-mode", "off", "time correction mode: off, auto, or ntp")
 	updateSource := flag.String("update-source", "", "agent update source: panel or github")
 	allowPanelUpdate := flag.Bool("allow-panel-update", false, "allow future Agent updates from the controller panel")
 	updateRepo := flag.String("update-repo", "", "GitHub repository used for release updates, for example OboardProject/oboard-agent")
@@ -88,8 +89,8 @@ func main() {
 	if provided["time-sync-command"] {
 		cfg.TimeSyncCommand = *timeSyncCommand
 	}
-	if provided["time-sync-interval"] {
-		cfg.TimeSyncIntervalSeconds = *timeSyncInterval
+	if provided["time-correction-mode"] {
+		cfg.TimeCorrectionMode = model.TimeCorrectionMode(*timeCorrectionMode)
 	}
 	if provided["update-source"] {
 		cfg.UpdateSource = *updateSource

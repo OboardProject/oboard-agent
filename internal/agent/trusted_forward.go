@@ -95,6 +95,10 @@ func appendTrustedForwardMAC(frame, key []byte, size int) []byte {
 }
 
 func encodeTrustedForwardTCP(sender *model.TrustedForwardSender, source netip.AddrPort, payload []byte, frameType byte) ([]byte, error) {
+	return encodeTrustedForwardTCPAt(sender, source, payload, frameType, time.Now())
+}
+
+func encodeTrustedForwardTCPAt(sender *model.TrustedForwardSender, source netip.AddrPort, payload []byte, frameType byte, now time.Time) ([]byte, error) {
 	key, err := trustedForwardKey(sender)
 	if err != nil {
 		return nil, err
@@ -102,7 +106,7 @@ func encodeTrustedForwardTCP(sender *model.TrustedForwardSender, source netip.Ad
 	if len(payload) > trustedForwardTCPFirstBytes || len(payload) > math.MaxUint16 {
 		return nil, errors.New("trusted forward TCP preface payload is too large")
 	}
-	unixSeconds := time.Now().Unix()
+	unixSeconds := now.Unix()
 	if unixSeconds < 0 {
 		return nil, errors.New("trusted forward TCP timestamp is invalid")
 	}
@@ -133,11 +137,15 @@ func encodeTrustedForwardTCP(sender *model.TrustedForwardSender, source netip.Ad
 }
 
 func encodeTrustedForwardUDP(sender *model.TrustedForwardSender, source netip.AddrPort, sessionID [8]byte, counter uint32, payload []byte, frameType byte) ([]byte, error) {
+	return encodeTrustedForwardUDPAt(sender, source, sessionID, counter, payload, frameType, time.Now())
+}
+
+func encodeTrustedForwardUDPAt(sender *model.TrustedForwardSender, source netip.AddrPort, sessionID [8]byte, counter uint32, payload []byte, frameType byte, now time.Time) ([]byte, error) {
 	key, err := trustedForwardKey(sender)
 	if err != nil {
 		return nil, err
 	}
-	unixSeconds := time.Now().Unix()
+	unixSeconds := now.Unix()
 	if unixSeconds < 0 || unixSeconds > math.MaxUint32 {
 		return nil, errors.New("trusted forward UDP timestamp is invalid")
 	}
@@ -174,6 +182,10 @@ func writeTrustedForward(w io.Writer, payload []byte) error {
 }
 
 func probeTrustedForward(rule model.PortForward, mode string) model.PortForwardProbeResult {
+	return probeTrustedForwardAt(rule, mode, time.Now)
+}
+
+func probeTrustedForwardAt(rule model.PortForward, mode string, now func() time.Time) model.PortForwardProbeResult {
 	result := model.PortForwardProbeResult{PortForwardID: rule.ID, Mode: mode, SampleCount: 1, ResultJSON: "{}"}
 	target := net.JoinHostPort(rule.TargetAddress, fmt.Sprint(rule.TargetPort))
 	started := time.Now()
@@ -188,7 +200,7 @@ func probeTrustedForward(rule model.PortForward, mode string) model.PortForwardP
 			source, err = trustedForwardSource(conn.LocalAddr())
 			if err == nil {
 				var frame []byte
-				frame, err = encodeTrustedForwardTCP(rule.TrustedForward, source, nil, trustedForwardTCPProbe)
+				frame, err = encodeTrustedForwardTCPAt(rule.TrustedForward, source, nil, trustedForwardTCPProbe, now())
 				if err == nil {
 					err = writeTrustedForward(conn, frame)
 				}
@@ -220,7 +232,7 @@ func probeTrustedForward(rule model.PortForward, mode string) model.PortForwardP
 				_, err = rand.Read(sessionID[:])
 				if err == nil {
 					var frame []byte
-					frame, err = encodeTrustedForwardUDP(rule.TrustedForward, source, sessionID, 1, nil, trustedForwardUDPProbe)
+					frame, err = encodeTrustedForwardUDPAt(rule.TrustedForward, source, sessionID, 1, nil, trustedForwardUDPProbe, now())
 					if err == nil {
 						err = writeTrustedForward(conn, frame)
 					}

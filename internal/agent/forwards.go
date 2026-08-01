@@ -673,7 +673,7 @@ func (r *Runner) startBuiltinUDPForward(rule forwardRule) (func(), error) {
 					if sourceErr != nil {
 						continue
 					}
-					payload, err = encodeTrustedForwardUDP(rule.TrustedForward, source, session.sessionID, counter, payload, trustedForwardUDPData)
+					payload, err = encodeTrustedForwardUDPAt(rule.TrustedForward, source, session.sessionID, counter, payload, trustedForwardUDPData, r.clock.Now())
 					if err != nil {
 						continue
 					}
@@ -729,7 +729,7 @@ func (r *Runner) handleBuiltinForwardConn(src net.Conn, rule forwardRule) {
 		if err != nil {
 			return
 		}
-		trustedPreface, err = encodeTrustedForwardTCP(rule.TrustedForward, source, first[:n], trustedForwardTCPData)
+		trustedPreface, err = encodeTrustedForwardTCPAt(rule.TrustedForward, source, first[:n], trustedForwardTCPData, r.clock.Now())
 		if err != nil {
 			return
 		}
@@ -842,7 +842,7 @@ func (r *Runner) runForwardProbeTask(ctx context.Context, rules []model.PortForw
 		if rule.ProbeMode == "never" {
 			continue
 		}
-		res := probeForward(rule, mode)
+		res := r.probeForward(rule, mode)
 		results = append(results, res)
 		if err := r.reportForwardProbe(ctx, res); err != nil && reportErr == nil {
 			reportErr = err
@@ -852,8 +852,16 @@ func (r *Runner) runForwardProbeTask(ctx context.Context, rules []model.PortForw
 }
 
 func probeForward(rule model.PortForward, mode string) model.PortForwardProbeResult {
+	return probeForwardAt(rule, mode, time.Now)
+}
+
+func (r *Runner) probeForward(rule model.PortForward, mode string) model.PortForwardProbeResult {
+	return probeForwardAt(rule, mode, r.clock.Now)
+}
+
+func probeForwardAt(rule model.PortForward, mode string, now func() time.Time) model.PortForwardProbeResult {
 	if rule.TrustedForward != nil {
-		return probeTrustedForward(rule, mode)
+		return probeTrustedForwardAt(rule, mode, now)
 	}
 	res := model.PortForwardProbeResult{PortForwardID: rule.ID, Mode: mode, ResultJSON: "{}"}
 	if rule.Protocol == model.ForwardProtocolUDP {

@@ -7,7 +7,7 @@ import (
 	"github.com/sagernet/sing-box/adapter/endpoint"
 	"github.com/sagernet/sing-box/adapter/inbound"
 	"github.com/sagernet/sing-box/adapter/outbound"
-	"github.com/sagernet/sing-box/adapter/service"
+	boxService "github.com/sagernet/sing-box/adapter/service"
 	"github.com/sagernet/sing-box/dns"
 	dnsTransport "github.com/sagernet/sing-box/dns/transport"
 	dnsHosts "github.com/sagernet/sing-box/dns/transport/hosts"
@@ -21,6 +21,8 @@ import (
 	"github.com/sagernet/sing-box/protocol/socks"
 	"github.com/sagernet/sing-box/protocol/vless"
 	"github.com/sagernet/sing-box/protocol/wireguard"
+	"github.com/sagernet/sing/common/ntp"
+	singService "github.com/sagernet/sing/service"
 
 	"github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/protocol/mieru"
 )
@@ -35,7 +37,7 @@ var SupportedProtocols = []string{"vless", "hysteria2", "anytls", "shadowsocks",
 //
 // This mirrors the mini-sb-agent optimisation approach: instead of importing
 // sing-box's full command and default registry, we construct a minimal registry.
-func Context(parent context.Context) context.Context {
+func Context(parent context.Context, clocks ...*RuntimeClock) context.Context {
 	inbounds := inbound.NewRegistry()
 	vless.RegisterInbound(inbounds)
 	hysteria2.RegisterInbound(inbounds)
@@ -65,5 +67,11 @@ func Context(parent context.Context) context.Context {
 	dnsLocal.RegisterTransport(dnsTransports)
 	dnsHosts.RegisterTransport(dnsTransports)
 
-	return box.Context(parent, inbounds, outbounds, endpoints, dnsTransports, service.NewRegistry())
+	ctx := box.Context(parent, inbounds, outbounds, endpoints, dnsTransports, boxService.NewRegistry())
+	clock := NewRuntimeClock()
+	if len(clocks) > 0 && clocks[0] != nil {
+		clock = clocks[0]
+	}
+	singService.MustRegister[ntp.TimeService](ctx, clock)
+	return ctx
 }

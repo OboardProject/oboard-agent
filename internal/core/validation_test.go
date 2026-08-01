@@ -33,6 +33,20 @@ func TestValidateDNSCandidatesRejectsPrivateAddress(t *testing.T) {
 	}
 }
 
+func TestValidateDNSCandidatesAllowsAtSignInDoHPath(t *testing.T) {
+	err := ValidateDNSCandidates([]model.DNSCandidate{{
+		Tag:       "novaxns",
+		Transport: model.DNSTransportDoH,
+		Server:    "global.novaxns.one",
+		Port:      443,
+		Path:      "/@hockey2168/dns-query",
+		TLSName:   "global.novaxns.one",
+	}})
+	if err != nil {
+		t.Fatalf("custom DoH path rejected: %v", err)
+	}
+}
+
 func TestValidateTunnelConfigRejectsUnsafeValues(t *testing.T) {
 	err := ValidateTunnelConfig(model.Tunnel{Type: model.TunnelTypeSSH, ConfigJSON: `{"user":"root","extra_args":["-o","ProxyCommand=sh -c id"]}`})
 	if err == nil || !strings.Contains(err.Error(), "extra_args") {

@@ -39,8 +39,8 @@ func TestNormalizeConfigResourceDefaults(t *testing.T) {
 	if cfg.ReloadCommand != "auto" {
 		t.Fatalf("reload command = %q, want auto", cfg.ReloadCommand)
 	}
-	if cfg.TimeSyncCommand != "auto" || cfg.TimeSyncIntervalSeconds != 86400 {
-		t.Fatalf("time sync defaults = %q/%d, want auto/86400", cfg.TimeSyncCommand, cfg.TimeSyncIntervalSeconds)
+	if cfg.TimeSyncCommand != "auto" || cfg.TimeCorrectionMode != model.TimeCorrectionOff {
+		t.Fatalf("time correction defaults = %q/%q, want auto/off", cfg.TimeSyncCommand, cfg.TimeCorrectionMode)
 	}
 }
 
@@ -204,8 +204,7 @@ func TestConfigRejectsUnsafeRuntimeSettings(t *testing.T) {
 	for _, mutate := range []func(*Config){
 		func(cfg *Config) { cfg.CommandTimeoutSeconds = 4 },
 		func(cfg *Config) { cfg.CommandTimeoutSeconds = 121 },
-		func(cfg *Config) { cfg.TimeSyncIntervalSeconds = 299 },
-		func(cfg *Config) { cfg.TimeSyncIntervalSeconds = 30*24*60*60 + 1 },
+		func(cfg *Config) { cfg.TimeCorrectionMode = "invalid" },
 		func(cfg *Config) { cfg.RestartCommand = "sh -c reboot" },
 	} {
 		cfg := base
@@ -941,15 +940,15 @@ func TestApplyCoreConfigRestartsWhenInboundListenRemoved(t *testing.T) {
 	}
 }
 
-func TestTimeSyncCommandNoneSkips(t *testing.T) {
+func TestTimeSyncCommandNoneDisablesSystemCorrection(t *testing.T) {
 	dir := t.TempDir()
 	r := New(Config{StateDir: dir, TimeSyncCommand: "none", ResourceProfile: "large"})
-	result, err := r.runTimeSyncTask(context.Background(), model.TimeSyncPlan{Mode: "first_apply"})
+	command, args, err := r.timeSyncCommand(defaultTimeServers())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result["skipped"] != true {
-		t.Fatalf("expected skipped time sync, got %#v", result)
+	if command != "none" || len(args) != 0 {
+		t.Fatalf("time sync command = %q %#v, want none", command, args)
 	}
 }
 

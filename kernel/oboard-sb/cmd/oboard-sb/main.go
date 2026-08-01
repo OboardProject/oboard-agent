@@ -57,7 +57,7 @@ func main() {
 		log.Fatal(err)
 	}
 	if *check {
-		checkCtx := minibox.Context(context.Background())
+		checkCtx := minibox.Context(context.Background(), minibox.NewRuntimeClock())
 		instance, err := box.New(box.Options{Context: checkCtx, Options: opts})
 		if err != nil {
 			log.Fatal(err)
@@ -72,7 +72,8 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	memoryReclaimer := minibox.StartMemoryReclaimer(ctx, runtimeTuning)
-	boxCtx := minibox.Context(context.Background())
+	runtimeClock := minibox.NewRuntimeClock()
+	boxCtx := minibox.Context(context.Background(), runtimeClock)
 	b, err := box.New(box.Options{Context: boxCtx, Options: opts})
 	if err != nil {
 		log.Fatal(err)
@@ -82,7 +83,7 @@ func main() {
 	tracker.SetSocketGovernor(socketGovernor)
 	if *api != "" {
 		go func() {
-			if err := serveHealth(ctx, *api, b, tracker, runtimeTuning, memoryReclaimer, socketGovernor); err != nil && ctx.Err() == nil {
+			if err := serveHealth(ctx, *api, b, tracker, runtimeClock, runtimeTuning, memoryReclaimer, socketGovernor); err != nil && ctx.Err() == nil {
 				log.Println(err)
 			}
 		}()
@@ -111,13 +112,13 @@ func printVersion() {
 		"built_at":            version.Date,
 		"sing_box_version":    C.Version,
 		"supported_protocols": minibox.SupportedProtocols,
-		"capabilities":        []string{"trusted_forward_v1", "outbound_egress_probe_v1"},
+		"capabilities":        []string{"trusted_forward_v1", "outbound_egress_probe_v1", "runtime_clock_v1"},
 	}
 	data, _ := json.MarshalIndent(payload, "", "  ")
 	fmt.Println(string(data))
 }
 
-func serveHealth(ctx context.Context, listen string, instance *box.Box, tracker *minibox.RateLimitTracker, tuning minibox.RuntimeTuning, memoryReclaimer *minibox.MemoryReclaimer, socketGovernor *minibox.SocketBufferGovernor) error {
+func serveHealth(ctx context.Context, listen string, instance *box.Box, tracker *minibox.RateLimitTracker, runtimeClock *minibox.RuntimeClock, tuning minibox.RuntimeTuning, memoryReclaimer *minibox.MemoryReclaimer, socketGovernor *minibox.SocketBufferGovernor) error {
 	if err := validateLocalAPIListen(listen); err != nil {
 		return err
 	}
@@ -134,7 +135,7 @@ func serveHealth(ctx context.Context, listen string, instance *box.Box, tracker 
 	})
 	mux.HandleFunc("/traffic/snapshot", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"items": tracker.Snapshot(), "time": time.Now().UTC().Format(time.RFC3339Nano)})
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": tracker.Snapshot(), "time": runtimeClock.Now().UTC().Format(time.RFC3339Nano)})
 	})
 	mux.HandleFunc("/connections/drain", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -142,7 +143,7 @@ func serveHealth(ctx context.Context, listen string, instance *box.Box, tracker 
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"items": tracker.DrainConnectionAudits(), "time": time.Now().UTC().Format(time.RFC3339Nano)})
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": tracker.DrainConnectionAudits(), "time": runtimeClock.Now().UTC().Format(time.RFC3339Nano)})
 	})
 	mux.HandleFunc("/connections/config", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -183,6 +184,7 @@ func serveHealth(ctx context.Context, listen string, instance *box.Box, tracker 
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 	})
+	registerClockConfigHandler(mux, listen, runtimeClock)
 
 	var (
 		ln         net.Listener
@@ -215,6 +217,30 @@ func serveHealth(ctx context.Context, listen string, instance *box.Box, tracker 
 		_ = srv.Shutdown(shutdownCtx)
 	}(ctx)
 	return srv.Serve(ln)
+}
+
+func registerClockConfigHandler(mux *http.ServeMux, listen string, runtimeClock *minibox.RuntimeClock) {
+	if !strings.HasPrefix(listen, "unix:") {
+		return
+	}
+	mux.HandleFunc("/clock/config", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, 4096)
+		var config minibox.RuntimeClockConfig
+		if err := json.NewDecoder(r.Body).Decode(&config); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := runtimeClock.Configure(config); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "clock": runtimeClock.Snapshot()})
+	})
 }
 
 func validateLocalAPIListen(listen string) error {
