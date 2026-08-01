@@ -2,8 +2,6 @@ package agent
 
 import (
 	"context"
-	"crypto/ed25519"
-	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -18,17 +16,8 @@ import (
 	"github.com/OboardProject/oboard-agent/internal/model"
 )
 
-func testSSHInboundUser(t *testing.T, id int64, username string) (model.SSHInboundUser, ssh.Signer) {
-	t.Helper()
-	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	signer, err := ssh.NewSignerFromKey(privateKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return model.SSHInboundUser{UserID: id, Username: username, Enabled: true, PublicKeys: []string{string(ssh.MarshalAuthorizedKey(signer.PublicKey()))}}, signer
+func testSSHInboundUser(id int64, username, password string) model.SSHInboundUser {
+	return model.SSHInboundUser{UserID: id, Username: username, Password: password, Enabled: true}
 }
 
 func TestSSHInboundRejectsUnsafeDestinationAddresses(t *testing.T) {
@@ -43,8 +32,8 @@ func TestSSHInboundRejectsUnsafeDestinationAddresses(t *testing.T) {
 	}
 }
 
-func TestSSHInboundAllowsOnlyPublicKeyAndDirectTCPIP(t *testing.T) {
-	user, signer := testSSHInboundUser(t, 19, "alice")
+func TestSSHInboundAllowsOnlyPasswordAndDirectTCPIP(t *testing.T) {
+	user := testSSHInboundUser(19, "alice", "correct horse battery staple")
 	reserve, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -58,9 +47,9 @@ func TestSSHInboundAllowsOnlyPublicKeyAndDirectTCPIP(t *testing.T) {
 	}
 	defer func() { _, _ = runner.applySSHInbounds(model.SSHInboundPlan{Version: 2}) }()
 
-	client, err := ssh.Dial("tcp", net.JoinHostPort("127.0.0.1", fmt.Sprint(port)), &ssh.ClientConfig{User: "alice", Auth: []ssh.AuthMethod{ssh.PublicKeys(signer)}, HostKeyCallback: ssh.InsecureIgnoreHostKey()})
+	client, err := ssh.Dial("tcp", net.JoinHostPort("127.0.0.1", fmt.Sprint(port)), &ssh.ClientConfig{User: "alice", Auth: []ssh.AuthMethod{ssh.Password(user.Password)}, HostKeyCallback: ssh.InsecureIgnoreHostKey()})
 	if err != nil {
-		t.Fatalf("public key authentication failed: %v", err)
+		t.Fatalf("password authentication failed: %v", err)
 	}
 	defer client.Close()
 	if session, err := client.NewSession(); err == nil {
@@ -71,8 +60,8 @@ func TestSSHInboundAllowsOnlyPublicKeyAndDirectTCPIP(t *testing.T) {
 		t.Fatal("loopback direct-tcpip destination was accepted")
 	}
 
-	if _, err := ssh.Dial("tcp", net.JoinHostPort("127.0.0.1", fmt.Sprint(port)), &ssh.ClientConfig{User: "alice", HostKeyCallback: ssh.InsecureIgnoreHostKey()}); err == nil {
-		t.Fatal("passwordless/no-key SSH authentication was accepted")
+	if _, err := ssh.Dial("tcp", net.JoinHostPort("127.0.0.1", fmt.Sprint(port)), &ssh.ClientConfig{User: "alice", Auth: []ssh.AuthMethod{ssh.Password("wrong")}, HostKeyCallback: ssh.InsecureIgnoreHostKey()}); err == nil {
+		t.Fatal("incorrect SSH password was accepted")
 	}
 }
 
@@ -318,15 +307,15 @@ func TestSSHInboundExpiredPolicyStartsNewPeriod(t *testing.T) {
 	}
 }
 
-func TestSSHInboundPlanRejectsDuplicateUsersAndInvalidKeys(t *testing.T) {
-	user, _ := testSSHInboundUser(t, 1, "alice")
+func TestSSHInboundPlanRejectsDuplicateUsersAndEmptyPasswords(t *testing.T) {
+	user := testSSHInboundUser(1, "alice", "password")
 	duplicate := user
 	duplicate.UserID = 2
 	if err := validateSSHInboundPlan(model.SSHInboundPlan{Inbounds: []model.SSHInbound{{InboundID: 1, ServerID: 1, ListenIP: "127.0.0.1", Port: 2222, Enabled: true, Users: []model.SSHInboundUser{user, duplicate}}}}); err == nil {
 		t.Fatal("duplicate SSH username was accepted")
 	}
-	user.PublicKeys = []string{"not a public key"}
+	user.Password = ""
 	if err := validateSSHInboundPlan(model.SSHInboundPlan{Inbounds: []model.SSHInbound{{InboundID: 1, ServerID: 1, ListenIP: "127.0.0.1", Port: 2222, Enabled: true, Users: []model.SSHInboundUser{user}}}}); err == nil {
-		t.Fatal("invalid SSH public key was accepted")
+		t.Fatal("empty SSH password was accepted")
 	}
 }

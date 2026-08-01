@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -55,12 +56,17 @@ type sshInboundManager struct {
 type managedSSHInbound struct {
 	plan     model.SSHInbound
 	listener net.Listener
-	auth     map[string]map[string]int64 // username -> public-key fingerprint -> panel user ID
+	auth     map[string]sshInboundCredential
 	counters map[int64]*sshInboundCounter
 	audit    *connectionAuditAccumulator
 
 	mu    sync.Mutex
 	conns map[net.Conn]int64
+}
+
+type sshInboundCredential struct {
+	userID   int64
+	password string
 }
 
 type sshInboundCounter struct {
@@ -483,13 +489,8 @@ func validateSSHInboundPlan(plan model.SSHInboundPlan) error {
 				return fmt.Errorf("SSH inbound %d repeats username %q", inbound.InboundID, user.Username)
 			}
 			seenUsers[user.Username] = struct{}{}
-			if len(user.PublicKeys) == 0 {
-				return fmt.Errorf("SSH inbound user %q has no public keys", user.Username)
-			}
-			for _, raw := range user.PublicKeys {
-				if _, err := parseSSHInboundPublicKey(raw); err != nil {
-					return fmt.Errorf("SSH inbound user %q public key: %w", user.Username, err)
-				}
+			if strings.TrimSpace(user.Password) == "" {
+				return fmt.Errorf("SSH inbound user %q has no password", user.Username)
 			}
 		}
 	}
@@ -509,35 +510,13 @@ func validSSHInboundUsername(value string) bool {
 	return true
 }
 
-func parseSSHInboundPublicKey(raw string) (ssh.PublicKey, error) {
-	key, rest, _, _, err := ssh.ParseAuthorizedKey([]byte(strings.TrimSpace(raw)))
-	if err != nil {
-		return nil, err
-	}
-	if len(strings.TrimSpace(string(rest))) != 0 {
-		return nil, errors.New("contains more than one key")
-	}
-	if _, isCertificate := key.(*ssh.Certificate); isCertificate {
-		return nil, errors.New("SSH certificates are not supported")
-	}
-	return key, nil
-}
-
 func newManagedSSHInbound(plan model.SSHInbound, usageByUser map[int64]*sshInboundUserUsage, audit *connectionAuditAccumulator) (*managedSSHInbound, error) {
-	inbound := &managedSSHInbound{plan: plan, auth: map[string]map[string]int64{}, counters: map[int64]*sshInboundCounter{}, audit: audit, conns: map[net.Conn]int64{}}
+	inbound := &managedSSHInbound{plan: plan, auth: map[string]sshInboundCredential{}, counters: map[int64]*sshInboundCounter{}, audit: audit, conns: map[net.Conn]int64{}}
 	for _, user := range plan.Users {
 		if !user.Enabled {
 			continue
 		}
-		keys := map[string]int64{}
-		for _, raw := range user.PublicKeys {
-			key, err := parseSSHInboundPublicKey(raw)
-			if err != nil {
-				return nil, err
-			}
-			keys[ssh.FingerprintSHA256(key)] = user.UserID
-		}
-		inbound.auth[user.Username] = keys
+		inbound.auth[user.Username] = sshInboundCredential{userID: user.UserID, password: user.Password}
 		usage := usageByUser[user.UserID]
 		if usage == nil {
 			usage = &sshInboundUserUsage{periods: map[string]*sshInboundUsagePeriod{}}
@@ -634,17 +613,16 @@ func (m *managedSSHInbound) serve(listener net.Listener, signer ssh.Signer) {
 
 func (m *managedSSHInbound) handle(raw net.Conn, signer ssh.Signer) {
 	serverConfig := &ssh.ServerConfig{ServerVersion: "SSH-2.0-OBoard-RestrictedSSH"}
-	serverConfig.PublicKeyCallback = func(metadata ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
-		userKeys := m.auth[metadata.User()]
-		userID, ok := userKeys[ssh.FingerprintSHA256(key)]
-		if !ok {
-			return nil, errors.New("public key is not authorized")
+	serverConfig.PasswordCallback = func(metadata ssh.ConnMetadata, password []byte) (*ssh.Permissions, error) {
+		credential, ok := m.auth[metadata.User()]
+		if !ok || subtle.ConstantTimeCompare([]byte(credential.password), password) != 1 {
+			return nil, errors.New("password is not authorized")
 		}
-		counter := m.counterFor(userID)
+		counter := m.counterFor(credential.userID)
 		if counter == nil || !counter.allowNewConnection() {
 			return nil, errors.New("user traffic quota is exhausted")
 		}
-		return &ssh.Permissions{Extensions: map[string]string{"oboard_user_id": strconv.FormatInt(userID, 10), "oboard_inbound_id": strconv.FormatInt(m.plan.InboundID, 10)}}, nil
+		return &ssh.Permissions{Extensions: map[string]string{"oboard_user_id": strconv.FormatInt(credential.userID, 10), "oboard_inbound_id": strconv.FormatInt(m.plan.InboundID, 10)}}, nil
 	}
 	serverConfig.AddHostKey(signer)
 	connection, channels, requests, err := ssh.NewServerConn(raw, serverConfig)

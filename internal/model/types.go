@@ -138,7 +138,6 @@ type User struct {
 type SubscriptionFormat string
 
 const (
-	SubscriptionFormatPlainJSON    SubscriptionFormat = "plain-json"
 	SubscriptionFormatStash        SubscriptionFormat = "stash"
 	SubscriptionFormatClashMeta    SubscriptionFormat = "clash-meta"
 	SubscriptionFormatMihomo       SubscriptionFormat = "mihomo"
@@ -674,7 +673,7 @@ type SSHInboundPlan struct {
 	Inbounds []SSHInbound `json:"inbounds"`
 }
 
-// SSHInbound accepts public-key authenticated SSH connections and permits
+// SSHInbound accepts password-authenticated SSH connections and permits
 // only direct-tcpip channels. Address is the panel-visible endpoint; the
 // Agent listens on ListenIP:Port.
 type SSHInbound struct {
@@ -690,13 +689,13 @@ type SSHInbound struct {
 	Policies  map[string]TrafficRuntimePolicy `json:"policies"`
 }
 
-// SSHInboundUser maps one panel user to the same SSH username. Passwords,
-// shell access, and agent forwarding are intentionally unsupported.
+// SSHInboundUser maps one panel user to an isolated SSH login. Shell access
+// and agent forwarding are intentionally unsupported.
 type SSHInboundUser struct {
-	UserID     int64    `json:"user_id"`
-	Username   string   `json:"username"`
-	PublicKeys []string `json:"public_keys"`
-	Enabled    bool     `json:"enabled"`
+	UserID   int64  `json:"user_id"`
+	Username string `json:"username"`
+	Password string `json:"password"`
+	Enabled  bool   `json:"enabled"`
 }
 
 type AgentTask struct {
