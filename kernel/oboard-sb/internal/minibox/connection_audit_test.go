@@ -3,6 +3,7 @@ package minibox
 import (
 	"net/netip"
 	"testing"
+	"time"
 
 	"github.com/sagernet/sing-box/adapter"
 	M "github.com/sagernet/sing/common/metadata"
@@ -23,6 +24,7 @@ func TestConnectionAuditDoesNotAllocateUntilEnabled(t *testing.T) {
 		t.Fatalf("disabled audit allocated state: key=%q buckets=%#v", key, tracker.auditBuckets)
 	}
 	tracker.SetConnectionAuditEnabled(true)
+	started := time.Now()
 	key := tracker.recordConnectionStart(state, metadata, nil, "tcp")
 	if key == "" {
 		t.Fatal("enabled audit did not record a connection")
@@ -31,6 +33,9 @@ func TestConnectionAuditDoesNotAllocateUntilEnabled(t *testing.T) {
 	items := tracker.DrainConnectionAudits()
 	if len(items) != 1 || items[0].UserID != 7 || items[0].SourceIP != "198.51.100.10" || items[0].DestinationPort != 443 {
 		t.Fatalf("unexpected audit drain: %#v", items)
+	}
+	if items[0].ClosedCount != 1 || items[0].DurationTotalMS < 0 || items[0].DurationMaxMS < 0 || time.Since(started) < 0 {
+		t.Fatalf("connection duration was not retained: %#v", items[0])
 	}
 	tracker.SetConnectionAuditEnabled(false)
 	if tracker.auditBuckets != nil || tracker.auditActiveByUser != nil || tracker.ConnectionAuditEnabled() {

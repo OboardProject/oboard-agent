@@ -11,6 +11,8 @@ import (
 
 const maxConnectionAuditBuckets = 4096
 
+const connectionAuditHandleSeparator = "\xff"
+
 // ConnectionAuditBucket is a bounded, payload-free summary of routed
 // connections. The Agent drains these buckets and moves the history to the
 // Controller; the kernel only retains the current reporting window.
@@ -26,6 +28,9 @@ type ConnectionAuditBucket struct {
 	OutboundTag     string `json:"outbound_tag,omitempty"`
 	OutboundType    string `json:"outbound_type,omitempty"`
 	ConnectionCount int64  `json:"connection_count"`
+	ClosedCount     int64  `json:"closed_count"`
+	DurationTotalMS int64  `json:"duration_total_ms"`
+	DurationMaxMS   int64  `json:"duration_max_ms"`
 	ActivePeak      int64  `json:"active_peak"`
 	ActiveAtEnd     int64  `json:"active_at_end"`
 	StartedAt       string `json:"started_at"`
@@ -94,6 +99,7 @@ func (t *RateLimitTracker) recordConnectionStart(state *runtimeState, metadata a
 	bucket := t.auditBuckets[key]
 	if bucket == nil {
 		if len(t.auditBuckets) >= maxConnectionAuditBuckets {
+			t.auditDropped++
 			return ""
 		}
 		bucket = &ConnectionAuditBucket{
@@ -122,13 +128,18 @@ func (t *RateLimitTracker) recordConnectionStart(state *runtimeState, metadata a
 		bucket.ActivePeak = t.auditActiveByUser[policy.UserID]
 	}
 	bucket.EndedAt = now.Format(time.RFC3339Nano)
-	return key
+	return key + connectionAuditHandleSeparator + strconv.FormatInt(now.UnixNano(), 10)
 }
 
-func (t *RateLimitTracker) recordConnectionEnd(key string) {
-	if t == nil || key == "" {
+func (t *RateLimitTracker) recordConnectionEnd(handle string) {
+	if t == nil || handle == "" {
 		return
 	}
+	key, startedRaw, found := strings.Cut(handle, connectionAuditHandleSeparator)
+	if !found {
+		key = handle
+	}
+	startedNano, _ := strconv.ParseInt(startedRaw, 10, 64)
 	t.auditMu.Lock()
 	defer t.auditMu.Unlock()
 	if bucket := t.auditBuckets[key]; bucket != nil {
@@ -140,19 +151,50 @@ func (t *RateLimitTracker) recordConnectionEnd(key string) {
 				delete(t.auditActiveByUser, bucket.UserID)
 			}
 		}
-		bucket.EndedAt = t.timeNow().UTC().Format(time.RFC3339Nano)
+		now := t.timeNow().UTC()
+		if startedNano > 0 {
+			duration := now.Sub(time.Unix(0, startedNano)).Milliseconds()
+			if duration < 0 {
+				duration = 0
+			}
+			bucket.ClosedCount++
+			bucket.DurationTotalMS += duration
+			if duration > bucket.DurationMaxMS {
+				bucket.DurationMaxMS = duration
+			}
+		}
+		bucket.EndedAt = now.Format(time.RFC3339Nano)
 	}
+}
+
+type ConnectionAuditDrain struct {
+	Items                []ConnectionAuditBucket `json:"items"`
+	CollectionGeneration uint64                  `json:"collection_generation"`
+	BucketCapacity       int                     `json:"bucket_capacity"`
+	DroppedBucketCount   int64                   `json:"dropped_bucket_count"`
+	CollectionStartedAt  string                  `json:"collection_started_at"`
+	CollectionEndedAt    string                  `json:"collection_ended_at"`
 }
 
 // DrainConnectionAudits atomically advances the in-kernel reporting window.
 // Buckets with active connections remain so their eventual close is tracked.
 func (t *RateLimitTracker) DrainConnectionAudits() []ConnectionAuditBucket {
+	return t.DrainConnectionAuditSnapshot().Items
+}
+
+func (t *RateLimitTracker) DrainConnectionAuditSnapshot() ConnectionAuditDrain {
 	if t == nil || !t.auditEnabled.Load() {
-		return nil
+		return ConnectionAuditDrain{BucketCapacity: maxConnectionAuditBuckets}
 	}
 	t.auditMu.Lock()
 	defer t.auditMu.Unlock()
-	now := t.timeNow().UTC().Format(time.RFC3339Nano)
+	nowTime := t.timeNow().UTC()
+	now := nowTime.Format(time.RFC3339Nano)
+	started := t.auditWindowStart
+	if started.IsZero() {
+		started = nowTime
+	}
+	drain := ConnectionAuditDrain{CollectionGeneration: t.auditGeneration, BucketCapacity: maxConnectionAuditBuckets, DroppedBucketCount: t.auditDropped, CollectionStartedAt: started.Format(time.RFC3339Nano), CollectionEndedAt: now}
 	items := make([]ConnectionAuditBucket, 0, len(t.auditBuckets))
 	for key, bucket := range t.auditBuckets {
 		if bucket == nil {
@@ -174,6 +216,9 @@ func (t *RateLimitTracker) DrainConnectionAudits() []ConnectionAuditBucket {
 			continue
 		}
 		bucket.ConnectionCount = 0
+		bucket.ClosedCount = 0
+		bucket.DurationTotalMS = 0
+		bucket.DurationMaxMS = 0
 		bucket.ActivePeak = t.auditActiveByUser[bucket.UserID]
 		bucket.ActiveAtEnd = 0
 		bucket.StartedAt = now
@@ -191,5 +236,8 @@ func (t *RateLimitTracker) DrainConnectionAudits() []ConnectionAuditBucket {
 		}
 		return items[i].DestinationPort < items[j].DestinationPort
 	})
-	return items
+	drain.Items = items
+	t.auditDropped = 0
+	t.auditWindowStart = nowTime
+	return drain
 }

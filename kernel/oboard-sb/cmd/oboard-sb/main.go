@@ -143,7 +143,7 @@ func serveHealth(ctx context.Context, listen string, instance *box.Box, tracker 
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"items": tracker.DrainConnectionAudits(), "time": runtimeClock.Now().UTC().Format(time.RFC3339Nano)})
+		_ = json.NewEncoder(w).Encode(tracker.DrainConnectionAuditSnapshot())
 	})
 	mux.HandleFunc("/connections/config", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {

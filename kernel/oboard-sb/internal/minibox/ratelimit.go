@@ -31,6 +31,8 @@ type RateLimitTracker struct {
 	auditBuckets      map[string]*ConnectionAuditBucket
 	auditActiveByUser map[int64]int64
 	auditGeneration   uint64
+	auditDropped      int64
+	auditWindowStart  time.Time
 	auditEnabled      atomic.Bool
 	trustedMu         sync.RWMutex
 	trustedSources    map[string]netip.Addr
@@ -116,7 +118,11 @@ func newRateLimitTracker(metadata RuntimeMetadata, now func() time.Time) *RateLi
 		now = time.Now
 	}
 	tracker := &RateLimitTracker{states: map[string]*runtimeState{}, active: map[string]map[*trackedConn]struct{}{}, activePacket: map[string]map[*trackedPacketConn]struct{}{}, now: now}
-	tracker.auditEnabled.Store(metadata.ConnectionAudit != nil && metadata.ConnectionAudit.Enabled)
+	auditEnabled := metadata.ConnectionAudit != nil && metadata.ConnectionAudit.Enabled
+	tracker.auditEnabled.Store(auditEnabled)
+	if auditEnabled {
+		tracker.auditWindowStart = now().UTC()
+	}
 	if metadata.TrustedForward != nil {
 		for _, receiver := range metadata.TrustedForward.Receivers {
 			tracker.trustedInbounds = append(tracker.trustedInbounds, receiver.InboundTag)
@@ -162,14 +168,22 @@ func (t *RateLimitTracker) SetConnectionAuditEnabled(enabled bool) {
 	if t == nil {
 		return
 	}
-	t.auditEnabled.Store(enabled)
+	wasEnabled := t.auditEnabled.Swap(enabled)
 	if enabled {
+		if !wasEnabled {
+			t.auditMu.Lock()
+			t.auditWindowStart = t.timeNow().UTC()
+			t.auditDropped = 0
+			t.auditMu.Unlock()
+		}
 		return
 	}
 	t.auditMu.Lock()
 	t.auditBuckets = nil
 	t.auditActiveByUser = nil
 	t.auditGeneration++
+	t.auditDropped = 0
+	t.auditWindowStart = time.Time{}
 	t.auditMu.Unlock()
 	t.trustedMu.Lock()
 	t.trustedSources = nil

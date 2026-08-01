@@ -23,21 +23,29 @@ const (
 )
 
 type connectionAuditSnapshotItem struct {
-	UserID          int64  `json:"user_id"`
-	InboundID       int64  `json:"inbound_id,omitempty"`
-	PathID          int64  `json:"path_id,omitempty"`
-	SourceIP        string `json:"source_ip"`
-	SourceGeoCode   string `json:"source_geo_code,omitempty"`
-	Network         string `json:"network"`
-	Destination     string `json:"destination,omitempty"`
-	DestinationPort int    `json:"destination_port,omitempty"`
-	OutboundTag     string `json:"outbound_tag,omitempty"`
-	OutboundType    string `json:"outbound_type,omitempty"`
-	ConnectionCount int64  `json:"connection_count"`
-	ActivePeak      int64  `json:"active_peak"`
-	ActiveAtEnd     int64  `json:"active_at_end"`
-	StartedAt       string `json:"started_at"`
-	EndedAt         string `json:"ended_at"`
+	UserID               int64  `json:"user_id"`
+	InboundID            int64  `json:"inbound_id,omitempty"`
+	PathID               int64  `json:"path_id,omitempty"`
+	SourceIP             string `json:"source_ip"`
+	SourceGeoCode        string `json:"source_geo_code,omitempty"`
+	Network              string `json:"network"`
+	Destination          string `json:"destination,omitempty"`
+	DestinationPort      int    `json:"destination_port,omitempty"`
+	OutboundTag          string `json:"outbound_tag,omitempty"`
+	OutboundType         string `json:"outbound_type,omitempty"`
+	ConnectionCount      int64  `json:"connection_count"`
+	ClosedCount          int64  `json:"closed_count"`
+	DurationTotalMS      int64  `json:"duration_total_ms"`
+	DurationMaxMS        int64  `json:"duration_max_ms"`
+	ActivePeak           int64  `json:"active_peak"`
+	ActiveAtEnd          int64  `json:"active_at_end"`
+	StartedAt            string `json:"started_at"`
+	EndedAt              string `json:"ended_at"`
+	CollectionGeneration uint64 `json:"collection_generation"`
+	BucketCapacity       int    `json:"bucket_capacity"`
+	DroppedBucketCount   int64  `json:"dropped_bucket_count"`
+	CollectionStartedAt  string `json:"collection_started_at"`
+	CollectionEndedAt    string `json:"collection_ended_at"`
 }
 
 type connectionAuditPendingReport struct {
@@ -64,12 +72,17 @@ type connectionAuditAccumulator struct {
 	buckets      map[string]*agentAuditBucket
 	activeByUser map[int64]int64
 	generation   uint64
+	dropped      int64
+	windowStart  time.Time
 	enabled      atomic.Bool
 }
 
 func newConnectionAuditAccumulator(enabled bool) *connectionAuditAccumulator {
 	a := &connectionAuditAccumulator{}
 	a.enabled.Store(enabled)
+	if enabled {
+		a.windowStart = time.Now().UTC()
+	}
 	return a
 }
 
@@ -77,14 +90,22 @@ func (a *connectionAuditAccumulator) setEnabled(enabled bool) {
 	if a == nil {
 		return
 	}
-	a.enabled.Store(enabled)
+	wasEnabled := a.enabled.Swap(enabled)
 	if enabled {
+		if !wasEnabled {
+			a.mu.Lock()
+			a.windowStart = time.Now().UTC()
+			a.dropped = 0
+			a.mu.Unlock()
+		}
 		return
 	}
 	a.mu.Lock()
 	a.buckets = nil
 	a.activeByUser = nil
 	a.generation++
+	a.dropped = 0
+	a.windowStart = time.Time{}
 	a.mu.Unlock()
 }
 
@@ -115,6 +136,8 @@ func (a *connectionAuditAccumulator) start(item connectionAuditSnapshotItem) fun
 		item.StartedAt = now
 		bucket = &agentAuditBucket{connectionAuditSnapshotItem: item, key: key}
 		a.buckets[key] = bucket
+	} else if bucket == nil {
+		a.dropped++
 	}
 	if bucket != nil {
 		if a.activeByUser == nil {
@@ -132,10 +155,11 @@ func (a *connectionAuditAccumulator) start(item connectionAuditSnapshotItem) fun
 	if bucket == nil {
 		return func() {}
 	}
-	return func() { a.end(key) }
+	started := time.Now().UTC()
+	return func() { a.end(key, started) }
 }
 
-func (a *connectionAuditAccumulator) end(key string) {
+func (a *connectionAuditAccumulator) end(key string, started time.Time) {
 	if a == nil || key == "" {
 		return
 	}
@@ -149,7 +173,17 @@ func (a *connectionAuditAccumulator) end(key string) {
 				delete(a.activeByUser, bucket.UserID)
 			}
 		}
-		bucket.EndedAt = time.Now().UTC().Format(time.RFC3339Nano)
+		now := time.Now().UTC()
+		duration := now.Sub(started).Milliseconds()
+		if duration < 0 {
+			duration = 0
+		}
+		bucket.ClosedCount++
+		bucket.DurationTotalMS += duration
+		if duration > bucket.DurationMaxMS {
+			bucket.DurationMaxMS = duration
+		}
+		bucket.EndedAt = now.Format(time.RFC3339Nano)
 	}
 	a.mu.Unlock()
 }
@@ -160,7 +194,12 @@ func (a *connectionAuditAccumulator) drain() []connectionAuditSnapshotItem {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	now := time.Now().UTC().Format(time.RFC3339Nano)
+	nowTime := time.Now().UTC()
+	now := nowTime.Format(time.RFC3339Nano)
+	started := a.windowStart
+	if started.IsZero() {
+		started = nowTime
+	}
 	items := make([]connectionAuditSnapshotItem, 0, len(a.buckets))
 	for key, bucket := range a.buckets {
 		if bucket == nil {
@@ -170,6 +209,11 @@ func (a *connectionAuditAccumulator) drain() []connectionAuditSnapshotItem {
 		if bucket.ConnectionCount > 0 || bucket.active > 0 {
 			item := bucket.connectionAuditSnapshotItem
 			item.ActiveAtEnd = bucket.active
+			item.CollectionGeneration = a.generation
+			item.BucketCapacity = maxAgentAuditBuckets
+			item.DroppedBucketCount = a.dropped
+			item.CollectionStartedAt = started.Format(time.RFC3339Nano)
+			item.CollectionEndedAt = now
 			if item.EndedAt == "" {
 				item.EndedAt = now
 			}
@@ -180,11 +224,16 @@ func (a *connectionAuditAccumulator) drain() []connectionAuditSnapshotItem {
 			continue
 		}
 		bucket.ConnectionCount = 0
+		bucket.ClosedCount = 0
+		bucket.DurationTotalMS = 0
+		bucket.DurationMaxMS = 0
 		bucket.ActivePeak = a.activeByUser[bucket.UserID]
 		bucket.ActiveAtEnd = 0
 		bucket.StartedAt = now
 		bucket.EndedAt = now
 	}
+	a.dropped = 0
+	a.windowStart = nowTime
 	return items
 }
 
@@ -304,10 +353,22 @@ func (r *Runner) coreConnectionAuditSnapshot(ctx context.Context) ([]connectionA
 		return nil, fmt.Errorf("core connection audit status %d", res.StatusCode)
 	}
 	var payload struct {
-		Items []connectionAuditSnapshotItem `json:"items"`
+		Items                []connectionAuditSnapshotItem `json:"items"`
+		CollectionGeneration uint64                        `json:"collection_generation"`
+		BucketCapacity       int                           `json:"bucket_capacity"`
+		DroppedBucketCount   int64                         `json:"dropped_bucket_count"`
+		CollectionStartedAt  string                        `json:"collection_started_at"`
+		CollectionEndedAt    string                        `json:"collection_ended_at"`
 	}
 	if err := json.NewDecoder(res.Body).Decode(&payload); err != nil {
 		return nil, err
+	}
+	for index := range payload.Items {
+		payload.Items[index].CollectionGeneration = payload.CollectionGeneration
+		payload.Items[index].BucketCapacity = payload.BucketCapacity
+		payload.Items[index].DroppedBucketCount = payload.DroppedBucketCount
+		payload.Items[index].CollectionStartedAt = payload.CollectionStartedAt
+		payload.Items[index].CollectionEndedAt = payload.CollectionEndedAt
 	}
 	return payload.Items, nil
 }

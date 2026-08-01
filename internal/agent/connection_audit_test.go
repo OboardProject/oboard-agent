@@ -92,6 +92,16 @@ func TestConnectionAuditPeakSpansDestinationBuckets(t *testing.T) {
 	second()
 }
 
+func TestConnectionAuditDurationAndCoverageSurviveDrain(t *testing.T) {
+	audit := newConnectionAuditAccumulator(true)
+	finish := audit.start(connectionAuditSnapshotItem{UserID: 7, SourceIP: "198.51.100.4", Destination: "one.example", DestinationPort: 443})
+	finish()
+	items := audit.drain()
+	if len(items) != 1 || items[0].ClosedCount != 1 || items[0].BucketCapacity != maxAgentAuditBuckets || items[0].CollectionStartedAt == "" || items[0].CollectionEndedAt == "" {
+		t.Fatalf("duration or coverage metadata was lost: %#v", items)
+	}
+}
+
 func TestConnectionAuditOldCloseDoesNotAffectReenabledGeneration(t *testing.T) {
 	audit := newConnectionAuditAccumulator(true)
 	oldFinish := audit.start(connectionAuditSnapshotItem{UserID: 7, SourceIP: "198.51.100.4", Destination: "example.com", DestinationPort: 443})
