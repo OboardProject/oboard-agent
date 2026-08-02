@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -59,9 +61,28 @@ func TestSSHInboundAllowsOnlyPasswordAndDirectTCPIP(t *testing.T) {
 	if _, err := client.Dial("tcp", "127.0.0.1:22"); err == nil {
 		t.Fatal("loopback direct-tcpip destination was accepted")
 	}
+	udpGateway, err := client.Dial("tcp", "127.0.0.1:7300")
+	if err != nil {
+		t.Fatalf("BadVPN UDP gateway was rejected: %v", err)
+	}
+	if _, err := udpGateway.Write([]byte{3, 0, badVPNFlagKeepalive, 0, 0}); err != nil {
+		t.Fatalf("write BadVPN keepalive: %v", err)
+	}
+	_ = udpGateway.Close()
 
 	if _, err := ssh.Dial("tcp", net.JoinHostPort("127.0.0.1", fmt.Sprint(port)), &ssh.ClientConfig{User: "alice", Auth: []ssh.AuthMethod{ssh.Password("wrong")}, HostKeyCallback: ssh.InsecureIgnoreHostKey()}); err == nil {
 		t.Fatal("incorrect SSH password was accepted")
+	}
+	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	userSigner, err := ssh.NewSignerFromKey(privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ssh.Dial("tcp", net.JoinHostPort("127.0.0.1", fmt.Sprint(port)), &ssh.ClientConfig{User: "alice", Auth: []ssh.AuthMethod{ssh.PublicKeys(userSigner)}, HostKeyCallback: ssh.InsecureIgnoreHostKey()}); err == nil {
+		t.Fatal("public-key authentication was accepted")
 	}
 }
 

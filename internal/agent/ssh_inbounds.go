@@ -669,6 +669,15 @@ func (m *managedSSHInbound) handleDirectTCPIP(connection *ssh.ServerConn, newCha
 		_ = newChannel.Reject(ssh.ConnectionFailed, "invalid direct-tcpip request")
 		return
 	}
+	if isBadVPNUDPGatewayDestination(payload.DestAddr, payload.DestPort) {
+		channel, requests, err := newChannel.Accept()
+		if err != nil {
+			return
+		}
+		go ssh.DiscardRequests(requests)
+		go serveBadVPNUDPGateway(channel, counter, m.audit, userID, m.plan.InboundID, sourceIPFromNetAddr(connection.RemoteAddr()))
+		return
+	}
 	addresses, err := resolvePermittedSSHDestination(context.Background(), payload.DestAddr, payload.DestPort)
 	if err != nil {
 		_ = newChannel.Reject(ssh.Prohibited, err.Error())

@@ -681,9 +681,9 @@ type SSHInboundPlan struct {
 	Inbounds []SSHInbound `json:"inbounds"`
 }
 
-// SSHInbound accepts password-authenticated SSH connections and permits
-// only direct-tcpip channels. Address is the panel-visible endpoint; the
-// Agent listens on ListenIP:Port.
+// SSHInbound accepts password-only SSH client authentication and permits
+// direct-tcpip channels, including the fixed in-process BadVPN UDP gateway.
+// Address is the panel-visible endpoint; the Agent listens on ListenIP:Port.
 type SSHInbound struct {
 	InboundID int64                           `json:"inbound_id"`
 	ServerID  int64                           `json:"server_id"`
