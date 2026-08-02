@@ -1194,15 +1194,21 @@ func nftRuleLines(rule forwardRule) ([]string, error) {
 		family = "ip6"
 	}
 	daddr := ""
-	if strings.TrimSpace(rule.ListenIP) != "" {
-		listen, err := netip.ParseAddr(strings.Trim(rule.ListenIP, "[]"))
+	if listenValue := strings.TrimSpace(rule.ListenIP); listenValue != "" {
+		listen, err := netip.ParseAddr(strings.Trim(listenValue, "[]"))
 		if err != nil {
 			return nil, fmt.Errorf("invalid nft listen_ip for rule %q: %w", rule.Name, err)
 		}
-		if listen.Is6() != target.Is6() {
-			return nil, fmt.Errorf("nft listen_ip and target_address IP family differ for rule %q", rule.Name)
+		// Wildcard listens match both families: inet-table DNAT translates
+		// between families, so one rule without daddr serves IPv4 and IPv6.
+		// Specific listens keep the same-family requirement because nft
+		// rejects a family daddr match combined with an other-family DNAT.
+		if !listen.IsUnspecified() {
+			if listen.Is6() != target.Is6() {
+				return nil, fmt.Errorf("nft listen_ip and target_address IP family differ for rule %q", rule.Name)
+			}
+			daddr = fmt.Sprintf("%s daddr %s ", family, listen.String())
 		}
-		daddr = fmt.Sprintf("%s daddr %s ", family, listen.String())
 	}
 	var protocols []string
 	switch rule.Protocol {

@@ -1020,6 +1020,45 @@ func TestGenerateNFTConfig(t *testing.T) {
 			t.Fatalf("nft config missing %q:\n%s", want, config)
 		}
 	}
+	if strings.Contains(config, "daddr") {
+		t.Fatalf("wildcard listen must not emit a daddr match:\n%s", config)
+	}
+}
+
+func TestNftRuleLinesWildcardAndSpecificListen(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		listenIP    string
+		target      string
+		wantLine    string
+		wantNoDaddr bool
+		wantError   string
+	}{
+		{name: "v6 wildcard with v4 target", listenIP: "::", target: "203.0.113.2", wantLine: "tcp dport 443 dnat ip to 203.0.113.2:8443", wantNoDaddr: true},
+		{name: "empty wildcard with v6 target", listenIP: "", target: "2001:db8::2", wantLine: "tcp dport 443 dnat ip6 to [2001:db8::2]:8443", wantNoDaddr: true},
+		{name: "specific v4 listen with v4 target", listenIP: "192.0.2.10", target: "203.0.113.2", wantLine: "ip daddr 192.0.2.10 tcp dport 443 dnat ip to 203.0.113.2:8443"},
+		{name: "specific v6 listen with v6 target", listenIP: "2001:db8::9", target: "2001:db8::2", wantLine: "ip6 daddr 2001:db8::9 tcp dport 443 dnat ip6 to [2001:db8::2]:8443"},
+		{name: "specific v4 listen with v6 target rejected", listenIP: "192.0.2.10", target: "2001:db8::2", wantError: "IP family differ"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			lines, err := nftRuleLines(forwardRule{PortForward: model.PortForward{ID: 1, Name: "rule", ListenIP: tc.listenIP, ListenPort: 443, TargetAddress: tc.target, TargetPort: 8443, Protocol: model.ForwardProtocolTCP}})
+			if tc.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantError) {
+					t.Fatalf("error = %v, want %q", err, tc.wantError)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(lines) != 1 || lines[0] != tc.wantLine {
+				t.Fatalf("lines = %#v, want %q", lines, tc.wantLine)
+			}
+			if tc.wantNoDaddr && strings.Contains(lines[0], "daddr") {
+				t.Fatalf("wildcard listen emitted daddr: %q", lines[0])
+			}
+		})
+	}
 }
 
 func TestResolveForwardBackends(t *testing.T) {
