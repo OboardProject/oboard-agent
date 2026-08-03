@@ -2252,11 +2252,55 @@ func buildHealthReport(binary string, timeout time.Duration, host hostStaticInfo
 		DiskBytes:        probe.DiskBytes,
 		PublicIPv4:       publicIPv4,
 		PublicIPv6:       publicIPv6,
+		InterfaceIPv6:    detectInterfaceIPv6(),
 		AgentVersion:     version.Version,
 		AgentBuild:       version.Build,
 		SingBoxVersion:   coreVersion,
 		Timestamp:        time.Now().UTC(),
 	}
+}
+
+// detectInterfaceIPv6 returns one global unicast IPv6 address assigned to any
+// local interface, or "" when the host has no IPv6 inbound capability. Unlike
+// detectPublicIPs this never touches the network, so it also covers hosts
+// whose IPv6 works inbound-only (egress probes would never detect it).
+func detectInterfaceIPv6() string {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return ""
+	}
+	var candidates []netip.Addr
+	for _, addr := range addrs {
+		var ip netip.Addr
+		switch value := addr.(type) {
+		case *net.IPNet:
+			ip, _ = netip.ParseAddr(value.IP.String())
+		case *net.IPAddr:
+			ip, _ = netip.ParseAddr(value.IP.String())
+		}
+		if !ip.IsValid() || !ip.Is6() || ip.Is4In6() || !ip.IsGlobalUnicast() ||
+			ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLoopback() || ip.IsUnspecified() {
+			continue
+		}
+		candidates = append(candidates, ip)
+	}
+	found, ok := selectGlobalIPv6(candidates)
+	if !ok {
+		return ""
+	}
+	return found.String()
+}
+
+// selectGlobalIPv6 picks the smallest global unicast IPv6 address so the
+// reported value is deterministic regardless of interface enumeration order.
+func selectGlobalIPv6(candidates []netip.Addr) (netip.Addr, bool) {
+	var found netip.Addr
+	for _, ip := range candidates {
+		if !found.IsValid() || ip.Compare(found) < 0 {
+			found = ip
+		}
+	}
+	return found, found.IsValid()
 }
 
 func detectPublicIPs(timeout time.Duration) (string, string) {

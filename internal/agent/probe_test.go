@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"math"
+	"net/netip"
 	"sync"
 	"testing"
 	"time"
@@ -64,6 +65,40 @@ func TestParseOSReleaseMinimalAndQuoted(t *testing.T) {
 	}
 	if got.Name != `Custom"OS` {
 		t.Fatalf("name = %q", got.Name)
+	}
+}
+
+func TestSelectGlobalIPv6(t *testing.T) {
+	cases := []struct {
+		name       string
+		candidates []string
+		want       string
+	}{
+		{name: "empty", want: ""},
+		{name: "single global", candidates: []string{"2001:db8::1"}, want: "2001:db8::1"},
+		{name: "picks smallest deterministic", candidates: []string{"2001:db8::5", "2400:3200::1", "2001:db8::2"}, want: "2001:db8::2"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var candidates []netip.Addr
+			for _, raw := range tc.candidates {
+				addr, err := netip.ParseAddr(raw)
+				if err != nil {
+					t.Fatalf("bad test address %q: %v", raw, err)
+				}
+				candidates = append(candidates, addr)
+			}
+			got, ok := selectGlobalIPv6(candidates)
+			if tc.want == "" {
+				if ok {
+					t.Fatalf("selectGlobalIPv6(%v) = %s, want none", tc.candidates, got)
+				}
+				return
+			}
+			if !ok || got.String() != tc.want {
+				t.Fatalf("selectGlobalIPv6(%v) = %s, want %s", tc.candidates, got, tc.want)
+			}
+		})
 	}
 }
 

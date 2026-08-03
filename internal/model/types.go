@@ -1062,6 +1062,7 @@ type HealthReport struct {
 	Status                    ServerStatus `json:"status"`
 	PublicIPv4                string       `json:"public_ipv4"`
 	PublicIPv6                string       `json:"public_ipv6"`
+	InterfaceIPv6             string       `json:"interface_ipv6"`
 	RegionCode                string       `json:"region_code"`
 	OS                        string       `json:"os"`
 	DistroID                  string       `json:"distro_id"`
