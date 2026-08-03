@@ -441,6 +441,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	if cfg.AgentID == "" || cfg.AgentToken == "" {
 		return errors.New("agent is not enrolled")
 	}
+	r.logStartupSummary(cfg)
 	r.applyLowMemorySocketTuning()
 	if err := r.restoreManagedPortForwardsOnStartup(); err != nil {
 		log.Printf("restore managed port forwards: %v", err)
@@ -457,18 +458,39 @@ func (r *Runner) Run(ctx context.Context) error {
 	_ = r.configureCoreClock(ctx)
 	go r.startCoreWatchdog(ctx)
 	backoff := 5 * time.Second
+	failures := 0
 	for {
-		if err := r.connect(ctx); err != nil {
-			select {
-			case <-ctx.Done():
-				return nil
-			case <-time.After(backoff):
-			}
-			if backoff < 30*time.Second {
-				backoff *= 2
+		if err := r.connect(ctx); err == nil {
+			failures = 0
+			backoff = 5 * time.Second
+			continue
+		} else {
+			failures++
+			if failures == 1 || failures%20 == 0 {
+				log.Printf("controller connection failed: attempt=%d next_retry=%s error=%v", failures, backoff, err)
 			}
 		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(backoff):
+		}
+		if backoff < 30*time.Second {
+			backoff *= 2
+		}
 	}
+}
+
+func (r *Runner) logStartupSummary(cfg Config) {
+	coreBinary := strings.TrimSpace(cfg.CoreBinary)
+	if coreBinary == "" {
+		coreBinary = "oboard-sb"
+	}
+	coreService := strings.TrimSpace(r.coreService())
+	if coreService == "" {
+		coreService = "oboard-sb"
+	}
+	log.Printf("agent starting version=%s server_id=%d controller=%s state_dir=%s core_binary=%s core_service=%s update_source=%s update_repo=%s monitoring=%s", version.String(), cfg.ServerID, displayControllerURL(cfg.ControllerURL), cfg.StateDir, coreBinary, coreService, cfg.UpdateSource, cfg.UpdateRepo, r.monitoringMode)
 }
 
 func (r *Runner) connect(ctx context.Context) error {
@@ -483,6 +505,7 @@ func (r *Runner) connect(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	log.Printf("controller connection established: server_id=%d remote=%s", cfg.ServerID, conn.RemoteAddr())
 	defer conn.Close()
 	done := make(chan struct{})
 	defer close(done)
@@ -569,6 +592,7 @@ func (r *Runner) bindServerIdentity(serverID int64) error {
 	if cfg.ServerID == serverID {
 		return nil
 	}
+	log.Printf("agent identity bound: server_id=%d", serverID)
 	cfg.ServerID = serverID
 	if strings.TrimSpace(cfg.ConfigPath) != "" {
 		if err := SaveConfig(cfg.ConfigPath, cfg); err != nil {
@@ -611,6 +635,13 @@ func (r *Runner) verifyTaskSignature(task model.AgentTask, signature string) boo
 }
 
 func (r *Runner) ExecuteAgentTask(task model.AgentTask) (string, string) {
+	started := time.Now()
+	status, result := r.executeAgentTask(task)
+	log.Printf("task id=%d type=%s version=%d result=%s duration_ms=%d", task.ID, task.Type, task.ConfigVersion, status, time.Since(started).Milliseconds())
+	return status, result
+}
+
+func (r *Runner) executeAgentTask(task model.AgentTask) (string, string) {
 	switch task.Type {
 	case model.AgentTaskTypeApplyDeployment:
 		var payload model.DeploymentTaskPayload

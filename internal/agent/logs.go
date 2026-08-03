@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -109,6 +110,7 @@ func (r *Runner) enforceLogLimits(force bool) []logFileState {
 			} else {
 				state.Rotated = true
 				state.SizeBytes = 0
+				log.Printf("log rotated service=%s path=%s max_bytes=%d backups=%d", policy.Service, policy.Path, policy.MaxBytes, policy.Backups)
 			}
 		}
 		items = append(items, state)
@@ -259,6 +261,8 @@ func (r *Runner) manageLogs(payloadJSON string) (map[string]any, error) {
 		if err != nil {
 			state.Error = err.Error()
 			failures = append(failures, policy.Service+": "+err.Error())
+		} else {
+			log.Printf("log %s service=%s path=%s", payload.Action, policy.Service, policy.Path)
 		}
 		states = append(states, state)
 	}

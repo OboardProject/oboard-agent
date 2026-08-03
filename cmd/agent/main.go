@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/OboardProject/oboard-agent/internal/agent"
@@ -16,8 +17,9 @@ import (
 )
 
 func main() {
-	if filepath.Base(os.Args[0]) == "obag" {
-		os.Exit(agent.RunManagementConsole(defaultConfig(), os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
+	args := os.Args[1:]
+	if filepath.Base(os.Args[0]) == "obag" || isManagementCommand(args) {
+		os.Exit(agent.RunManagementConsole(defaultConfig(), args, os.Stdin, os.Stdout, os.Stderr))
 	}
 	showVersion := flag.Bool("version", false, "print version and exit")
 	configPath := flag.String("config", defaultConfig(), "agent config path")
@@ -124,6 +126,20 @@ func main() {
 	}
 	if err := runner.Run(ctx); err != nil {
 		log.Fatal(err)
+	}
+}
+
+// isManagementCommand reports whether the first argument selects the local
+// management console so the binary works even without the obag symlink.
+func isManagementCommand(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(args[0])) {
+	case "status", "start", "stop", "restart", "logs", "log", "check", "connection", "controller", "help":
+		return true
+	default:
+		return false
 	}
 }
 

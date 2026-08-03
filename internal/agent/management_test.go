@@ -20,6 +20,22 @@ func TestManagementConsoleMenuExit(t *testing.T) {
 	}
 }
 
+func TestManagementConsoleCommandHelpAndUnknown(t *testing.T) {
+	var out bytes.Buffer
+	code := RunManagementConsole("/missing/config.json", []string{"help"}, nil, &out, &out)
+	if code != 0 {
+		t.Fatalf("help exit code = %d", code)
+	}
+	if !strings.Contains(out.String(), "obag status") {
+		t.Fatalf("help output does not list obag commands: %s", out.String())
+	}
+	out.Reset()
+	code = RunManagementConsole("/missing/config.json", []string{"bogus-command"}, nil, &out, &out)
+	if code != 2 {
+		t.Fatalf("unknown command exit code = %d", code)
+	}
+}
+
 func TestManagementControllerCheck(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/healthz" {
