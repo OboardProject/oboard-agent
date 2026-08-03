@@ -114,6 +114,7 @@ type Runner struct {
 	resources                  ResourceInfo
 	tuning                     RuntimeTuning
 	sshInboundManager          *sshInboundManager
+	sshOutboundRelayDial       outboundRelayDialFunc
 	forwardDesiredState        string
 	tunnelDesiredState         string
 	sshInboundDesiredState     string

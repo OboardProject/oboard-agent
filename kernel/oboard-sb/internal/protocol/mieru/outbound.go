@@ -39,6 +39,7 @@ type Outbound struct {
 var _ adapter.Outbound = (*Outbound)(nil)
 
 func NewOutbound(ctx context.Context, _ adapter.Router, logger log.ContextLogger, tag string, options OutboundOptions) (adapter.Outbound, error) {
+	applyRuntimeClock(ctx)
 	outboundDialer, err := dialer.New(ctx, options.DialerOptions, options.ServerIsDomain())
 	if err != nil {
 		return nil, err

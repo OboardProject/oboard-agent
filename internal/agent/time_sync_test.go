@@ -163,3 +163,22 @@ func TestTurningTimeCorrectionOffClearsLogicalClockWhenSourcesFail(t *testing.T)
 		t.Fatalf("logical clock remained active: state=%#v result=%#v", runner.clock.Snapshot(), result)
 	}
 }
+
+func TestUnsupportedLogicalTimePathsDropsMieruKeepsReality(t *testing.T) {
+	stateDir := t.TempDir()
+	config := `{
+  "outbounds": [
+    {"type": "vless", "tag": "v-out", "tls": {"reality": {"enabled": true}}},
+    {"type": "mieru", "tag": "m-out"},
+    {"type": "shadowsocks", "tag": "s-out"}
+  ]
+}`
+	if err := os.WriteFile(filepath.Join(stateDir, "sing-box.json"), []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runner := New(Config{StateDir: stateDir, TimeSyncCommand: "none", ResourceProfile: "large"})
+	paths := runner.unsupportedLogicalTimePaths()
+	if len(paths) != 1 || paths[0] != "reality_outbound" {
+		t.Fatalf("unsupported logical time paths = %#v, want [reality_outbound]", paths)
+	}
+}

@@ -1,0 +1,145 @@
+diff --git upstream/pkg/cipher/cache.go fork/pkg/cipher/cache.go
+index 37c6a92..e6be4f8 100644
+--- upstream/pkg/cipher/cache.go
++++ fork/pkg/cipher/cache.go
+@@ -44,7 +44,7 @@ func getBlockCipherList(password []byte, stateless bool) ([]BlockCipher, error)
+ 	if ok {
+ 		// Check if the cached entry is expired.
+ 		jitter := time.Duration(mrand.Intn(cacheValidMaxJitterMs)) * time.Millisecond
+-		if c.(cachedCiphers).createTime.Add(cacheValidInterval - jitter).Before(time.Now()) {
++		if c.(cachedCiphers).createTime.Add(cacheValidInterval - jitter).Before(now()) {
+ 			ok = false
+ 		}
+ 	}
+@@ -86,7 +86,7 @@ func getBlockCipherList(password []byte, stateless bool) ([]BlockCipher, error)
+ }
+ 
+ func newBlockCipherList(password []byte, stateless bool) ([]BlockCipher, time.Time, error) {
+-	t := time.Now()
++	t := now()
+ 	salts := saltFromTime(t)
+ 	blockCiphers := make([]BlockCipher, 0, 3)
+ 	for i := 0; i < 3; i++ {
+diff --git fork/pkg/cipher/clock.go fork/pkg/cipher/clock.go
+new file mode 100644
+index 0000000..cf58661
+--- /dev/null
++++ fork/pkg/cipher/clock.go
+@@ -0,0 +1,31 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++//
++// OBoard fork addition: Mieru derives its wire-visible cipher salts from the
++// wall clock. Hosts that run a corrected logical clock must inject it here so
++// client and server keep deriving the same keys.
++
++package cipher
++
++import (
++	"sync/atomic"
++	"time"
++)
++
++var timeNow atomic.Pointer[func() time.Time]
++
++// SetTimeFunc replaces the clock used for wire-visible cipher-salt
++// derivation. A nil function restores the default wall clock.
++func SetTimeFunc(f func() time.Time) {
++	if f == nil {
++		timeNow.Store(nil)
++		return
++	}
++	timeNow.Store(&f)
++}
++
++func now() time.Time {
++	if f := timeNow.Load(); f != nil {
++		return (*f)()
++	}
++	return time.Now()
++}
+diff --git fork/pkg/protocol/clock.go fork/pkg/protocol/clock.go
+new file mode 100644
+index 0000000..c7822b9
+--- /dev/null
++++ fork/pkg/protocol/clock.go
+@@ -0,0 +1,32 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++//
++// OBoard fork addition: every Mieru metadata frame carries a wall-clock
++// minute timestamp that the receiver validates within a one-minute window.
++// Hosts that run a corrected logical clock must inject it here so frames are
++// stamped with the same time base the remote side expects.
++
++package protocol
++
++import (
++	"sync/atomic"
++	"time"
++)
++
++var timeNow atomic.Pointer[func() time.Time]
++
++// SetTimeFunc replaces the clock used for wire-visible metadata timestamps.
++// A nil function restores the default wall clock.
++func SetTimeFunc(f func() time.Time) {
++	if f == nil {
++		timeNow.Store(nil)
++		return
++	}
++	timeNow.Store(&f)
++}
++
++func now() time.Time {
++	if f := timeNow.Load(); f != nil {
++		return (*f)()
++	}
++	return time.Now()
++}
+diff --git upstream/pkg/protocol/metadata.go fork/pkg/protocol/metadata.go
+index c836aa0..29da410 100644
+--- upstream/pkg/protocol/metadata.go
++++ fork/pkg/protocol/metadata.go
+@@ -18,7 +18,6 @@ package protocol
+ import (
+ 	"encoding/binary"
+ 	"fmt"
+-	"time"
+ 
+ 	"github.com/enfein/mieru/v3/pkg/appctl/appctlpb"
+ 	"github.com/enfein/mieru/v3/pkg/mathext"
+@@ -147,7 +146,7 @@ func (ss *sessionStruct) Protocol() protocolType {
+ func (ss *sessionStruct) Marshal() []byte {
+ 	b := make([]byte, MetadataLength)
+ 	b[0] = ss.baseStruct.protocol
+-	ss.baseStruct.timestamp = uint32(time.Now().Unix() / 60)
++	ss.baseStruct.timestamp = uint32(now().Unix() / 60)
+ 	binary.BigEndian.PutUint32(b[2:], ss.baseStruct.timestamp)
+ 	binary.BigEndian.PutUint32(b[6:], ss.sessionID)
+ 	binary.BigEndian.PutUint32(b[10:], ss.seq)
+@@ -166,7 +165,7 @@ func (ss *sessionStruct) Unmarshal(b []byte) error {
+ 		return fmt.Errorf("invalid protocol %d", b[0])
+ 	}
+ 	originalTimestamp := binary.BigEndian.Uint32(b[2:])
+-	currentTimestamp := uint32(time.Now().Unix() / 60)
++	currentTimestamp := uint32(now().Unix() / 60)
+ 	if !mathext.WithinRange(currentTimestamp, originalTimestamp, 1) {
+ 		return fmt.Errorf("invalid timestamp %d", originalTimestamp*60)
+ 	}
+@@ -227,7 +226,7 @@ func (das *dataAckStruct) Marshal() []byte {
+ 	if isLowEntropyProtocol(das.Protocol()) {
+ 		b[1] = das.lowEntropyMode
+ 	}
+-	das.baseStruct.timestamp = uint32(time.Now().Unix() / 60)
++	das.baseStruct.timestamp = uint32(now().Unix() / 60)
+ 	binary.BigEndian.PutUint32(b[2:], das.baseStruct.timestamp)
+ 	binary.BigEndian.PutUint32(b[6:], das.sessionID)
+ 	binary.BigEndian.PutUint32(b[10:], das.seq)
+@@ -255,7 +254,7 @@ func (das *dataAckStruct) Unmarshal(b []byte) error {
+ 		return fmt.Errorf("invalid protocol %d", b[0])
+ 	}
+ 	originalTimestamp := binary.BigEndian.Uint32(b[2:])
+-	currentTimestamp := uint32(time.Now().Unix() / 60)
++	currentTimestamp := uint32(now().Unix() / 60)
+ 	if !mathext.WithinRange(currentTimestamp, originalTimestamp, 1) {
+ 		return fmt.Errorf("invalid timestamp %d", originalTimestamp*60)
+ 	}

@@ -112,7 +112,7 @@ func printVersion() {
 		"built_at":            version.Date,
 		"sing_box_version":    C.Version,
 		"supported_protocols": minibox.SupportedProtocols,
-		"capabilities":        []string{"trusted_forward_v1", "outbound_egress_probe_v1", "runtime_clock_v1"},
+		"capabilities":        []string{"trusted_forward_v1", "outbound_egress_probe_v1", "outbound_relay_v1", "runtime_clock_v1"},
 	}
 	data, _ := json.MarshalIndent(payload, "", "  ")
 	fmt.Println(string(data))
@@ -124,10 +124,11 @@ func serveHealth(ctx context.Context, listen string, instance *box.Box, tracker 
 	}
 	mux := http.NewServeMux()
 	registerOutboundEgressHandler(mux, instance)
+	registerOutboundRelayHandlers(mux, listen, instance)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) { _, _ = fmt.Fprintln(w, "ok") })
 	mux.HandleFunc("/version", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"name": "oboard-sb", "version": version.Version, "build": version.Build, "commit": version.Commit, "built_at": version.Date, "sing_box_version": C.Version, "supported_protocols": minibox.SupportedProtocols, "resource_profile": tuning.Profile, "memory_class": tuning.MemoryClass, "virtualization": tuning.Virtualization, "container": tuning.Container, "effective_memory_bytes": tuning.EffectiveMemoryBytes, "gomaxprocs": runtime.GOMAXPROCS(0), "gc_percent": tuning.GCPercent, "memory_limit_bytes": tuning.MemoryLimitBytes, "memory_reclaimer": memoryReclaimer.Snapshot(), "socket_governor": socketGovernor.Snapshot()})
+		_ = json.NewEncoder(w).Encode(map[string]any{"name": "oboard-sb", "version": version.Version, "build": version.Build, "commit": version.Commit, "built_at": version.Date, "sing_box_version": C.Version, "supported_protocols": minibox.SupportedProtocols, "capabilities": []string{"trusted_forward_v1", "outbound_egress_probe_v1", "outbound_relay_v1", "runtime_clock_v1"}, "resource_profile": tuning.Profile, "memory_class": tuning.MemoryClass, "virtualization": tuning.Virtualization, "container": tuning.Container, "effective_memory_bytes": tuning.EffectiveMemoryBytes, "gomaxprocs": runtime.GOMAXPROCS(0), "gc_percent": tuning.GCPercent, "memory_limit_bytes": tuning.MemoryLimitBytes, "memory_reclaimer": memoryReclaimer.Snapshot(), "socket_governor": socketGovernor.Snapshot()})
 	})
 	mux.HandleFunc("/resources", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

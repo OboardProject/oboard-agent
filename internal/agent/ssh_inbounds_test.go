@@ -6,10 +6,13 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -19,7 +22,7 @@ import (
 )
 
 func testSSHInboundUser(id int64, username, password string) model.SSHInboundUser {
-	return model.SSHInboundUser{UserID: id, Username: username, Password: password, Enabled: true}
+	return model.SSHInboundUser{UserID: id, Username: username, Password: password, PathID: 1, RouteKind: "direct", Enabled: true}
 }
 
 func TestSSHInboundRejectsUnsafeDestinationAddresses(t *testing.T) {
@@ -338,5 +341,63 @@ func TestSSHInboundPlanRejectsDuplicateUsersAndEmptyPasswords(t *testing.T) {
 	user.Password = ""
 	if err := validateSSHInboundPlan(model.SSHInboundPlan{Inbounds: []model.SSHInbound{{InboundID: 1, ServerID: 1, ListenIP: "127.0.0.1", Port: 2222, Enabled: true, Users: []model.SSHInboundUser{user}}}}); err == nil {
 		t.Fatal("empty SSH password was accepted")
+	}
+}
+
+func TestSSHInboundPlanValidatesBoundRoute(t *testing.T) {
+	user := testSSHInboundUser(1, "alice", "password")
+	plan := func(candidate model.SSHInboundUser) model.SSHInboundPlan {
+		return model.SSHInboundPlan{Inbounds: []model.SSHInbound{{InboundID: 1, ServerID: 1, ListenIP: "127.0.0.1", Port: 2222, Enabled: true, Users: []model.SSHInboundUser{candidate}}}}
+	}
+	for name, mutate := range map[string]func(*model.SSHInboundUser){
+		"missing path":         func(user *model.SSHInboundUser) { user.PathID = 0 },
+		"missing route":        func(user *model.SSHInboundUser) { user.RouteKind = "" },
+		"direct with tag":      func(user *model.SSHInboundUser) { user.OutboundTag = "path-1-step-1" },
+		"outbound without tag": func(user *model.SSHInboundUser) { user.RouteKind = "outbound" },
+		"unmanaged tag":        func(user *model.SSHInboundUser) { user.RouteKind = "outbound"; user.OutboundTag = "direct" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := user
+			mutate(&candidate)
+			if err := validateSSHInboundPlan(plan(candidate)); err == nil {
+				t.Fatalf("invalid route was accepted: %#v", candidate)
+			}
+		})
+	}
+	user.RouteKind = "outbound"
+	user.OutboundTag = "path-9-step-2"
+	if err := validateSSHInboundPlan(plan(user)); err != nil {
+		t.Fatalf("valid outbound route was rejected: %v", err)
+	}
+}
+
+func TestSSHOutboundRouteRequiresKernelCapability(t *testing.T) {
+	runner := New(Config{StateDir: t.TempDir()})
+	runner.coreClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"capabilities":["runtime_clock_v1"]}`)), Header: make(http.Header)}, nil
+	})}
+	user := testSSHInboundUser(1, "alice", "password")
+	user.RouteKind = "outbound"
+	user.OutboundTag = "path-9-step-1"
+	plan := model.SSHInboundPlan{Inbounds: []model.SSHInbound{{InboundID: 1, ServerID: 1, ListenIP: "127.0.0.1", Port: 2222, Enabled: true, Users: []model.SSHInboundUser{user}}}}
+	if _, err := runner.newSSHInboundManager(plan); err == nil || !strings.Contains(err.Error(), outboundRelayCapability) {
+		t.Fatalf("missing relay capability error = %v", err)
+	}
+}
+
+func TestDialSSHRelayAddressesUsesSelectedOutbound(t *testing.T) {
+	server, client := net.Pipe()
+	defer server.Close()
+	var network, tag, destination string
+	conn, err := dialSSHRelayAddresses(t.Context(), func(_ context.Context, gotNetwork, gotTag, gotDestination string) (net.Conn, error) {
+		network, tag, destination = gotNetwork, gotTag, gotDestination
+		return client, nil
+	}, "path-9-step-1", []netip.Addr{netip.MustParseAddr("1.1.1.1")}, 443)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if network != "tcp" || tag != "path-9-step-1" || destination != "1.1.1.1:443" {
+		t.Fatalf("relay dial = %q %q %q", network, tag, destination)
 	}
 }

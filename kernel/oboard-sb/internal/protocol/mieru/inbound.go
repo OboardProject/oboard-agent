@@ -56,6 +56,7 @@ type Inbound struct {
 var _ adapter.Inbound = (*Inbound)(nil)
 
 func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options InboundOptions) (adapter.Inbound, error) {
+	applyRuntimeClock(ctx)
 	inboundCtx, cancel := context.WithCancel(ctx)
 	factory := &listenerFactory{ctx: inboundCtx, logger: logger, options: options.ListenOptions}
 	config, err := buildServerConfig(options, factory)

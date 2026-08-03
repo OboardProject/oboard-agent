@@ -14,6 +14,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -31,6 +32,8 @@ const (
 	sshInboundHostKey   = "ssh-inbounds-host-key"
 	sshInboundIOChunk   = 32 << 10
 )
+
+var relayOutboundTagPattern = regexp.MustCompile(`^(?:path-[1-9][0-9]*-step-[1-9][0-9]*|warp-[1-9][0-9]*)$`)
 
 type sshInboundApplyResult struct {
 	Version            int64    `json:"version"`
@@ -54,19 +57,23 @@ type sshInboundManager struct {
 }
 
 type managedSSHInbound struct {
-	plan     model.SSHInbound
-	listener net.Listener
-	auth     map[string]sshInboundCredential
-	counters map[int64]*sshInboundCounter
-	audit    *connectionAuditAccumulator
+	plan      model.SSHInbound
+	listener  net.Listener
+	auth      map[string]sshInboundCredential
+	counters  map[int64]*sshInboundCounter
+	audit     *connectionAuditAccumulator
+	relayDial outboundRelayDialFunc
 
 	mu    sync.Mutex
 	conns map[net.Conn]int64
 }
 
 type sshInboundCredential struct {
-	userID   int64
-	password string
+	userID      int64
+	password    string
+	pathID      int64
+	routeKind   string
+	outboundTag string
 }
 
 type sshInboundCounter struct {
@@ -389,12 +396,23 @@ func (r *Runner) newSSHInboundManager(plan model.SSHInboundPlan) (*sshInboundMan
 	if err != nil {
 		return nil, err
 	}
+	needsRelay := false
+	for _, inbound := range plan.Inbounds {
+		for _, user := range inbound.Users {
+			needsRelay = needsRelay || (user.Enabled && user.RouteKind == "outbound")
+		}
+	}
+	if needsRelay {
+		if err := r.validateOutboundRelayCapability(context.Background()); err != nil {
+			return nil, err
+		}
+	}
 	manager := &sshInboundManager{listeners: make(map[int64]*managedSSHInbound), signer: signer, usage: map[int64]*sshInboundUserUsage{}}
 	for _, planInbound := range plan.Inbounds {
 		if !planInbound.Enabled {
 			continue
 		}
-		inbound, err := newManagedSSHInbound(planInbound, manager.usage, r.connectionAudit)
+		inbound, err := newManagedSSHInbound(planInbound, manager.usage, r.connectionAudit, r.dialSSHOutboundRelay)
 		if err != nil {
 			return nil, err
 		}
@@ -492,6 +510,21 @@ func validateSSHInboundPlan(plan model.SSHInboundPlan) error {
 			if strings.TrimSpace(user.Password) == "" {
 				return fmt.Errorf("SSH inbound user %q has no password", user.Username)
 			}
+			if user.PathID <= 0 {
+				return fmt.Errorf("SSH inbound user %q has no path_id", user.Username)
+			}
+			switch user.RouteKind {
+			case "direct":
+				if strings.TrimSpace(user.OutboundTag) != "" {
+					return fmt.Errorf("SSH inbound user %q direct route has an outbound tag", user.Username)
+				}
+			case "outbound":
+				if !relayOutboundTagPattern.MatchString(strings.TrimSpace(user.OutboundTag)) {
+					return fmt.Errorf("SSH inbound user %q has an invalid outbound tag", user.Username)
+				}
+			default:
+				return fmt.Errorf("SSH inbound user %q has an invalid route_kind", user.Username)
+			}
 		}
 	}
 	return nil
@@ -510,13 +543,13 @@ func validSSHInboundUsername(value string) bool {
 	return true
 }
 
-func newManagedSSHInbound(plan model.SSHInbound, usageByUser map[int64]*sshInboundUserUsage, audit *connectionAuditAccumulator) (*managedSSHInbound, error) {
-	inbound := &managedSSHInbound{plan: plan, auth: map[string]sshInboundCredential{}, counters: map[int64]*sshInboundCounter{}, audit: audit, conns: map[net.Conn]int64{}}
+func newManagedSSHInbound(plan model.SSHInbound, usageByUser map[int64]*sshInboundUserUsage, audit *connectionAuditAccumulator, relayDial outboundRelayDialFunc) (*managedSSHInbound, error) {
+	inbound := &managedSSHInbound{plan: plan, auth: map[string]sshInboundCredential{}, counters: map[int64]*sshInboundCounter{}, audit: audit, relayDial: relayDial, conns: map[net.Conn]int64{}}
 	for _, user := range plan.Users {
 		if !user.Enabled {
 			continue
 		}
-		inbound.auth[user.Username] = sshInboundCredential{userID: user.UserID, password: user.Password}
+		inbound.auth[user.Username] = sshInboundCredential{userID: user.UserID, password: user.Password, pathID: user.PathID, routeKind: user.RouteKind, outboundTag: user.OutboundTag}
 		usage := usageByUser[user.UserID]
 		if usage == nil {
 			usage = &sshInboundUserUsage{periods: map[string]*sshInboundUsagePeriod{}}
@@ -622,7 +655,13 @@ func (m *managedSSHInbound) handle(raw net.Conn, signer ssh.Signer) {
 		if counter == nil || !counter.allowNewConnection() {
 			return nil, errors.New("user traffic quota is exhausted")
 		}
-		return &ssh.Permissions{Extensions: map[string]string{"oboard_user_id": strconv.FormatInt(credential.userID, 10), "oboard_inbound_id": strconv.FormatInt(m.plan.InboundID, 10)}}, nil
+		return &ssh.Permissions{Extensions: map[string]string{
+			"oboard_user_id":      strconv.FormatInt(credential.userID, 10),
+			"oboard_inbound_id":   strconv.FormatInt(m.plan.InboundID, 10),
+			"oboard_path_id":      strconv.FormatInt(credential.pathID, 10),
+			"oboard_route_kind":   credential.routeKind,
+			"oboard_outbound_tag": credential.outboundTag,
+		}}, nil
 	}
 	serverConfig.AddHostKey(signer)
 	connection, channels, requests, err := ssh.NewServerConn(raw, serverConfig)
@@ -659,6 +698,13 @@ func (m *managedSSHInbound) handleDirectTCPIP(connection *ssh.ServerConn, newCha
 		_ = newChannel.Reject(ssh.Prohibited, "invalid authenticated OBoard user")
 		return
 	}
+	pathID, err := strconv.ParseInt(connection.Permissions.Extensions["oboard_path_id"], 10, 64)
+	if err != nil || pathID <= 0 {
+		_ = newChannel.Reject(ssh.Prohibited, "invalid authenticated OBoard path")
+		return
+	}
+	routeKind := connection.Permissions.Extensions["oboard_route_kind"]
+	outboundTag := connection.Permissions.Extensions["oboard_outbound_tag"]
 	counter := m.counterFor(userID)
 	if counter == nil || !counter.allowNewConnection() {
 		_ = newChannel.Reject(ssh.Prohibited, "user traffic quota is exhausted")
@@ -675,7 +721,13 @@ func (m *managedSSHInbound) handleDirectTCPIP(connection *ssh.ServerConn, newCha
 			return
 		}
 		go ssh.DiscardRequests(requests)
-		go serveBadVPNUDPGateway(channel, counter, m.audit, userID, m.plan.InboundID, sourceIPFromNetAddr(connection.RemoteAddr()))
+		dial := badVPNDialFunc(dialBadVPNPacketConn)
+		if routeKind == "outbound" {
+			dial = func(ctx context.Context, destination netip.AddrPort) (badVPNPacketConn, error) {
+				return m.relayDial(ctx, "udp", outboundTag, destination.String())
+			}
+		}
+		go serveBadVPNUDPGateway(channel, counter, m.audit, userID, m.plan.InboundID, pathID, outboundTagForAudit(routeKind, outboundTag), sourceIPFromNetAddr(connection.RemoteAddr()), dial)
 		return
 	}
 	addresses, err := resolvePermittedSSHDestination(context.Background(), payload.DestAddr, payload.DestPort)
@@ -683,7 +735,14 @@ func (m *managedSSHInbound) handleDirectTCPIP(connection *ssh.ServerConn, newCha
 		_ = newChannel.Reject(ssh.Prohibited, err.Error())
 		return
 	}
-	target, err := dialPermittedSSHAddresses(context.Background(), addresses, payload.DestPort)
+	var target net.Conn
+	if routeKind == "direct" {
+		target, err = dialPermittedSSHAddresses(context.Background(), addresses, payload.DestPort)
+	} else if routeKind == "outbound" && m.relayDial != nil {
+		target, err = dialSSHRelayAddresses(context.Background(), m.relayDial, outboundTag, addresses, payload.DestPort)
+	} else {
+		err = errors.New("authenticated SSH route is unavailable")
+	}
 	if err != nil {
 		_ = newChannel.Reject(ssh.ConnectionFailed, "destination connection failed")
 		return
@@ -697,17 +756,40 @@ func (m *managedSSHInbound) handleDirectTCPIP(connection *ssh.ServerConn, newCha
 	finishAudit := m.audit.start(connectionAuditSnapshotItem{
 		UserID:          userID,
 		InboundID:       m.plan.InboundID,
+		PathID:          pathID,
 		SourceIP:        sourceIPFromNetAddr(connection.RemoteAddr()),
 		Network:         "tcp",
 		Destination:     strings.ToLower(strings.TrimSpace(payload.DestAddr)),
 		DestinationPort: int(payload.DestPort),
-		OutboundTag:     "direct",
-		OutboundType:    "direct",
+		OutboundTag:     outboundTagForAudit(routeKind, outboundTag),
+		OutboundType:    routeKind,
 	})
 	go func() {
 		defer finishAudit()
 		proxySSHDirectTCPIP(channel, target, counter)
 	}()
+}
+
+func outboundTagForAudit(routeKind, outboundTag string) string {
+	if routeKind == "direct" {
+		return "direct"
+	}
+	return outboundTag
+}
+
+func dialSSHRelayAddresses(ctx context.Context, dial outboundRelayDialFunc, outboundTag string, addresses []netip.Addr, port uint32) (net.Conn, error) {
+	var lastErr error
+	for _, address := range addresses {
+		conn, err := dial(ctx, "tcp", outboundTag, net.JoinHostPort(address.String(), strconv.FormatUint(uint64(port), 10)))
+		if err == nil {
+			return conn, nil
+		}
+		lastErr = err
+	}
+	if lastErr == nil {
+		lastErr = errors.New("no permitted destination addresses")
+	}
+	return nil, lastErr
 }
 
 func (m *managedSSHInbound) counterFor(userID int64) *sshInboundCounter {

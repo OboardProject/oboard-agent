@@ -690,7 +690,6 @@ type SSHInbound struct {
 	Name      string                          `json:"name"`
 	ListenIP  string                          `json:"listen_ip"`
 	Address   string                          `json:"address"`
-	Username  string                          `json:"username"`
 	Port      int                             `json:"port"`
 	Enabled   bool                            `json:"enabled"`
 	Users     []SSHInboundUser                `json:"users"`
@@ -700,10 +699,13 @@ type SSHInbound struct {
 // SSHInboundUser maps one panel user to an isolated SSH login. Shell access
 // and agent forwarding are intentionally unsupported.
 type SSHInboundUser struct {
-	UserID   int64  `json:"user_id"`
-	Username string `json:"username"`
-	Password string `json:"password"`
-	Enabled  bool   `json:"enabled"`
+	UserID      int64  `json:"user_id"`
+	Username    string `json:"username"`
+	Password    string `json:"password"`
+	PathID      int64  `json:"path_id"`
+	RouteKind   string `json:"route_kind"`
+	OutboundTag string `json:"outbound_tag,omitempty"`
+	Enabled     bool   `json:"enabled"`
 }
 
 type AgentTask struct {

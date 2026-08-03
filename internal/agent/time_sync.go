@@ -393,9 +393,10 @@ func (r *Runner) unsupportedLogicalTimePaths() []string {
 	}
 	seen := map[string]bool{}
 	for _, outbound := range config.Outbounds {
-		if outbound.Type == "mieru" {
-			seen["mieru_outbound"] = true
-		}
+		// Mieru outbounds are fully covered since the kernel injects the
+		// logical clock into the Mieru fork's wire timestamps and cipher
+		// salts. Reality remains limited because sing-box stamps part of the
+		// ClientHello session ID from the raw wall clock.
 		if outbound.TLS != nil && outbound.TLS.Reality != nil {
 			seen["reality_outbound"] = true
 		}
@@ -454,7 +455,7 @@ func autoTimeSyncCommand(servers []string) (string, []string, error) {
 }
 
 func defaultTimeServers() []string {
-	return []string{"time.cloudflare.com", "time.google.com", "pool.ntp.org"}
+	return []string{"time.cloudflare.com", "time.google.com", "ntp.aliyun.com"}
 }
 
 func absDuration(value time.Duration) time.Duration {

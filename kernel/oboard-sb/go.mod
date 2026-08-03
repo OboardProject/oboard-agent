@@ -78,3 +78,5 @@ require (
 	google.golang.org/grpc v1.79.1 // indirect
 	lukechampine.com/blake3 v1.3.0 // indirect
 )
+
+replace github.com/enfein/mieru/v3 => ./third_party/mieru

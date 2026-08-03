@@ -45,13 +45,15 @@ type badVPNFrame struct {
 }
 
 type badVPNGateway struct {
-	stream    badVPNGatewayStream
-	counter   *sshInboundCounter
-	audit     *connectionAuditAccumulator
-	userID    int64
-	inboundID int64
-	sourceIP  string
-	dial      badVPNDialFunc
+	stream      badVPNGatewayStream
+	counter     *sshInboundCounter
+	audit       *connectionAuditAccumulator
+	userID      int64
+	inboundID   int64
+	pathID      int64
+	outboundTag string
+	sourceIP    string
+	dial        badVPNDialFunc
 
 	mu           sync.Mutex
 	writeMu      sync.Mutex
@@ -74,15 +76,17 @@ func isBadVPNUDPGatewayDestination(host string, port uint32) bool {
 	return port == badVPNUDPGatewayPort && (host == "127.0.0.1" || host == "::1")
 }
 
-func serveBadVPNUDPGateway(stream badVPNGatewayStream, counter *sshInboundCounter, audit *connectionAuditAccumulator, userID, inboundID int64, sourceIP string) {
+func serveBadVPNUDPGateway(stream badVPNGatewayStream, counter *sshInboundCounter, audit *connectionAuditAccumulator, userID, inboundID, pathID int64, outboundTag, sourceIP string, dial badVPNDialFunc) {
 	gateway := &badVPNGateway{
 		stream:       stream,
 		counter:      counter,
 		audit:        audit,
 		userID:       userID,
 		inboundID:    inboundID,
+		pathID:       pathID,
+		outboundTag:  outboundTag,
 		sourceIP:     sourceIP,
-		dial:         dialBadVPNPacketConn,
+		dial:         dial,
 		associations: make(map[uint16]*badVPNAssociation),
 	}
 	gateway.serve()
@@ -148,12 +152,13 @@ func (g *badVPNGateway) association(frame badVPNFrame) (*badVPNAssociation, erro
 		finishAudit: g.audit.start(connectionAuditSnapshotItem{
 			UserID:          g.userID,
 			InboundID:       g.inboundID,
+			PathID:          g.pathID,
 			SourceIP:        g.sourceIP,
 			Network:         "udp",
 			Destination:     frame.destination.Addr().String(),
 			DestinationPort: int(frame.destination.Port()),
-			OutboundTag:     "direct",
-			OutboundType:    "direct",
+			OutboundTag:     g.outboundTag,
+			OutboundType:    map[bool]string{true: "direct", false: "outbound"}[g.outboundTag == "direct"],
 		}),
 	}
 
