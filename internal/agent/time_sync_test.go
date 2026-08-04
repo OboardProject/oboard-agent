@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -105,6 +106,9 @@ func TestTimeCorrectionModesUseExpectedClockStrategy(t *testing.T) {
 			if (result.SystemSyncError != "") != test.wantSystemError {
 				t.Fatalf("system sync error = %q", result.SystemSyncError)
 			}
+			if result.Error != "" {
+				t.Fatalf("time check reported a core error before core configuration: %q", result.Error)
+			}
 			if test.wantLogical && absDuration(runner.clock.Now().Sub(time.Now().Add(45*time.Second))) > time.Second {
 				t.Fatalf("logical clock did not apply expected offset: now=%s", runner.clock.Now())
 			}
@@ -123,6 +127,33 @@ func TestTimeCheckKeepsEffectiveOffsetWhenCorrectionIsNotNeeded(t *testing.T) {
 		if result.Status != "ok" || result.RawOffsetMS != 12_000 || result.EffectiveOffsetMS != 12_000 || result.LogicalTimeActive {
 			t.Fatalf("mode %s result = %#v", mode, result)
 		}
+	}
+}
+
+func TestConfigureCoreClockDefersUntilCoreIsConfigured(t *testing.T) {
+	stateDir := t.TempDir()
+	runner := New(Config{StateDir: stateDir, TimeSyncCommand: "none", ResourceProfile: "large"})
+	requests := 0
+	runner.coreClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		requests++
+		return nil, errors.New("core unavailable")
+	})}
+
+	if err := runner.configureCoreClock(context.Background()); err != nil {
+		t.Fatalf("clock sync before core configuration = %v", err)
+	}
+	if requests != 0 {
+		t.Fatalf("clock sync requests before core configuration = %d, want 0", requests)
+	}
+
+	if err := os.WriteFile(filepath.Join(stateDir, "sing-box.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := runner.configureCoreClock(context.Background()); err == nil || !strings.Contains(err.Error(), "core unavailable") {
+		t.Fatalf("clock sync with configured unavailable core = %v", err)
+	}
+	if requests != 1 {
+		t.Fatalf("clock sync requests with core configuration = %d, want 1", requests)
 	}
 }
 

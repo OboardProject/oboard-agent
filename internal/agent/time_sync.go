@@ -343,6 +343,18 @@ func normalizeNTPServers(servers []string) ([]string, error) {
 }
 
 func (r *Runner) configureCoreClock(ctx context.Context) error {
+	configPath := filepath.Join(r.stateDir(), "sing-box.json")
+	info, err := os.Stat(configPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("inspect core config: %w", err)
+	}
+	if info.Size() == 0 {
+		return nil
+	}
+
 	state := r.clock.Snapshot()
 	body, err := json.Marshal(map[string]any{
 		"enabled":        state.Enabled,
