@@ -691,6 +691,12 @@ func (r *Runner) executeAgentTask(task model.AgentTask) (string, string) {
 	case model.AgentTaskTypeDiagnoseNetwork:
 		result := r.runNetworkDiagnostics(task.PayloadJSON)
 		return "succeeded", jsonMap(result)
+	case model.AgentTaskTypeListNetworkInterfaces:
+		interfaces, err := listNetworkInterfaces()
+		if err != nil {
+			return "failed", jsonResult(err.Error())
+		}
+		return "succeeded", jsonMap(map[string]any{"message": "network interfaces listed", "interfaces": interfaces})
 	case model.AgentTaskTypeProbeInbounds:
 		var plan model.InboundProbePlan
 		if err := json.Unmarshal([]byte(task.PayloadJSON), &plan); err != nil {

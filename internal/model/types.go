@@ -723,21 +723,30 @@ type AgentTask struct {
 }
 
 const (
-	AgentTaskTypeApplyDeployment      = "apply_deployment"
-	AgentTaskTypeApplyCoreConfig      = "apply_core_config"
-	AgentTaskTypeUpdateAgent          = "update_agent"
-	AgentTaskTypeUpdateAgentConfig    = "update_agent_config"
-	AgentTaskTypeDiagnoseNetwork      = "diagnose_network"
-	AgentTaskTypeProbeInbounds        = "probe_inbounds"
-	AgentTaskTypeProbePortForwards    = "probe_port_forwards"
-	AgentTaskTypeProbeExternalEgress  = "probe_external_egress"
-	AgentTaskTypeDetectMTU            = "detect_mtu"
-	AgentTaskTypeBenchmarkDNS         = "benchmark_dns"
-	AgentTaskTypeCollectLogs          = "collect_logs"
-	AgentTaskTypeManageLogs           = "manage_logs"
-	AgentTaskTypeCheckTime            = "check_time"
-	AgentTaskTypeIssueCertificateHTTP = "issue_certificate_http01"
+	AgentTaskTypeApplyDeployment       = "apply_deployment"
+	AgentTaskTypeApplyCoreConfig       = "apply_core_config"
+	AgentTaskTypeUpdateAgent           = "update_agent"
+	AgentTaskTypeUpdateAgentConfig     = "update_agent_config"
+	AgentTaskTypeDiagnoseNetwork       = "diagnose_network"
+	AgentTaskTypeListNetworkInterfaces = "list_network_interfaces"
+	AgentTaskTypeProbeInbounds         = "probe_inbounds"
+	AgentTaskTypeProbePortForwards     = "probe_port_forwards"
+	AgentTaskTypeProbeExternalEgress   = "probe_external_egress"
+	AgentTaskTypeDetectMTU             = "detect_mtu"
+	AgentTaskTypeBenchmarkDNS          = "benchmark_dns"
+	AgentTaskTypeCollectLogs           = "collect_logs"
+	AgentTaskTypeManageLogs            = "manage_logs"
+	AgentTaskTypeCheckTime             = "check_time"
+	AgentTaskTypeIssueCertificateHTTP  = "issue_certificate_http01"
 )
+
+type NetworkInterfaceInfo struct {
+	Name      string   `json:"name"`
+	Up        bool     `json:"up"`
+	Running   bool     `json:"running"`
+	Loopback  bool     `json:"loopback"`
+	Addresses []string `json:"addresses"`
+}
 
 type AgentEnrollRequest struct {
 	EnrollmentToken string       `json:"enrollment_token"`
