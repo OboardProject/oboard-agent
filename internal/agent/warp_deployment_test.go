@@ -1,7 +1,10 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -77,6 +80,83 @@ func TestNormalizeWARPDomainResolverRemovesExplicitResolverForAuto(t *testing.T)
 	normalizeWARPDomainResolver(endpoint, model.WARPRequestPlan{DNSStrategy: "auto"})
 	if _, ok := endpoint["domain_resolver"]; ok {
 		t.Fatalf("auto WARP endpoint retained domain_resolver: %#v", endpoint)
+	}
+}
+
+func TestWarpMTUClampsTo1280(t *testing.T) {
+	for requested, want := range map[int]int{0: 1280, 1280: 1280, 1420: 1280, 1500: 1280, 9000: 1280, 1200: 1200} {
+		if got := warpMTU(requested); got != want {
+			t.Fatalf("warpMTU(%d) = %d, want %d", requested, got, want)
+		}
+	}
+}
+
+func TestRegisterWARPWireGuardClampsServerMTU(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"device-id","config":{"client_id":"AQID","interface":{"addresses":{"v4":"172.16.0.2/32","v6":"2606:4700:110:abcd::2/128"}}}}`))
+	}))
+	defer server.Close()
+
+	// A server whose main-network MTU detection stored 1500 must never leak
+	// into the WARP tunnel; large encrypted datagrams are fragmented and
+	// dropped on typical paths, stalling page loads while small packets pass.
+	endpoint, err := registerWARPWireGuard(context.Background(), server.Client(), server.URL, model.WARPRequestPlan{ProfileID: 7, MTU: 1500, DNSStrategy: "prefer_ipv4"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if endpoint["mtu"] != 1280 {
+		t.Fatalf("WARP MTU = %#v, want 1280", endpoint["mtu"])
+	}
+}
+
+func TestWGCFProfileToSingBoxClampsServerMTU(t *testing.T) {
+	profile := `[Interface]
+PrivateKey = private-key
+Address = 172.16.0.2/32
+MTU = 1280
+
+[Peer]
+PublicKey = public-key
+Endpoint = engage.cloudflareclient.com:2408
+AllowedIPs = 0.0.0.0/0, ::/0
+Reserved = 1,2,3
+`
+	outbound, err := wgcfProfileToSingBox(profile, model.WARPRequestPlan{ProfileID: 7, MTU: 1500, DNSStrategy: "prefer_ipv4"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outbound["mtu"] != 1280 {
+		t.Fatalf("wgcf WARP MTU = %#v, want 1280", outbound["mtu"])
+	}
+}
+
+func TestLoadPersistedWARPConfigClampsPoisonedMTU(t *testing.T) {
+	runner := New(Config{StateDir: t.TempDir()})
+	report := runner.persistReadyWARPReport(model.WARPConfigReport{ServerID: 1, ProfileID: 9}, map[string]any{"type": "wireguard", "tag": "warp-9", "private_key": "private", "address": []string{"172.16.0.2/32"}, "mtu": 1500, "peers": []any{}, "domain_resolver": map[string]any{"server": "bootstrap", "strategy": "prefer_ipv4"}})
+	if report.MTU != 1280 {
+		t.Fatalf("persist report MTU = %d, want 1280", report.MTU)
+	}
+	loaded, err := runner.loadPersistedWARPConfig(model.WARPRequestPlan{ServerID: 1, ProfileID: 9, MTU: 1500, DNSStrategy: "prefer_ipv4"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.MTU != 1280 {
+		t.Fatalf("loaded report MTU = %d, want 1280", loaded.MTU)
+	}
+	var endpoint map[string]any
+	if err := json.Unmarshal([]byte(loaded.ConfigJSON), &endpoint); err != nil {
+		t.Fatal(err)
+	}
+	if mtu, ok := endpoint["mtu"].(float64); !ok || int(mtu) != 1280 {
+		t.Fatalf("persisted endpoint MTU = %#v, want 1280", endpoint["mtu"])
+	}
+	onDisk, err := os.ReadFile(filepath.Join(runner.stateDir(), "warp", "9", "endpoint.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(onDisk), `"mtu":1500`) || !strings.Contains(string(onDisk), `"mtu":1280`) {
+		t.Fatalf("persisted endpoint was not rewritten with the clamped MTU: %s", onDisk)
 	}
 }
 

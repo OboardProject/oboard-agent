@@ -26,7 +26,23 @@ const (
 	warpRegistrationURL      = "https://api.cloudflareclient.com/v0a2158/reg"
 	warpPeerPublicKey        = "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo="
 	warpBootstrapResolverTag = "bootstrap-primary"
+	// warpTunnelMTU is the fixed WARP WireGuard tunnel MTU (Cloudflare's
+	// standard value). Never inherit the main-network MTU: encrypted outer
+	// packets add WireGuard/IP/UDP headers, and oversized datagrams get
+	// fragmented and dropped on many paths, stalling page loads while small
+	// control packets still pass.
+	warpTunnelMTU = 1280
 )
+
+// warpMTU returns the WARP WireGuard tunnel MTU for a requested value. Any
+// value above 1280 (for example the server's main-network MTU) is unsafe for
+// WARP and is clamped to the fixed 1280 tunnel MTU.
+func warpMTU(requested int) int {
+	if requested <= 0 || requested > warpTunnelMTU {
+		return warpTunnelMTU
+	}
+	return requested
+}
 
 func resolveWarpCommand(raw string) (string, error) {
 	raw = strings.TrimSpace(raw)
@@ -118,11 +134,16 @@ func (r *Runner) loadPersistedWARPConfig(plan model.WARPRequestPlan) (model.WARP
 	resolverBefore, _ := json.Marshal(endpoint["domain_resolver"])
 	normalizeWARPDomainResolver(endpoint, plan)
 	resolverAfter, _ := json.Marshal(endpoint["domain_resolver"])
-	report := model.WARPConfigReport{ServerID: plan.ServerID, ProfileID: plan.ProfileID, Status: model.WARPStatusReady, ConfigJSON: string(raw), ResultJSON: string(raw), MTU: plan.MTU}
+	mtuBefore, _ := json.Marshal(endpoint["mtu"])
+	if mtu, ok := endpoint["mtu"].(float64); ok && mtu > 0 {
+		endpoint["mtu"] = warpMTU(int(mtu))
+	}
+	mtuAfter, _ := json.Marshal(endpoint["mtu"])
+	report := model.WARPConfigReport{ServerID: plan.ServerID, ProfileID: plan.ProfileID, Status: model.WARPStatusReady, ConfigJSON: string(raw), ResultJSON: string(raw), MTU: warpMTU(plan.MTU)}
 	if mtu, ok := endpoint["mtu"].(float64); ok && mtu > 0 {
 		report.MTU = int(mtu)
 	}
-	if !bytes.Equal(resolverBefore, resolverAfter) {
+	if !bytes.Equal(resolverBefore, resolverAfter) || !bytes.Equal(mtuBefore, mtuAfter) {
 		return r.persistReadyWARPReport(report, endpoint), nil
 	}
 	return report, nil
@@ -144,6 +165,12 @@ func (r *Runner) persistReadyWARPReport(report model.WARPConfigReport, outbound 
 }
 
 func readyWARPReport(report model.WARPConfigReport, outbound map[string]any) model.WARPConfigReport {
+	switch mtu := outbound["mtu"].(type) {
+	case int:
+		outbound["mtu"] = warpMTU(mtu)
+	case float64:
+		outbound["mtu"] = warpMTU(int(mtu))
+	}
 	b, _ := json.Marshal(outbound)
 	report.ConfigJSON = string(b)
 	report.Status = model.WARPStatusReady
@@ -222,17 +249,13 @@ func registerWARPWireGuard(ctx context.Context, client *http.Client, endpoint st
 		return nil, err
 	}
 	addresses := []string{addressWithPrefix(registration.Config.Interface.Addresses.V4, 32), addressWithPrefix(registration.Config.Interface.Addresses.V6, 128)}
-	mtu := plan.MTU
-	if mtu <= 0 {
-		mtu = 1280
-	}
 	peer := map[string]any{
 		"address": "engage.cloudflareclient.com", "port": 2408, "public_key": warpPeerPublicKey,
 		"allowed_ips": []string{"0.0.0.0/0", "::/0"}, "reserved": reserved,
 	}
 	out := map[string]any{
 		"type": "wireguard", "tag": fmt.Sprintf("warp-%d", plan.ProfileID), "address": addresses,
-		"private_key": privateKey, "mtu": mtu, "peers": []map[string]any{peer},
+		"private_key": privateKey, "mtu": warpMTU(plan.MTU), "peers": []map[string]any{peer},
 	}
 	normalizeWARPDomainResolver(out, plan)
 	return out, nil
@@ -328,18 +351,7 @@ func wgcfProfileToSingBox(profile string, plan model.WARPRequestPlan) (map[strin
 	if plan.IPStack == model.IPStackIPv6Only && net.ParseIP(strings.Trim(host, "[]")) != nil && net.ParseIP(strings.Trim(host, "[]")).To4() != nil {
 		host = "engage.cloudflareclient.com"
 	}
-	mtu := plan.MTU
-	if mtu == 0 {
-		if parsed, _ := strconv.Atoi(iface["MTU"]); parsed > 0 {
-			mtu = parsed
-		}
-	}
-	if mtu == 0 && plan.IPStack == model.IPStackIPv6Only {
-		mtu = 1280
-	}
-	if mtu == 0 {
-		mtu = 1280
-	}
+	mtu := warpMTU(plan.MTU)
 	allowedIPs := splitCSV(peer["AllowedIPs"])
 	if len(allowedIPs) == 0 {
 		allowedIPs = []string{"0.0.0.0/0", "::/0"}
