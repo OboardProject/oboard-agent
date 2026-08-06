@@ -76,13 +76,15 @@ func TestBadVPNGatewayRelaysUDPAndCountsPayload(t *testing.T) {
 	counter := &sshInboundCounter{}
 	audit := newConnectionAuditAccumulator(true)
 	gateway := &badVPNGateway{
-		stream:       server,
-		counter:      counter,
-		audit:        audit,
-		userID:       7,
-		inboundID:    31,
-		sourceIP:     "198.51.100.10",
-		associations: make(map[uint16]*badVPNAssociation),
+		stream:          server,
+		counter:         counter,
+		audit:           audit,
+		userID:          7,
+		inboundID:       31,
+		deviceIDHash:    "0123456789abcdef0123456789abcdef",
+		credentialEpoch: 3,
+		sourceIP:        "198.51.100.10",
+		associations:    make(map[uint16]*badVPNAssociation),
 		dial: func(_ context.Context, destination netip.AddrPort) (badVPNPacketConn, error) {
 			dialed <- destination
 			return fakeUDP, nil
@@ -142,7 +144,7 @@ func TestBadVPNGatewayRelaysUDPAndCountsPayload(t *testing.T) {
 		t.Fatal("BadVPN gateway did not stop with its SSH channel")
 	}
 	auditItems := audit.drain()
-	if len(auditItems) != 1 || auditItems[0].Network != "udp" || auditItems[0].Destination != destination.Addr().String() || auditItems[0].DestinationPort != int(destination.Port()) || auditItems[0].ClosedCount != 1 {
+	if len(auditItems) != 1 || auditItems[0].Network != "udp" || auditItems[0].Destination != destination.Addr().String() || auditItems[0].DestinationPort != int(destination.Port()) || auditItems[0].ClosedCount != 1 || auditItems[0].DeviceIDHash != gateway.deviceIDHash || auditItems[0].CredentialEpoch != gateway.credentialEpoch || auditItems[0].UploadBytes != int64(len("request")) || auditItems[0].DownloadBytes != int64(len("response")) || auditItems[0].PayloadFirstAt == "" || auditItems[0].PayloadLastAt == "" {
 		t.Fatalf("BadVPN audit items = %#v", auditItems)
 	}
 }

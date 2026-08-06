@@ -33,11 +33,15 @@ const (
 	sshInboundIOChunk   = 32 << 10
 )
 
-var relayOutboundTagPattern = regexp.MustCompile(`^(?:path-[1-9][0-9]*-step-[1-9][0-9]*|warp-[1-9][0-9]*)$`)
+var (
+	relayOutboundTagPattern = regexp.MustCompile(`^(?:path-[1-9][0-9]*-step-[1-9][0-9]*|warp-[1-9][0-9]*)$`)
+	sshDeviceIDHashPattern  = regexp.MustCompile(`^[A-Za-z0-9_-]{16,128}$`)
+)
 
 type sshInboundApplyResult struct {
 	Version            int64    `json:"version"`
 	Unchanged          bool     `json:"unchanged,omitempty"`
+	RuntimeOnly        bool     `json:"runtime_only,omitempty"`
 	Applied            int      `json:"applied"`
 	Listeners          int      `json:"listeners"`
 	Users              int      `json:"users"`
@@ -60,6 +64,7 @@ type managedSSHInbound struct {
 	plan      model.SSHInbound
 	listener  net.Listener
 	auth      map[string]sshInboundCredential
+	authMu    sync.RWMutex
 	counters  map[int64]*sshInboundCounter
 	audit     *connectionAuditAccumulator
 	relayDial outboundRelayDialFunc
@@ -69,11 +74,14 @@ type managedSSHInbound struct {
 }
 
 type sshInboundCredential struct {
-	userID      int64
-	password    string
-	pathID      int64
-	routeKind   string
-	outboundTag string
+	userID           int64
+	password         string
+	deviceIDHash     string
+	credentialEpoch  int64
+	credentialStatus string
+	pathID           int64
+	routeKind        string
+	outboundTag      string
 }
 
 type sshInboundCounter struct {
@@ -148,6 +156,43 @@ func (r *Runner) applySSHInbounds(plan model.SSHInboundPlan) (sshInboundApplyRes
 		return result, err
 	} else if err := os.Remove(backup); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return result, err
+	}
+	if len(previousPlan) > 0 {
+		var previous model.SSHInboundPlan
+		r.mu.Lock()
+		manager := r.sshInboundManager
+		r.mu.Unlock()
+		if json.Unmarshal(previousPlan, &previous) == nil && manager != nil && manager.credentialStateOnlyCompatible(plan) {
+			encoded, marshalErr := json.MarshalIndent(plan, "", "  ")
+			if marshalErr != nil {
+				return result, marshalErr
+			}
+			if err := atomicWriteFile(current, encoded, 0o600); err != nil {
+				return result, err
+			}
+			manager.applyCredentialStates(plan)
+			if err := r.reconcileSSHAndCoreTrafficPolicies(context.Background(), plan); err != nil {
+				_ = atomicWriteFile(current, previousPlan, 0o600)
+				manager.applyCredentialStates(previous)
+				_ = r.reconcileSSHAndCoreTrafficPolicies(context.Background(), previous)
+				return result, fmt.Errorf("update SSH credential runtime state: %w", err)
+			}
+			r.sshInboundDesiredState = desiredState
+			result.RuntimeOnly = true
+			for _, inbound := range plan.Inbounds {
+				if !inbound.Enabled {
+					continue
+				}
+				result.Applied++
+				result.Listeners++
+				for _, user := range inbound.Users {
+					if user.Enabled {
+						result.Users++
+					}
+				}
+			}
+			return result, nil
+		}
 	}
 
 	manager, err := r.newSSHInboundManager(plan)
@@ -421,6 +466,82 @@ func (r *Runner) newSSHInboundManager(plan model.SSHInboundPlan) (*sshInboundMan
 	return manager, nil
 }
 
+func (m *sshInboundManager) credentialStateOnlyCompatible(plan model.SSHInboundPlan) bool {
+	if m == nil {
+		return false
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	enabled := 0
+	for _, planned := range plan.Inbounds {
+		if !planned.Enabled {
+			continue
+		}
+		enabled++
+		current := m.listeners[planned.InboundID]
+		if current == nil || current.plan.InboundID != planned.InboundID || current.plan.ServerID != planned.ServerID || current.plan.Name != planned.Name || current.plan.ListenIP != planned.ListenIP || current.plan.Address != planned.Address || current.plan.Port != planned.Port || current.plan.Enabled != planned.Enabled {
+			return false
+		}
+		wanted := sshInboundCredentials(planned.Users)
+		current.authMu.RLock()
+		if len(current.auth) != len(wanted) {
+			current.authMu.RUnlock()
+			return false
+		}
+		compatible := true
+		for username, expected := range wanted {
+			actual, ok := current.auth[username]
+			actual.credentialStatus = ""
+			expected.credentialStatus = ""
+			if !ok || actual != expected {
+				compatible = false
+				break
+			}
+		}
+		current.authMu.RUnlock()
+		if !compatible {
+			return false
+		}
+	}
+	return enabled == len(m.listeners)
+}
+
+func (m *sshInboundManager) applyCredentialStates(plan model.SSHInboundPlan) {
+	if m == nil {
+		return
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, planned := range plan.Inbounds {
+		current := m.listeners[planned.InboundID]
+		if current == nil || !planned.Enabled {
+			continue
+		}
+		wanted := sshInboundCredentials(planned.Users)
+		current.authMu.Lock()
+		for username, credential := range wanted {
+			current.auth[username] = credential
+		}
+		current.plan = planned
+		current.authMu.Unlock()
+	}
+}
+
+func sshInboundCredentials(users []model.SSHInboundUser) map[string]sshInboundCredential {
+	out := map[string]sshInboundCredential{}
+	for _, user := range users {
+		if !user.Enabled {
+			continue
+		}
+		status := strings.TrimSpace(user.CredentialStatus)
+		if status == "" {
+			status = "active"
+		}
+		out[user.Username] = sshInboundCredential{userID: user.UserID, password: user.Password, deviceIDHash: strings.TrimSpace(user.DeviceIDHash), credentialEpoch: user.CredentialEpoch, credentialStatus: status, pathID: user.PathID, routeKind: user.RouteKind, outboundTag: user.OutboundTag}
+	}
+	return out
+}
+
 func (r *Runner) partitionSSHInboundPlanPolicies(plan model.SSHInboundPlan) (model.SSHInboundPlan, error) {
 	coreUsers, err := r.currentCoreTrafficPolicyUsers()
 	if err != nil {
@@ -510,6 +631,25 @@ func validateSSHInboundPlan(plan model.SSHInboundPlan) error {
 			if strings.TrimSpace(user.Password) == "" {
 				return fmt.Errorf("SSH inbound user %q has no password", user.Username)
 			}
+			deviceIDHash := strings.TrimSpace(user.DeviceIDHash)
+			credentialStatus := strings.TrimSpace(user.CredentialStatus)
+			if credentialStatus == "" {
+				credentialStatus = "active"
+			}
+			if deviceIDHash == "" {
+				if user.CredentialEpoch != 0 || credentialStatus != "active" {
+					return fmt.Errorf("SSH inbound legacy user %q has invalid device credential metadata", user.Username)
+				}
+			} else {
+				if !sshDeviceIDHashPattern.MatchString(deviceIDHash) || user.CredentialEpoch <= 0 {
+					return fmt.Errorf("SSH inbound user %q has invalid device credential metadata", user.Username)
+				}
+				switch credentialStatus {
+				case "active", "reject_new", "disconnect_and_reject", "revoked", "disabled":
+				default:
+					return fmt.Errorf("SSH inbound user %q has invalid credential_status", user.Username)
+				}
+			}
 			if user.PathID <= 0 {
 				return fmt.Errorf("SSH inbound user %q has no path_id", user.Username)
 			}
@@ -544,12 +684,11 @@ func validSSHInboundUsername(value string) bool {
 }
 
 func newManagedSSHInbound(plan model.SSHInbound, usageByUser map[int64]*sshInboundUserUsage, audit *connectionAuditAccumulator, relayDial outboundRelayDialFunc) (*managedSSHInbound, error) {
-	inbound := &managedSSHInbound{plan: plan, auth: map[string]sshInboundCredential{}, counters: map[int64]*sshInboundCounter{}, audit: audit, relayDial: relayDial, conns: map[net.Conn]int64{}}
+	inbound := &managedSSHInbound{plan: plan, auth: sshInboundCredentials(plan.Users), counters: map[int64]*sshInboundCounter{}, audit: audit, relayDial: relayDial, conns: map[net.Conn]int64{}}
 	for _, user := range plan.Users {
 		if !user.Enabled {
 			continue
 		}
-		inbound.auth[user.Username] = sshInboundCredential{userID: user.UserID, password: user.Password, pathID: user.PathID, routeKind: user.RouteKind, outboundTag: user.OutboundTag}
 		usage := usageByUser[user.UserID]
 		if usage == nil {
 			usage = &sshInboundUserUsage{periods: map[string]*sshInboundUsagePeriod{}}
@@ -647,8 +786,14 @@ func (m *managedSSHInbound) serve(listener net.Listener, signer ssh.Signer) {
 func (m *managedSSHInbound) handle(raw net.Conn, signer ssh.Signer) {
 	serverConfig := &ssh.ServerConfig{ServerVersion: "SSH-2.0-OBoard-RestrictedSSH"}
 	serverConfig.PasswordCallback = func(metadata ssh.ConnMetadata, password []byte) (*ssh.Permissions, error) {
+		m.authMu.RLock()
 		credential, ok := m.auth[metadata.User()]
+		m.authMu.RUnlock()
 		if !ok || subtle.ConstantTimeCompare([]byte(credential.password), password) != 1 {
+			return nil, errors.New("password is not authorized")
+		}
+		if credential.credentialStatus != "active" {
+			m.audit.recordCredentialRejected(connectionAuditSnapshotItem{UserID: credential.userID, InboundID: m.plan.InboundID, PathID: credential.pathID, DeviceIDHash: credential.deviceIDHash, CredentialEpoch: credential.credentialEpoch, SourceIP: sourceIPFromNetAddr(metadata.RemoteAddr()), Network: "tcp"})
 			return nil, errors.New("password is not authorized")
 		}
 		counter := m.counterFor(credential.userID)
@@ -659,6 +804,8 @@ func (m *managedSSHInbound) handle(raw net.Conn, signer ssh.Signer) {
 			"oboard_user_id":      strconv.FormatInt(credential.userID, 10),
 			"oboard_inbound_id":   strconv.FormatInt(m.plan.InboundID, 10),
 			"oboard_path_id":      strconv.FormatInt(credential.pathID, 10),
+			"oboard_device_id":    credential.deviceIDHash,
+			"oboard_device_epoch": strconv.FormatInt(credential.credentialEpoch, 10),
 			"oboard_route_kind":   credential.routeKind,
 			"oboard_outbound_tag": credential.outboundTag,
 		}}, nil
@@ -703,6 +850,12 @@ func (m *managedSSHInbound) handleDirectTCPIP(connection *ssh.ServerConn, newCha
 		_ = newChannel.Reject(ssh.Prohibited, "invalid authenticated OBoard path")
 		return
 	}
+	deviceIDHash := strings.TrimSpace(connection.Permissions.Extensions["oboard_device_id"])
+	credentialEpoch, err := strconv.ParseInt(connection.Permissions.Extensions["oboard_device_epoch"], 10, 64)
+	if err != nil || credentialEpoch < 0 || deviceIDHash == "" && credentialEpoch != 0 || deviceIDHash != "" && credentialEpoch <= 0 {
+		_ = newChannel.Reject(ssh.Prohibited, "invalid authenticated OBoard device")
+		return
+	}
 	routeKind := connection.Permissions.Extensions["oboard_route_kind"]
 	outboundTag := connection.Permissions.Extensions["oboard_outbound_tag"]
 	counter := m.counterFor(userID)
@@ -727,7 +880,7 @@ func (m *managedSSHInbound) handleDirectTCPIP(connection *ssh.ServerConn, newCha
 				return m.relayDial(ctx, "udp", outboundTag, destination.String())
 			}
 		}
-		go serveBadVPNUDPGateway(channel, counter, m.audit, userID, m.plan.InboundID, pathID, outboundTagForAudit(routeKind, outboundTag), sourceIPFromNetAddr(connection.RemoteAddr()), dial)
+		go serveBadVPNUDPGateway(channel, counter, m.audit, userID, m.plan.InboundID, pathID, deviceIDHash, credentialEpoch, outboundTagForAudit(routeKind, outboundTag), sourceIPFromNetAddr(connection.RemoteAddr()), dial)
 		return
 	}
 	addresses, err := resolvePermittedSSHDestination(context.Background(), payload.DestAddr, payload.DestPort)
@@ -753,10 +906,12 @@ func (m *managedSSHInbound) handleDirectTCPIP(connection *ssh.ServerConn, newCha
 		return
 	}
 	go ssh.DiscardRequests(requests)
-	finishAudit := m.audit.start(connectionAuditSnapshotItem{
+	auditSession := m.audit.startSession(connectionAuditSnapshotItem{
 		UserID:          userID,
 		InboundID:       m.plan.InboundID,
 		PathID:          pathID,
+		DeviceIDHash:    deviceIDHash,
+		CredentialEpoch: credentialEpoch,
 		SourceIP:        sourceIPFromNetAddr(connection.RemoteAddr()),
 		Network:         "tcp",
 		Destination:     strings.ToLower(strings.TrimSpace(payload.DestAddr)),
@@ -765,8 +920,8 @@ func (m *managedSSHInbound) handleDirectTCPIP(connection *ssh.ServerConn, newCha
 		OutboundType:    routeKind,
 	})
 	go func() {
-		defer finishAudit()
-		proxySSHDirectTCPIP(channel, target, counter)
+		defer auditSession.finish()
+		proxySSHDirectTCPIP(channel, target, counter, auditSession)
 	}()
 }
 
@@ -865,17 +1020,17 @@ func dialPermittedSSHAddresses(ctx context.Context, addresses []netip.Addr, port
 	return nil, lastErr
 }
 
-func proxySSHDirectTCPIP(channel ssh.Channel, target net.Conn, counter *sshInboundCounter) {
+func proxySSHDirectTCPIP(channel ssh.Channel, target net.Conn, counter *sshInboundCounter, auditSession *connectionAuditSession) {
 	defer channel.Close()
 	defer target.Close()
 	done := make(chan struct{}, 2)
 	go func() {
-		copySSHInboundTraffic(target, channel, counter, true)
+		copySSHInboundTraffic(target, channel, counter, auditSession, true)
 		_ = target.Close()
 		done <- struct{}{}
 	}()
 	go func() {
-		copySSHInboundTraffic(channel, target, counter, false)
+		copySSHInboundTraffic(channel, target, counter, auditSession, false)
 		_ = channel.Close()
 		done <- struct{}{}
 	}()
@@ -883,7 +1038,7 @@ func proxySSHDirectTCPIP(channel ssh.Channel, target net.Conn, counter *sshInbou
 	<-done
 }
 
-func copySSHInboundTraffic(dst io.Writer, src io.Reader, counter *sshInboundCounter, upload bool) {
+func copySSHInboundTraffic(dst io.Writer, src io.Reader, counter *sshInboundCounter, auditSession *connectionAuditSession, upload bool) {
 	buffer := make([]byte, sshInboundIOChunk)
 	for {
 		if !counter.allowTransfer() {
@@ -893,6 +1048,7 @@ func copySSHInboundTraffic(dst io.Writer, src io.Reader, counter *sshInboundCoun
 		if n > 0 {
 			written, writeErr := dst.Write(buffer[:n])
 			counter.addTraffic(upload, int64(written))
+			auditSession.addTraffic(upload, int64(written))
 			if writeErr != nil || written != n {
 				return
 			}

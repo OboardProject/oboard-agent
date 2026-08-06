@@ -45,15 +45,17 @@ type badVPNFrame struct {
 }
 
 type badVPNGateway struct {
-	stream      badVPNGatewayStream
-	counter     *sshInboundCounter
-	audit       *connectionAuditAccumulator
-	userID      int64
-	inboundID   int64
-	pathID      int64
-	outboundTag string
-	sourceIP    string
-	dial        badVPNDialFunc
+	stream          badVPNGatewayStream
+	counter         *sshInboundCounter
+	audit           *connectionAuditAccumulator
+	userID          int64
+	inboundID       int64
+	pathID          int64
+	deviceIDHash    string
+	credentialEpoch int64
+	outboundTag     string
+	sourceIP        string
+	dial            badVPNDialFunc
 
 	mu           sync.Mutex
 	writeMu      sync.Mutex
@@ -62,13 +64,13 @@ type badVPNGateway struct {
 }
 
 type badVPNAssociation struct {
-	gateway     *badVPNGateway
-	connection  uint16
-	destination netip.AddrPort
-	conn        badVPNPacketConn
-	lastUsed    time.Time
-	finishAudit func()
-	closeOnce   sync.Once
+	gateway      *badVPNGateway
+	connection   uint16
+	destination  netip.AddrPort
+	conn         badVPNPacketConn
+	lastUsed     time.Time
+	auditSession *connectionAuditSession
+	closeOnce    sync.Once
 }
 
 func isBadVPNUDPGatewayDestination(host string, port uint32) bool {
@@ -76,18 +78,20 @@ func isBadVPNUDPGatewayDestination(host string, port uint32) bool {
 	return port == badVPNUDPGatewayPort && (host == "127.0.0.1" || host == "::1")
 }
 
-func serveBadVPNUDPGateway(stream badVPNGatewayStream, counter *sshInboundCounter, audit *connectionAuditAccumulator, userID, inboundID, pathID int64, outboundTag, sourceIP string, dial badVPNDialFunc) {
+func serveBadVPNUDPGateway(stream badVPNGatewayStream, counter *sshInboundCounter, audit *connectionAuditAccumulator, userID, inboundID, pathID int64, deviceIDHash string, credentialEpoch int64, outboundTag, sourceIP string, dial badVPNDialFunc) {
 	gateway := &badVPNGateway{
-		stream:       stream,
-		counter:      counter,
-		audit:        audit,
-		userID:       userID,
-		inboundID:    inboundID,
-		pathID:       pathID,
-		outboundTag:  outboundTag,
-		sourceIP:     sourceIP,
-		dial:         dial,
-		associations: make(map[uint16]*badVPNAssociation),
+		stream:          stream,
+		counter:         counter,
+		audit:           audit,
+		userID:          userID,
+		inboundID:       inboundID,
+		pathID:          pathID,
+		deviceIDHash:    deviceIDHash,
+		credentialEpoch: credentialEpoch,
+		outboundTag:     outboundTag,
+		sourceIP:        sourceIP,
+		dial:            dial,
+		associations:    make(map[uint16]*badVPNAssociation),
 	}
 	gateway.serve()
 }
@@ -114,6 +118,7 @@ func (g *badVPNGateway) serve() {
 		}
 		written, err := association.conn.Write(frame.payload)
 		g.counter.addTraffic(true, int64(written))
+		association.auditSession.addTraffic(true, int64(written))
 		if err != nil || written != len(frame.payload) {
 			g.removeAssociation(association)
 		}
@@ -149,10 +154,12 @@ func (g *badVPNGateway) association(frame badVPNFrame) (*badVPNAssociation, erro
 		destination: frame.destination,
 		conn:        conn,
 		lastUsed:    time.Now(),
-		finishAudit: g.audit.start(connectionAuditSnapshotItem{
+		auditSession: g.audit.startSession(connectionAuditSnapshotItem{
 			UserID:          g.userID,
 			InboundID:       g.inboundID,
 			PathID:          g.pathID,
+			DeviceIDHash:    g.deviceIDHash,
+			CredentialEpoch: g.credentialEpoch,
 			SourceIP:        g.sourceIP,
 			Network:         "udp",
 			Destination:     frame.destination.Addr().String(),
@@ -209,6 +216,7 @@ func (g *badVPNGateway) writeReply(association *badVPNAssociation, payload []byt
 	g.writeMu.Unlock()
 	if err == nil {
 		g.counter.addTraffic(false, int64(len(payload)))
+		association.auditSession.addTraffic(false, int64(len(payload)))
 	}
 	return err
 }
@@ -246,9 +254,7 @@ func (a *badVPNAssociation) readReplies() {
 func (a *badVPNAssociation) close() {
 	a.closeOnce.Do(func() {
 		_ = a.conn.Close()
-		if a.finishAudit != nil {
-			a.finishAudit()
-		}
+		a.auditSession.finish()
 	})
 }
 

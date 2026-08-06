@@ -699,13 +699,16 @@ type SSHInbound struct {
 // SSHInboundUser maps one panel user to an isolated SSH login. Shell access
 // and agent forwarding are intentionally unsupported.
 type SSHInboundUser struct {
-	UserID      int64  `json:"user_id"`
-	Username    string `json:"username"`
-	Password    string `json:"password"`
-	PathID      int64  `json:"path_id"`
-	RouteKind   string `json:"route_kind"`
-	OutboundTag string `json:"outbound_tag,omitempty"`
-	Enabled     bool   `json:"enabled"`
+	UserID           int64  `json:"user_id"`
+	Username         string `json:"username"`
+	Password         string `json:"password"`
+	DeviceIDHash     string `json:"device_id_hash,omitempty"`
+	CredentialEpoch  int64  `json:"credential_epoch,omitempty"`
+	CredentialStatus string `json:"credential_status,omitempty"`
+	PathID           int64  `json:"path_id"`
+	RouteKind        string `json:"route_kind"`
+	OutboundTag      string `json:"outbound_tag,omitempty"`
+	Enabled          bool   `json:"enabled"`
 }
 
 type AgentTask struct {
@@ -1051,6 +1054,9 @@ type TrafficRuntimePolicy struct {
 	UserID            int64  `json:"user_id"`
 	InboundID         int64  `json:"inbound_id,omitempty"`
 	PathID            int64  `json:"path_id,omitempty"`
+	DeviceIDHash      string `json:"device_id_hash,omitempty"`
+	CredentialEpoch   int64  `json:"credential_epoch,omitempty"`
+	CredentialStatus  string `json:"credential_status,omitempty"`
 	Billable          bool   `json:"billable"`
 	SpeedLimitMbps    int    `json:"speed_limit_mbps,omitempty"`
 	TrafficLimitBytes int64  `json:"traffic_limit_bytes,omitempty"`

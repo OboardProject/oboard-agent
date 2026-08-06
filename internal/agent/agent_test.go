@@ -424,6 +424,67 @@ func TestConnectAcknowledgesReportedTaskOnWebSocket(t *testing.T) {
 	}
 }
 
+func TestConnectSendsPresenceWhileTaskAcknowledgementIsInFlight(t *testing.T) {
+	t.Setenv("OBOARD_DISABLE_PUBLIC_IP_DETECT", "1")
+	token := "agent-token"
+	task := model.AgentTask{ID: 45, ServerID: 1, Type: "unknown", PayloadJSON: "{}", ConfigVersion: 1, Nonce: "presence-task"}
+	signature := security.SignTaskEnvelope(security.HashSecret(token), security.TaskEnvelope{ID: task.ID, ServerID: task.ServerID, Type: task.Type, ConfigVersion: task.ConfigVersion, Nonce: task.Nonce, PayloadJSON: task.PayloadJSON})
+	result := make(chan map[string]bool, 1)
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		switch req.URL.Path {
+		case "/api/v1/agent/connect":
+			conn, err := upgrader.Upgrade(w, req, nil)
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+			var initial map[string]any
+			if conn.ReadJSON(&initial) != nil {
+				return
+			}
+			if conn.WriteJSON(map[string]any{"type": "hello", "server_id": task.ServerID, "connection_audit_enabled": true}) != nil || conn.WriteJSON(map[string]any{"type": "task_request", "task": task, "signature_version": 2, "signature": signature}) != nil {
+				return
+			}
+			seen := map[string]bool{}
+			_ = conn.SetReadDeadline(time.Now().Add(4 * time.Second))
+			for !seen["task_ack"] || !seen["presence_delta"] {
+				var message map[string]any
+				if conn.ReadJSON(&message) != nil {
+					return
+				}
+				if kind, _ := message["type"].(string); kind != "" {
+					seen[kind] = true
+				}
+			}
+			result <- seen
+		case "/api/v1/agent/task-results":
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		default:
+			http.NotFound(w, req)
+		}
+	}))
+	defer server.Close()
+
+	r := New(Config{ControllerURL: server.URL, AgentID: "agent-1", AgentToken: token, StateDir: t.TempDir(), ServerID: task.ServerID, ConnectionAuditEnabled: true})
+	session := r.connectionAudit.startSession(connectionAuditSnapshotItem{UserID: 7, InboundID: 11, SourceIP: "198.51.100.10", Network: "tcp"})
+	defer session.finish()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	connectDone := make(chan error, 1)
+	go func() { connectDone <- r.connect(ctx) }()
+	select {
+	case seen := <-result:
+		if !seen["task_ack"] || !seen["presence_delta"] {
+			t.Fatalf("websocket messages = %#v", seen)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("task acknowledgement and presence delta did not coexist")
+	}
+	cancel()
+	<-connectDone
+}
+
 func TestConnectRejectsLegacyTaskSignatureVersion(t *testing.T) {
 	t.Setenv("OBOARD_DISABLE_PUBLIC_IP_DETECT", "1")
 	token := "agent-token"

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -23,23 +24,27 @@ import (
 const rateLimitIOChunk = 64 * 1024
 
 type RateLimitTracker struct {
-	mu                sync.RWMutex
-	states            map[string]*runtimeState
-	active            map[string]map[*trackedConn]struct{}
-	activePacket      map[string]map[*trackedPacketConn]struct{}
-	auditMu           sync.Mutex
-	auditBuckets      map[string]*ConnectionAuditBucket
-	auditActiveByUser map[int64]int64
-	auditGeneration   uint64
-	auditDropped      int64
-	auditWindowStart  time.Time
-	auditEnabled      atomic.Bool
-	trustedMu         sync.RWMutex
-	trustedSources    map[string]netip.Addr
-	trustedInbounds   []string
-	activeTCP         atomic.Int64
-	socketGovernor    *SocketBufferGovernor
-	now               func() time.Time
+	mu                    sync.RWMutex
+	states                map[string]*runtimeState
+	active                map[string]map[*trackedConn]struct{}
+	activePacket          map[string]map[*trackedPacketConn]struct{}
+	auditMu               sync.Mutex
+	auditBuckets          map[string]*ConnectionAuditBucket
+	auditActiveByIdentity map[string]int64
+	auditGeneration       uint64
+	auditDropped          int64
+	auditWindowStart      time.Time
+	auditEnabled          atomic.Bool
+	auditPresenceSequence atomic.Uint64
+	presenceStates        map[string]*connectionPresenceState
+	presenceEvents        []ConnectionPresenceEvent
+	presenceDropped       int64
+	trustedMu             sync.RWMutex
+	trustedSources        map[string]netip.Addr
+	trustedInbounds       []string
+	activeTCP             atomic.Int64
+	socketGovernor        *SocketBufferGovernor
+	now                   func() time.Time
 }
 
 func (t *RateLimitTracker) timeNow() time.Time {
@@ -180,7 +185,10 @@ func (t *RateLimitTracker) SetConnectionAuditEnabled(enabled bool) {
 	}
 	t.auditMu.Lock()
 	t.auditBuckets = nil
-	t.auditActiveByUser = nil
+	t.auditActiveByIdentity = nil
+	t.presenceStates = nil
+	t.presenceEvents = nil
+	t.presenceDropped = 0
 	t.auditGeneration++
 	t.auditDropped = 0
 	t.auditWindowStart = time.Time{}
@@ -363,6 +371,13 @@ func (s *runtimeState) denied() bool {
 
 func (s *runtimeState) deniedForConnection(admitted bool) bool {
 	config := s.currentConfig()
+	switch normalizeCredentialStatus(config.policy.CredentialStatus) {
+	case "active":
+	case "reject_new", "revoked", "disabled":
+		return !admitted
+	default:
+		return true
+	}
 	if !runtimeConfigDenied(config, s.unacknowledged(config)) {
 		return false
 	}
@@ -371,6 +386,9 @@ func (s *runtimeState) deniedForConnection(admitted bool) bool {
 
 func runtimeConfigDenied(config *runtimeConfig, unacknowledged int64) bool {
 	policy := config.policy
+	if normalizeCredentialStatus(policy.CredentialStatus) != "active" {
+		return true
+	}
 	if !policy.Billable || policy.UserID <= 0 {
 		return false
 	}
@@ -386,6 +404,14 @@ func runtimeConfigDenied(config *runtimeConfig, unacknowledged int64) bool {
 		capBytes = policy.UsedBaselineBytes + policy.LeaseBytes
 	}
 	return used >= capBytes
+}
+
+func normalizeCredentialStatus(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return "active"
+	}
+	return value
 }
 
 func (s *runtimeState) unacknowledged(config *runtimeConfig) int64 {
@@ -515,7 +541,8 @@ func (t *RateLimitTracker) RoutedConnection(ctx context.Context, conn net.Conn, 
 	if config.readLimiter == nil && config.writeLimiter == nil && !config.policy.Billable {
 		return conn
 	}
-	tracked := &trackedConn{ExtendedConn: bufio.NewExtendedConn(conn), ctx: ctx, tracker: t, state: state, admitted: !state.denied(), auditKey: t.recordConnectionStart(state, metadata, outbound, "tcp")}
+	admitted := !state.denied()
+	tracked := &trackedConn{ExtendedConn: bufio.NewExtendedConn(conn), ctx: ctx, tracker: t, state: state, admitted: admitted, auditKey: t.recordConnectionStart(state, metadata, outbound, "tcp", admitted)}
 	t.registerConn(state.key, tracked)
 	if tracked.deny() {
 		_ = tracked.Close()
@@ -535,7 +562,8 @@ func (t *RateLimitTracker) RoutedPacketConnection(ctx context.Context, conn N.Pa
 	if config.readLimiter == nil && config.writeLimiter == nil && !config.policy.Billable {
 		return conn
 	}
-	tracked := &trackedPacketConn{PacketConn: conn, ctx: ctx, tracker: t, state: state, admitted: !state.denied(), auditKey: t.recordConnectionStart(state, metadata, outbound, "udp")}
+	admitted := !state.denied()
+	tracked := &trackedPacketConn{PacketConn: conn, ctx: ctx, tracker: t, state: state, admitted: admitted, auditKey: t.recordConnectionStart(state, metadata, outbound, "udp", admitted)}
 	t.registerPacketConn(state.key, tracked)
 	if tracked.deny() {
 		_ = tracked.Close()
@@ -605,7 +633,7 @@ func (c *trackedConn) Read(p []byte) (int, error) {
 		if waitErr := waitBytes(c.ctx, c.state.currentReadLimiter(), n); waitErr != nil && err == nil {
 			err = waitErr
 		}
-		c.state.addTraffic(int64(n), 0)
+		c.addTraffic(int64(n), 0)
 		if c.deny() {
 			_ = c.Close()
 		}
@@ -621,7 +649,7 @@ func (c *trackedConn) Write(p []byte) (int, error) {
 	if limiter == nil {
 		n, err := c.ExtendedConn.Write(p)
 		if n > 0 {
-			c.state.addTraffic(0, int64(n))
+			c.addTraffic(0, int64(n))
 			if c.deny() {
 				_ = c.Close()
 			}
@@ -641,7 +669,7 @@ func (c *trackedConn) Write(p []byte) (int, error) {
 		n, err := c.ExtendedConn.Write(p[total:end])
 		total += n
 		if n > 0 {
-			c.state.addTraffic(0, int64(n))
+			c.addTraffic(0, int64(n))
 		}
 		if err != nil {
 			return total, err
@@ -673,7 +701,7 @@ func (c *trackedConn) ReadBuffer(buffer *buf.Buffer) error {
 		if waitErr := waitBytes(c.ctx, c.state.currentReadLimiter(), read); waitErr != nil && err == nil {
 			return waitErr
 		}
-		c.state.addTraffic(int64(read), 0)
+		c.addTraffic(int64(read), 0)
 		if c.deny() {
 			_ = c.Close()
 		}
@@ -697,7 +725,7 @@ func (c *trackedConn) WriteBuffer(buffer *buf.Buffer) error {
 		err := c.ExtendedConn.WriteBuffer(buffer)
 		written := before - buffer.Len()
 		if written > 0 {
-			c.state.addTraffic(0, int64(written))
+			c.addTraffic(0, int64(written))
 			if c.deny() {
 				_ = c.Close()
 			}
@@ -710,7 +738,7 @@ func (c *trackedConn) WriteBuffer(buffer *buf.Buffer) error {
 		}
 		n, err := c.ExtendedConn.Write(buffer.To(rateLimitIOChunk))
 		if n > 0 {
-			c.state.addTraffic(0, int64(n))
+			c.addTraffic(0, int64(n))
 			buffer.Advance(n)
 		}
 		if err != nil {
@@ -727,7 +755,7 @@ func (c *trackedConn) WriteBuffer(buffer *buf.Buffer) error {
 	err := c.ExtendedConn.WriteBuffer(buffer)
 	written := size - buffer.Len()
 	if written > 0 {
-		c.state.addTraffic(0, int64(written))
+		c.addTraffic(0, int64(written))
 	}
 	if c.deny() {
 		_ = c.Close()
@@ -736,6 +764,16 @@ func (c *trackedConn) WriteBuffer(buffer *buf.Buffer) error {
 }
 
 func (c *trackedConn) Upstream() any { return c.ExtendedConn }
+
+func (c *trackedConn) addTraffic(upload, download int64) {
+	if c == nil || c.state == nil {
+		return
+	}
+	c.state.addTraffic(upload, download)
+	if c.tracker != nil {
+		c.tracker.recordConnectionPayload(c.auditKey, upload, download)
+	}
+}
 
 func (c *trackedConn) Close() error {
 	if c.closed.CompareAndSwap(false, true) && c.tracker != nil && c.state != nil {
@@ -768,7 +806,7 @@ func (c *trackedCounterConn) countUpload(n int64) {
 	if n <= 0 || c.state == nil {
 		return
 	}
-	c.state.addTraffic(n, 0)
+	c.addTraffic(n, 0)
 	if c.deny() {
 		_ = c.Close()
 	}
@@ -778,7 +816,7 @@ func (c *trackedCounterConn) countDownload(n int64) {
 	if n <= 0 || c.state == nil {
 		return
 	}
-	c.state.addTraffic(0, n)
+	c.addTraffic(0, n)
 	if c.deny() {
 		_ = c.Close()
 	}
@@ -804,7 +842,7 @@ func (c *trackedPacketConn) ReadPacket(buffer *buf.Buffer) (destination M.Socksa
 			buffer.Reset()
 			return destination, nil
 		}
-		c.state.addTraffic(int64(buffer.Len()), 0)
+		c.addTraffic(int64(buffer.Len()), 0)
 		if c.deny() {
 			_ = c.Close()
 		}
@@ -829,7 +867,7 @@ func (c *trackedPacketConn) WritePacket(buffer *buf.Buffer, destination M.Socksa
 		return err
 	}
 	if size > 0 {
-		c.state.addTraffic(0, int64(size))
+		c.addTraffic(0, int64(size))
 		if c.deny() {
 			_ = c.Close()
 		}
@@ -843,6 +881,16 @@ func (c *trackedPacketConn) Close() error {
 		c.tracker.unregisterPacketConn(c.state.key, c)
 	}
 	return c.PacketConn.Close()
+}
+
+func (c *trackedPacketConn) addTraffic(upload, download int64) {
+	if c == nil || c.state == nil {
+		return
+	}
+	c.state.addTraffic(upload, download)
+	if c.tracker != nil {
+		c.tracker.recordConnectionPayload(c.auditKey, upload, download)
+	}
 }
 
 func (c *trackedPacketConn) deny() bool {

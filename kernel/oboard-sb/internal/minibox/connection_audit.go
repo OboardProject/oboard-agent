@@ -9,7 +9,11 @@ import (
 	"github.com/sagernet/sing-box/adapter"
 )
 
-const maxConnectionAuditBuckets = 4096
+const (
+	maxConnectionAuditBuckets   = 4096
+	maxConnectionPresenceEvents = 4096
+	connectionPresenceRefresh   = 30 * time.Second
+)
 
 const connectionAuditHandleSeparator = "\xff"
 
@@ -17,30 +21,71 @@ const connectionAuditHandleSeparator = "\xff"
 // connections. The Agent drains these buckets and moves the history to the
 // Controller; the kernel only retains the current reporting window.
 type ConnectionAuditBucket struct {
-	UserID          int64  `json:"user_id"`
-	InboundID       int64  `json:"inbound_id,omitempty"`
-	PathID          int64  `json:"path_id,omitempty"`
-	SourceIP        string `json:"source_ip"`
-	SourceGeoCode   string `json:"source_geo_code,omitempty"`
-	Network         string `json:"network"`
-	Destination     string `json:"destination,omitempty"`
-	DestinationPort int    `json:"destination_port,omitempty"`
-	OutboundTag     string `json:"outbound_tag,omitempty"`
-	OutboundType    string `json:"outbound_type,omitempty"`
-	ConnectionCount int64  `json:"connection_count"`
-	ClosedCount     int64  `json:"closed_count"`
-	DurationTotalMS int64  `json:"duration_total_ms"`
-	DurationMaxMS   int64  `json:"duration_max_ms"`
-	ActivePeak      int64  `json:"active_peak"`
-	ActiveAtEnd     int64  `json:"active_at_end"`
-	StartedAt       string `json:"started_at"`
-	EndedAt         string `json:"ended_at"`
+	UserID             int64  `json:"user_id"`
+	InboundID          int64  `json:"inbound_id,omitempty"`
+	PathID             int64  `json:"path_id,omitempty"`
+	DeviceIDHash       string `json:"device_id_hash,omitempty"`
+	CredentialEpoch    int64  `json:"credential_epoch,omitempty"`
+	SourceIP           string `json:"source_ip"`
+	SourceGeoCode      string `json:"source_geo_code,omitempty"`
+	Network            string `json:"network"`
+	Destination        string `json:"destination,omitempty"`
+	DestinationPort    int    `json:"destination_port,omitempty"`
+	OutboundTag        string `json:"outbound_tag,omitempty"`
+	OutboundType       string `json:"outbound_type,omitempty"`
+	ConnectionCount    int64  `json:"connection_count"`
+	ClosedCount        int64  `json:"closed_count"`
+	DurationTotalMS    int64  `json:"duration_total_ms"`
+	DurationMaxMS      int64  `json:"duration_max_ms"`
+	UploadBytes        int64  `json:"upload_bytes"`
+	DownloadBytes      int64  `json:"download_bytes"`
+	PayloadFirstAt     string `json:"payload_first_at,omitempty"`
+	PayloadLastAt      string `json:"payload_last_at,omitempty"`
+	DurationLE1SCount  int64  `json:"duration_le_1s_count"`
+	DurationLE5SCount  int64  `json:"duration_le_5s_count"`
+	DurationLE20SCount int64  `json:"duration_le_20s_count"`
+	DurationGT20SCount int64  `json:"duration_gt_20s_count"`
+	ProbeState         string `json:"probe_state,omitempty"`
+	InternalProbe      bool   `json:"internal_probe"`
+	PresenceSequence   uint64 `json:"presence_sequence,omitempty"`
+	ActivePeak         int64  `json:"active_peak"`
+	ActiveAtEnd        int64  `json:"active_at_end"`
+	StartedAt          string `json:"started_at"`
+	EndedAt            string `json:"ended_at"`
 
-	active int64
-	key    string
+	active         int64
+	key            string
+	activeIdentity string
 }
 
-func (t *RateLimitTracker) recordConnectionStart(state *runtimeState, metadata adapter.InboundContext, outbound adapter.Outbound, network string) string {
+type ConnectionPresenceEvent struct {
+	Sequence          uint64 `json:"sequence"`
+	UserID            int64  `json:"user_id"`
+	InboundID         int64  `json:"inbound_id,omitempty"`
+	PathID            int64  `json:"path_id,omitempty"`
+	DeviceIDHash      string `json:"device_id_hash,omitempty"`
+	CredentialEpoch   int64  `json:"credential_epoch,omitempty"`
+	SourceIP          string `json:"source_ip"`
+	Network           string `json:"network"`
+	Event             string `json:"event"`
+	State             string `json:"state"`
+	ActiveConnections int64  `json:"active_connections"`
+	Meaningful        bool   `json:"meaningful"`
+	PayloadLastAt     string `json:"payload_last_at,omitempty"`
+	At                string `json:"at"`
+}
+
+type ConnectionPresenceDrain struct {
+	Events       []ConnectionPresenceEvent `json:"events"`
+	DroppedCount int64                     `json:"dropped_count"`
+}
+
+type connectionPresenceState struct {
+	ConnectionPresenceEvent
+	lastEmittedAt time.Time
+}
+
+func (t *RateLimitTracker) recordConnectionStart(state *runtimeState, metadata adapter.InboundContext, outbound adapter.Outbound, network string, admittedValue ...bool) string {
 	if t == nil || state == nil || !t.auditEnabled.Load() {
 		return ""
 	}
@@ -86,6 +131,10 @@ func (t *RateLimitTracker) recordConnectionStart(state *runtimeState, metadata a
 		outboundType,
 	}, "\x00")
 	now := t.timeNow().UTC()
+	admitted := true
+	if len(admittedValue) > 0 {
+		admitted = admittedValue[0]
+	}
 
 	t.auditMu.Lock()
 	defer t.auditMu.Unlock()
@@ -103,41 +152,97 @@ func (t *RateLimitTracker) recordConnectionStart(state *runtimeState, metadata a
 			return ""
 		}
 		bucket = &ConnectionAuditBucket{
-			UserID:          policy.UserID,
-			InboundID:       policy.InboundID,
-			PathID:          policy.PathID,
-			SourceIP:        sourceIP,
-			SourceGeoCode:   sourceGeoCode,
-			Network:         network,
-			Destination:     destination,
-			DestinationPort: int(metadata.Destination.Port),
-			OutboundTag:     outboundTag,
-			OutboundType:    outboundType,
-			StartedAt:       now.Format(time.RFC3339Nano),
-			key:             key,
+			UserID:           policy.UserID,
+			InboundID:        policy.InboundID,
+			PathID:           policy.PathID,
+			DeviceIDHash:     policy.DeviceIDHash,
+			CredentialEpoch:  policy.CredentialEpoch,
+			SourceIP:         sourceIP,
+			SourceGeoCode:    sourceGeoCode,
+			Network:          network,
+			Destination:      destination,
+			DestinationPort:  int(metadata.Destination.Port),
+			OutboundTag:      outboundTag,
+			OutboundType:     outboundType,
+			PresenceSequence: t.auditPresenceSequence.Add(1),
+			StartedAt:        now.Format(time.RFC3339Nano),
+			key:              key,
+			activeIdentity:   connectionAuditActiveIdentity(policy.UserID, policy.DeviceIDHash, sourceIP),
 		}
 		t.auditBuckets[key] = bucket
 	}
-	if t.auditActiveByUser == nil {
-		t.auditActiveByUser = make(map[int64]int64)
+	if t.auditActiveByIdentity == nil {
+		t.auditActiveByIdentity = make(map[string]int64)
 	}
-	t.auditActiveByUser[policy.UserID]++
+	identityKey := bucket.activeIdentity
+	t.auditActiveByIdentity[identityKey]++
 	bucket.ConnectionCount++
 	bucket.active++
-	if t.auditActiveByUser[policy.UserID] > bucket.ActivePeak {
-		bucket.ActivePeak = t.auditActiveByUser[policy.UserID]
+	if t.auditActiveByIdentity[identityKey] > bucket.ActivePeak {
+		bucket.ActivePeak = t.auditActiveByIdentity[identityKey]
 	}
 	bucket.EndedAt = now.Format(time.RFC3339Nano)
-	return key + connectionAuditHandleSeparator + strconv.FormatInt(now.UnixNano(), 10)
+	presenceKey := connectionPresenceKey(policy.UserID, policy.DeviceIDHash, policy.CredentialEpoch, sourceIP, network)
+	if admitted {
+		presence := t.presenceStates[presenceKey]
+		if presence == nil {
+			if t.presenceStates == nil {
+				t.presenceStates = make(map[string]*connectionPresenceState)
+			}
+			presence = &connectionPresenceState{ConnectionPresenceEvent: ConnectionPresenceEvent{UserID: policy.UserID, InboundID: policy.InboundID, PathID: policy.PathID, DeviceIDHash: policy.DeviceIDHash, CredentialEpoch: policy.CredentialEpoch, SourceIP: sourceIP, Network: network, State: "active"}}
+			t.presenceStates[presenceKey] = presence
+		}
+		presence.ActiveConnections++
+		if presence.ActiveConnections == 1 {
+			t.enqueuePresenceEventLocked(presence, "first_authenticated", now)
+		}
+	} else {
+		rejected := &connectionPresenceState{ConnectionPresenceEvent: ConnectionPresenceEvent{UserID: policy.UserID, InboundID: policy.InboundID, PathID: policy.PathID, DeviceIDHash: policy.DeviceIDHash, CredentialEpoch: policy.CredentialEpoch, SourceIP: sourceIP, Network: network, State: "rejected"}}
+		t.enqueuePresenceEventLocked(rejected, "credential_rejected", now)
+	}
+	return strings.Join([]string{key, strconv.FormatInt(now.UnixNano(), 10), presenceKey, strconv.FormatBool(admitted)}, connectionAuditHandleSeparator)
+}
+
+func (t *RateLimitTracker) recordConnectionPayload(handle string, upload, download int64) {
+	if t == nil || handle == "" || upload < 0 || download < 0 || upload+download <= 0 {
+		return
+	}
+	parts := strings.Split(handle, connectionAuditHandleSeparator)
+	key := parts[0]
+	t.auditMu.Lock()
+	defer t.auditMu.Unlock()
+	bucket := t.auditBuckets[key]
+	if bucket == nil {
+		return
+	}
+	now := t.timeNow().UTC().Format(time.RFC3339Nano)
+	if bucket.PayloadFirstAt == "" {
+		bucket.PayloadFirstAt = now
+	}
+	bucket.PayloadLastAt = now
+	bucket.UploadBytes += upload
+	bucket.DownloadBytes += download
+	if len(parts) >= 4 && parts[3] == "true" {
+		if presence := t.presenceStates[parts[2]]; presence != nil {
+			firstPayload := !presence.Meaningful
+			presence.Meaningful = true
+			presence.PayloadLastAt = now
+			if firstPayload {
+				t.enqueuePresenceEventLocked(presence, "first_meaningful_payload", t.timeNow().UTC())
+			}
+		}
+	}
 }
 
 func (t *RateLimitTracker) recordConnectionEnd(handle string) {
 	if t == nil || handle == "" {
 		return
 	}
-	key, startedRaw, found := strings.Cut(handle, connectionAuditHandleSeparator)
-	if !found {
-		key = handle
+	parts := strings.Split(handle, connectionAuditHandleSeparator)
+	key := parts[0]
+	startedRaw := ""
+	if len(parts) >= 2 {
+		startedRaw = parts[1]
 	}
 	startedNano, _ := strconv.ParseInt(startedRaw, 10, 64)
 	t.auditMu.Lock()
@@ -145,10 +250,10 @@ func (t *RateLimitTracker) recordConnectionEnd(handle string) {
 	if bucket := t.auditBuckets[key]; bucket != nil {
 		if bucket.active > 0 {
 			bucket.active--
-			if active := t.auditActiveByUser[bucket.UserID]; active > 1 {
-				t.auditActiveByUser[bucket.UserID] = active - 1
+			if active := t.auditActiveByIdentity[bucket.activeIdentity]; active > 1 {
+				t.auditActiveByIdentity[bucket.activeIdentity] = active - 1
 			} else {
-				delete(t.auditActiveByUser, bucket.UserID)
+				delete(t.auditActiveByIdentity, bucket.activeIdentity)
 			}
 		}
 		now := t.timeNow().UTC()
@@ -162,9 +267,69 @@ func (t *RateLimitTracker) recordConnectionEnd(handle string) {
 			if duration > bucket.DurationMaxMS {
 				bucket.DurationMaxMS = duration
 			}
+			switch {
+			case duration <= 1000:
+				bucket.DurationLE1SCount++
+			case duration <= 5000:
+				bucket.DurationLE5SCount++
+			case duration <= 20000:
+				bucket.DurationLE20SCount++
+			default:
+				bucket.DurationGT20SCount++
+			}
 		}
 		bucket.EndedAt = now.Format(time.RFC3339Nano)
 	}
+	if len(parts) >= 4 && parts[3] == "true" {
+		if presence := t.presenceStates[parts[2]]; presence != nil {
+			if presence.ActiveConnections > 0 {
+				presence.ActiveConnections--
+			}
+			if presence.ActiveConnections == 0 {
+				presence.State = "inactive"
+				t.enqueuePresenceEventLocked(presence, "last_connection_closed", t.timeNow().UTC())
+				delete(t.presenceStates, parts[2])
+			}
+		}
+	}
+}
+
+func connectionPresenceKey(userID int64, deviceIDHash string, credentialEpoch int64, sourceIP, network string) string {
+	return strings.Join([]string{strconv.FormatInt(userID, 10), strings.TrimSpace(deviceIDHash), strconv.FormatInt(credentialEpoch, 10), strings.TrimSpace(sourceIP), strings.ToLower(strings.TrimSpace(network))}, "\x00")
+}
+
+func (t *RateLimitTracker) enqueuePresenceEventLocked(state *connectionPresenceState, event string, at time.Time) {
+	if state == nil || event == "" {
+		return
+	}
+	state.Event = event
+	state.At = at.UTC().Format(time.RFC3339Nano)
+	state.Sequence = t.auditPresenceSequence.Add(1)
+	state.lastEmittedAt = at.UTC()
+	item := state.ConnectionPresenceEvent
+	if len(t.presenceEvents) >= maxConnectionPresenceEvents {
+		t.presenceDropped++
+		return
+	}
+	t.presenceEvents = append(t.presenceEvents, item)
+}
+
+func (t *RateLimitTracker) DrainConnectionPresenceEvents() ConnectionPresenceDrain {
+	if t == nil || !t.auditEnabled.Load() {
+		return ConnectionPresenceDrain{}
+	}
+	t.auditMu.Lock()
+	defer t.auditMu.Unlock()
+	now := t.timeNow().UTC()
+	for _, state := range t.presenceStates {
+		if state != nil && state.ActiveConnections > 0 && now.Sub(state.lastEmittedAt) >= connectionPresenceRefresh {
+			t.enqueuePresenceEventLocked(state, "activity_refresh", now)
+		}
+	}
+	drain := ConnectionPresenceDrain{Events: append([]ConnectionPresenceEvent(nil), t.presenceEvents...), DroppedCount: t.presenceDropped}
+	t.presenceEvents = nil
+	t.presenceDropped = 0
+	return drain
 }
 
 type ConnectionAuditDrain struct {
@@ -219,7 +384,18 @@ func (t *RateLimitTracker) DrainConnectionAuditSnapshot() ConnectionAuditDrain {
 		bucket.ClosedCount = 0
 		bucket.DurationTotalMS = 0
 		bucket.DurationMaxMS = 0
-		bucket.ActivePeak = t.auditActiveByUser[bucket.UserID]
+		bucket.UploadBytes = 0
+		bucket.DownloadBytes = 0
+		bucket.PayloadFirstAt = ""
+		bucket.PayloadLastAt = ""
+		bucket.DurationLE1SCount = 0
+		bucket.DurationLE5SCount = 0
+		bucket.DurationLE20SCount = 0
+		bucket.DurationGT20SCount = 0
+		bucket.ProbeState = ""
+		bucket.InternalProbe = false
+		bucket.PresenceSequence = t.auditPresenceSequence.Add(1)
+		bucket.ActivePeak = t.auditActiveByIdentity[bucket.activeIdentity]
 		bucket.ActiveAtEnd = 0
 		bucket.StartedAt = now
 		bucket.EndedAt = now
@@ -240,4 +416,12 @@ func (t *RateLimitTracker) DrainConnectionAuditSnapshot() ConnectionAuditDrain {
 	t.auditDropped = 0
 	t.auditWindowStart = nowTime
 	return drain
+}
+
+func connectionAuditActiveIdentity(userID int64, deviceIDHash, sourceIP string) string {
+	deviceIDHash = strings.TrimSpace(deviceIDHash)
+	if deviceIDHash != "" {
+		return strconv.FormatInt(userID, 10) + "\x00device:" + deviceIDHash
+	}
+	return strconv.FormatInt(userID, 10) + "\x00legacy:" + strings.TrimSpace(sourceIP)
 }

@@ -59,6 +59,9 @@ type RuntimeUserLimit struct {
 	UserID            int64  `json:"user_id,omitempty"`
 	InboundID         int64  `json:"inbound_id,omitempty"`
 	PathID            int64  `json:"path_id,omitempty"`
+	DeviceIDHash      string `json:"device_id_hash,omitempty"`
+	CredentialEpoch   int64  `json:"credential_epoch,omitempty"`
+	CredentialStatus  string `json:"credential_status,omitempty"`
 	Billable          bool   `json:"billable"`
 	SpeedLimitMbps    int    `json:"speed_limit_mbps,omitempty"`
 	TrafficLimitBytes int64  `json:"traffic_limit_bytes,omitempty"`

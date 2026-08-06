@@ -84,6 +84,9 @@ type Runner struct {
 	connectionAudit            *connectionAuditAccumulator
 	connectionAuditCoreKnown   bool
 	connectionAuditCoreEnabled bool
+	presenceCapabilityKnown    bool
+	presenceCapabilityEnabled  bool
+	presenceSequence           atomic.Uint64
 	lastProbe                  model.HealthReport
 	lastProbeAt                time.Time
 	lastLocalMetricsAt         time.Time
@@ -508,6 +511,8 @@ func (r *Runner) connect(ctx context.Context) error {
 	}
 	log.Printf("controller connection established: server_id=%d remote=%s", cfg.ServerID, conn.RemoteAddr())
 	defer conn.Close()
+	connectionCtx, cancelConnection := context.WithCancel(ctx)
+	defer cancelConnection()
 	done := make(chan struct{})
 	defer close(done)
 	go func() {
@@ -518,7 +523,80 @@ func (r *Runner) connect(ctx context.Context) error {
 		}
 	}()
 	conn.SetReadLimit(1 << 20)
-	_ = conn.WriteJSON(map[string]any{"type": "health_report", "health_report": r.Probe(false)})
+	type websocketWriteRequest struct {
+		payload any
+		done    chan error
+	}
+	writes := make(chan websocketWriteRequest, 128)
+	writerErrors := make(chan error, 1)
+	go func() {
+		for {
+			select {
+			case <-connectionCtx.Done():
+				return
+			case request := <-writes:
+				err := conn.WriteJSON(request.payload)
+				if request.done != nil {
+					request.done <- err
+				}
+				if err != nil {
+					select {
+					case writerErrors <- err:
+					default:
+					}
+					_ = conn.Close()
+					return
+				}
+			}
+		}
+	}()
+	writeMessage := func(payload any, wait bool) error {
+		request := websocketWriteRequest{payload: payload}
+		if wait {
+			request.done = make(chan error, 1)
+		}
+		select {
+		case writes <- request:
+		case err := <-writerErrors:
+			return err
+		case <-connectionCtx.Done():
+			return connectionCtx.Err()
+		}
+		if request.done == nil {
+			return nil
+		}
+		select {
+		case err := <-request.done:
+			return err
+		case err := <-writerErrors:
+			return err
+		case <-connectionCtx.Done():
+			return connectionCtx.Err()
+		}
+	}
+	if err := writeMessage(map[string]any{"type": "health_report", "health_report": r.Probe(false)}, false); err != nil {
+		return err
+	}
+	go func() {
+		ticker := time.NewTicker(connectionPresencePollInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-connectionCtx.Done():
+				return
+			case <-ticker.C:
+				pollCtx, cancel := context.WithTimeout(connectionCtx, connectionPresencePollInterval)
+				delta, _ := r.collectConnectionPresenceDelta(pollCtx)
+				cancel()
+				if len(delta.Events) == 0 && delta.DroppedCount == 0 {
+					continue
+				}
+				if writeMessage(map[string]any{"type": "presence_delta", "presence_delta": delta}, false) != nil {
+					return
+				}
+			}
+		}
+	}()
 	for {
 		var msg struct {
 			Type                     string           `json:"type"`
@@ -563,7 +641,7 @@ func (r *Runner) connect(ctx context.Context) error {
 				// The result travels over authenticated HTTP so it can include the
 				// health snapshot in one callback. A tiny WebSocket acknowledgement
 				// releases the Controller's in-flight slot for the next task.
-				if err := conn.WriteJSON(map[string]any{"type": "task_ack", "task_id": msg.Task.ID}); err != nil {
+				if err := writeMessage(map[string]any{"type": "task_ack", "task_id": msg.Task.ID}, true); err != nil {
 					return fmt.Errorf("acknowledge task %d: %w", msg.Task.ID, err)
 				}
 				if msg.Task.Type == "update_agent" && status == "succeeded" {
@@ -577,7 +655,7 @@ func (r *Runner) connect(ctx context.Context) error {
 			r.setConnectionAuditPolicy(msg.ConnectionAuditEnabled)
 			_ = r.maybeRunPeriodicDNSBenchmark(ctx)
 			_ = r.maybeRunPeriodicForwardProbes(ctx)
-			_ = conn.WriteJSON(map[string]any{"type": "health_report", "health_report": r.Probe(false)})
+			_ = writeMessage(map[string]any{"type": "health_report", "health_report": r.Probe(false)}, false)
 		}
 	}
 }

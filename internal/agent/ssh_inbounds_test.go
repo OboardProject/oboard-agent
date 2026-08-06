@@ -89,6 +89,46 @@ func TestSSHInboundAllowsOnlyPasswordAndDirectTCPIP(t *testing.T) {
 	}
 }
 
+func TestSSHInboundCredentialStatusUpdatePreservesExistingConnection(t *testing.T) {
+	user := testSSHInboundUser(19, "alice-device", "device-password")
+	user.DeviceIDHash = "0123456789abcdef"
+	user.CredentialEpoch = 2
+	user.CredentialStatus = "active"
+	reserve, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := reserve.Addr().(*net.TCPAddr).Port
+	_ = reserve.Close()
+	runner := New(Config{StateDir: t.TempDir()})
+	plan := model.SSHInboundPlan{Version: 1, Inbounds: []model.SSHInbound{{InboundID: 71, ServerID: 1, Name: "restricted", ListenIP: "127.0.0.1", Port: port, Enabled: true, Users: []model.SSHInboundUser{user}}}}
+	if _, err := runner.applySSHInbounds(plan); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _, _ = runner.applySSHInbounds(model.SSHInboundPlan{Version: 3}) }()
+	client, err := ssh.Dial("tcp", net.JoinHostPort("127.0.0.1", fmt.Sprint(port)), &ssh.ClientConfig{User: user.Username, Auth: []ssh.AuthMethod{ssh.Password(user.Password)}, HostKeyCallback: ssh.InsecureIgnoreHostKey()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	plan.Version = 2
+	plan.Inbounds[0].Users[0].CredentialStatus = "reject_new"
+	result, err := runner.applySSHInbounds(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.RuntimeOnly || result.Unchanged {
+		t.Fatalf("credential status apply = %#v", result)
+	}
+	if _, _, err := client.SendRequest("keepalive@openssh.com", true, nil); err != nil {
+		t.Fatalf("existing SSH connection was interrupted: %v", err)
+	}
+	if _, err := ssh.Dial("tcp", net.JoinHostPort("127.0.0.1", fmt.Sprint(port)), &ssh.ClientConfig{User: user.Username, Auth: []ssh.AuthMethod{ssh.Password(user.Password)}, HostKeyCallback: ssh.InsecureIgnoreHostKey()}); err == nil {
+		t.Fatal("new SSH authentication was accepted after reject_new")
+	}
+}
+
 func TestSSHInboundApplyReportsPersistentHostIdentity(t *testing.T) {
 	stateDir := filepath.Join(t.TempDir(), "state")
 	runner := New(Config{StateDir: stateDir})
@@ -341,6 +381,60 @@ func TestSSHInboundPlanRejectsDuplicateUsersAndEmptyPasswords(t *testing.T) {
 	user.Password = ""
 	if err := validateSSHInboundPlan(model.SSHInboundPlan{Inbounds: []model.SSHInbound{{InboundID: 1, ServerID: 1, ListenIP: "127.0.0.1", Port: 2222, Enabled: true, Users: []model.SSHInboundUser{user}}}}); err == nil {
 		t.Fatal("empty SSH password was accepted")
+	}
+}
+
+func TestSSHInboundPlanValidatesDeviceCredentialMetadata(t *testing.T) {
+	user := testSSHInboundUser(1, "alice", "password")
+	plan := func(candidate model.SSHInboundUser) model.SSHInboundPlan {
+		return model.SSHInboundPlan{Inbounds: []model.SSHInbound{{InboundID: 1, ServerID: 1, ListenIP: "127.0.0.1", Port: 2222, Enabled: true, Users: []model.SSHInboundUser{candidate}}}}
+	}
+	for name, mutate := range map[string]func(*model.SSHInboundUser){
+		"legacy epoch":         func(user *model.SSHInboundUser) { user.CredentialEpoch = 1 },
+		"legacy rejection":     func(user *model.SSHInboundUser) { user.CredentialStatus = "reject_new" },
+		"short device hash":    func(user *model.SSHInboundUser) { user.DeviceIDHash = "short"; user.CredentialEpoch = 1 },
+		"missing device epoch": func(user *model.SSHInboundUser) { user.DeviceIDHash = "0123456789abcdef" },
+		"unknown device status": func(user *model.SSHInboundUser) {
+			user.DeviceIDHash = "0123456789abcdef"
+			user.CredentialEpoch = 1
+			user.CredentialStatus = "paused"
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := user
+			mutate(&candidate)
+			if err := validateSSHInboundPlan(plan(candidate)); err == nil {
+				t.Fatalf("invalid device credential metadata was accepted: %#v", candidate)
+			}
+		})
+	}
+	user.DeviceIDHash = "0123456789abcdef"
+	user.CredentialEpoch = 2
+	user.CredentialStatus = "reject_new"
+	if err := validateSSHInboundPlan(plan(user)); err != nil {
+		t.Fatalf("valid device credential metadata was rejected: %v", err)
+	}
+}
+
+func TestSSHInboundRejectsCredentialMarkedRejectNew(t *testing.T) {
+	user := testSSHInboundUser(19, "alice-device", "device-password")
+	user.DeviceIDHash = "0123456789abcdef"
+	user.CredentialEpoch = 2
+	user.CredentialStatus = "reject_new"
+	reserve, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := reserve.Addr().(*net.TCPAddr).Port
+	_ = reserve.Close()
+	runner := New(Config{StateDir: t.TempDir()})
+	plan := model.SSHInboundPlan{Version: 1, Inbounds: []model.SSHInbound{{InboundID: 71, ServerID: 1, Name: "restricted", ListenIP: "127.0.0.1", Port: port, Enabled: true, Users: []model.SSHInboundUser{user}}}}
+	if _, err := runner.applySSHInbounds(plan); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _, _ = runner.applySSHInbounds(model.SSHInboundPlan{Version: 2}) }()
+	if _, err := ssh.Dial("tcp", net.JoinHostPort("127.0.0.1", fmt.Sprint(port)), &ssh.ClientConfig{User: user.Username, Auth: []ssh.AuthMethod{ssh.Password(user.Password)}, HostKeyCallback: ssh.InsecureIgnoreHostKey()}); err == nil {
+		t.Fatal("reject_new SSH device credential was accepted")
 	}
 }
 

@@ -21,6 +21,8 @@ import (
 	C "github.com/sagernet/sing-box/constant"
 )
 
+var kernelCapabilities = []string{"trusted_forward_v1", "outbound_egress_probe_v1", "outbound_relay_v1", "runtime_clock_v1", "connection_presence_v1"}
+
 func main() {
 	config := flag.String("config", "config.json", "sing-box config path")
 	check := flag.Bool("check", false, "validate config and exit")
@@ -112,7 +114,7 @@ func printVersion() {
 		"built_at":            version.Date,
 		"sing_box_version":    C.Version,
 		"supported_protocols": minibox.SupportedProtocols,
-		"capabilities":        []string{"trusted_forward_v1", "outbound_egress_probe_v1", "outbound_relay_v1", "runtime_clock_v1"},
+		"capabilities":        kernelCapabilities,
 	}
 	data, _ := json.MarshalIndent(payload, "", "  ")
 	fmt.Println(string(data))
@@ -128,7 +130,7 @@ func serveHealth(ctx context.Context, listen string, instance *box.Box, tracker 
 	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) { _, _ = fmt.Fprintln(w, "ok") })
 	mux.HandleFunc("/version", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"name": "oboard-sb", "version": version.Version, "build": version.Build, "commit": version.Commit, "built_at": version.Date, "sing_box_version": C.Version, "supported_protocols": minibox.SupportedProtocols, "capabilities": []string{"trusted_forward_v1", "outbound_egress_probe_v1", "outbound_relay_v1", "runtime_clock_v1"}, "resource_profile": tuning.Profile, "memory_class": tuning.MemoryClass, "virtualization": tuning.Virtualization, "container": tuning.Container, "effective_memory_bytes": tuning.EffectiveMemoryBytes, "gomaxprocs": runtime.GOMAXPROCS(0), "gc_percent": tuning.GCPercent, "memory_limit_bytes": tuning.MemoryLimitBytes, "memory_reclaimer": memoryReclaimer.Snapshot(), "socket_governor": socketGovernor.Snapshot()})
+		_ = json.NewEncoder(w).Encode(map[string]any{"name": "oboard-sb", "version": version.Version, "build": version.Build, "commit": version.Commit, "built_at": version.Date, "sing_box_version": C.Version, "supported_protocols": minibox.SupportedProtocols, "capabilities": kernelCapabilities, "resource_profile": tuning.Profile, "memory_class": tuning.MemoryClass, "virtualization": tuning.Virtualization, "container": tuning.Container, "effective_memory_bytes": tuning.EffectiveMemoryBytes, "gomaxprocs": runtime.GOMAXPROCS(0), "gc_percent": tuning.GCPercent, "memory_limit_bytes": tuning.MemoryLimitBytes, "memory_reclaimer": memoryReclaimer.Snapshot(), "socket_governor": socketGovernor.Snapshot()})
 	})
 	mux.HandleFunc("/resources", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -145,6 +147,14 @@ func serveHealth(ctx context.Context, listen string, instance *box.Box, tracker 
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(tracker.DrainConnectionAuditSnapshot())
+	})
+	mux.HandleFunc("/connections/presence/drain", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(tracker.DrainConnectionPresenceEvents())
 	})
 	mux.HandleFunc("/connections/config", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
