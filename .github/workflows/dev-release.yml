@@ -8,6 +8,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: agent-dev-release
+  cancel-in-progress: true
+
 jobs:
   publish:
     name: Publish mutable development release
