@@ -371,6 +371,30 @@ func TestSSHInboundExpiredPolicyStartsNewPeriod(t *testing.T) {
 	}
 }
 
+func TestSSHInboundMigratedPolicyPreservesUnreportedCounters(t *testing.T) {
+	counter := &sshInboundCounter{}
+	counter.setPolicy(model.TrafficRuntimePolicy{UserID: 7, Billable: true, PeriodKey: "old", PeriodEnd: time.Now().Add(time.Hour).UTC().Format(time.RFC3339Nano), ResetMode: "monthly", ResetLeaseBytes: 25, LeaseEnforced: true})
+	counter.upload.Store(9)
+	counter.download.Store(4)
+	counter.setPolicy(model.TrafficRuntimePolicy{UserID: 7, Billable: true, PeriodKey: "new", PreviousPeriodKey: "old", PeriodEnd: time.Now().Add(time.Hour).UTC().Format(time.RFC3339Nano), ResetMode: "monthly", ResetLeaseBytes: 25, LeaseEnforced: true})
+	policy := counter.currentPolicy()
+	if policy.PeriodKey != "new" {
+		t.Fatalf("period did not migrate: %#v", policy)
+	}
+	if counter.upload.Load() != 9 || counter.download.Load() != 4 {
+		t.Fatalf("migrated counters were cleared: upload=%d download=%d", counter.upload.Load(), counter.download.Load())
+	}
+}
+
+func TestAgentAnniversaryTrafficWindowClampsMonthEnd(t *testing.T) {
+	loc := time.FixedZone("Asia/Shanghai", 8*60*60)
+	anchor := time.Date(2026, time.January, 31, 15, 30, 0, 0, loc)
+	_, start, end := agentTrafficWindow(time.Date(2026, time.February, 28, 16, 0, 0, 0, loc), "anniversary_month", 1, anchor, loc)
+	if !start.Equal(time.Date(2026, time.February, 28, 15, 30, 0, 0, loc)) || !end.Equal(time.Date(2026, time.March, 31, 15, 30, 0, 0, loc)) {
+		t.Fatalf("anniversary window = %s..%s", start, end)
+	}
+}
+
 func TestSSHInboundPlanRejectsDuplicateUsersAndEmptyPasswords(t *testing.T) {
 	user := testSSHInboundUser(1, "alice", "password")
 	duplicate := user

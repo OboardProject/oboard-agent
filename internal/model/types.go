@@ -298,16 +298,12 @@ const (
 )
 
 type UserGroup struct {
-	ID                int64     `json:"id"`
-	Name              string    `json:"name"`
-	Description       string    `json:"description"`
-	Enabled           bool      `json:"enabled"`
-	SpeedLimitMbps    int       `json:"speed_limit_mbps"`
-	TrafficLimitBytes int64     `json:"traffic_limit_bytes"`
-	TrafficResetMode  string    `json:"traffic_reset_mode"`
-	TrafficResetDay   int       `json:"traffic_reset_day"`
-	CreatedAt         time.Time `json:"created_at"`
-	UpdatedAt         time.Time `json:"updated_at"`
+	ID          int64     `json:"id"`
+	Name        string    `json:"name"`
+	Description string    `json:"description"`
+	Enabled     bool      `json:"enabled"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 type UserGroupMember struct {
@@ -1069,6 +1065,8 @@ type TrafficRuntimePolicy struct {
 	PeriodEnd         string `json:"period_end,omitempty"`
 	ResetMode         string `json:"reset_mode,omitempty"`
 	ResetDay          int    `json:"reset_day,omitempty"`
+	ResetAnchor       string `json:"reset_anchor,omitempty"`
+	PreviousPeriodKey string `json:"previous_period_key,omitempty"`
 	Timezone          string `json:"timezone,omitempty"`
 	QuotaState        string `json:"quota_state,omitempty"`
 	EnforcementMode   string `json:"enforcement_mode,omitempty"`

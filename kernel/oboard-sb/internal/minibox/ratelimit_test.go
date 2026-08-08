@@ -52,6 +52,16 @@ func TestRuntimeLimitersAreDirectional(t *testing.T) {
 	}
 }
 
+func TestRuntimePolicyMigrationPreservesUnreportedCounters(t *testing.T) {
+	state := newRuntimeState("user:alice", "alice", "", RuntimeUserLimit{UserID: 7, Billable: true, PeriodKey: "old"})
+	state.addTraffic(9, 4)
+	state.updatePolicy(RuntimeUserLimit{UserID: 7, Billable: true, PeriodKey: "new", PreviousPeriodKey: "old"})
+	item, ok := state.snapshot()
+	if !ok || item.PeriodKey != "new" || item.Upload != 9 || item.Download != 4 {
+		t.Fatalf("migrated snapshot = %#v ok=%v", item, ok)
+	}
+}
+
 func TestRateLimitTrackerFallsBackToInbound(t *testing.T) {
 	tracker := NewRateLimitTracker(RuntimeMetadata{RateLimits: RuntimeRateLimits{Inbounds: map[string]RuntimeUserLimit{"in-1": {SpeedLimitMbps: 20}}}})
 	client, server := net.Pipe()

@@ -278,6 +278,7 @@ func (s *runtimeState) currentConfig() *runtimeConfig {
 	defer s.periodMu.Unlock()
 	config = s.loadedConfig()
 	policy := config.policy
+	previousPeriod := policy.PeriodKey
 	end, err = time.Parse(time.RFC3339Nano, policy.PeriodEnd)
 	if err != nil || s.now().Before(end) {
 		return config
@@ -288,7 +289,11 @@ func (s *runtimeState) currentConfig() *runtimeConfig {
 			loc = loaded
 		}
 	}
-	periodKey, start, nextEnd := runtimeTrafficWindow(s.now(), policy.ResetMode, policy.ResetDay, loc)
+	anchor := time.Time{}
+	if policy.ResetAnchor != "" {
+		anchor, _ = time.Parse(time.RFC3339Nano, policy.ResetAnchor)
+	}
+	periodKey, start, nextEnd := runtimeTrafficWindow(s.now(), policy.ResetMode, policy.ResetDay, anchor, loc)
 	policy.PeriodKey = periodKey
 	policy.PeriodStart = start.UTC().Format(time.RFC3339Nano)
 	policy.PeriodEnd = nextEnd.UTC().Format(time.RFC3339Nano)
@@ -297,7 +302,7 @@ func (s *runtimeState) currentConfig() *runtimeConfig {
 		policy.LeaseBytes = policy.ResetLeaseBytes
 	}
 	policy.QuotaState = "active"
-	return s.storePolicyLocked(policy, true)
+	return s.storePolicyLocked(policy, policy.PreviousPeriodKey == "" || policy.PreviousPeriodKey != previousPeriod)
 }
 
 func (s *runtimeState) loadedConfig() *runtimeConfig {
@@ -495,7 +500,8 @@ func (s *runtimeState) updatePolicy(policy RuntimeUserLimit) {
 	s.periodMu.Lock()
 	defer s.periodMu.Unlock()
 	current := s.loadedPolicy()
-	reset := current.PeriodKey != "" && policy.PeriodKey != "" && current.PeriodKey != policy.PeriodKey
+	periodChanged := current.PeriodKey != "" && policy.PeriodKey != "" && current.PeriodKey != policy.PeriodKey
+	reset := periodChanged && (policy.PreviousPeriodKey == "" || policy.PreviousPeriodKey != current.PeriodKey)
 	s.storePolicyLocked(policy, reset)
 }
 
@@ -906,13 +912,26 @@ var (
 	_ N.PacketConn   = (*trackedPacketConn)(nil)
 )
 
-func runtimeTrafficWindow(now time.Time, mode string, day int, loc *time.Location) (string, time.Time, time.Time) {
+func runtimeTrafficWindow(now time.Time, mode string, day int, anchor time.Time, loc *time.Location) (string, time.Time, time.Time) {
 	n := now.In(loc)
 	if day < 1 {
 		day = 1
 	}
 	if day > 31 {
 		day = 31
+	}
+	if mode == "never" {
+		if anchor.IsZero() {
+			anchor = n
+		}
+		return anchor.UTC().Format(time.RFC3339Nano), anchor.In(loc), time.Date(9999, time.December, 31, 23, 59, 59, 0, loc)
+	}
+	if mode == "anniversary_month" {
+		if anchor.IsZero() {
+			anchor = n
+		}
+		start, end := runtimeAnniversaryWindow(n, anchor.In(loc), loc)
+		return start.UTC().Format(time.RFC3339Nano), start, end
 	}
 	if mode != "month_day" {
 		start := time.Date(n.Year(), n.Month(), 1, 0, 0, 0, 0, loc)
@@ -926,6 +945,25 @@ func runtimeTrafficWindow(now time.Time, mode string, day int, loc *time.Locatio
 	next := start.AddDate(0, 1, 0)
 	end := time.Date(next.Year(), next.Month(), runtimeClampedMonthDay(next.Year(), next.Month(), day), 0, 0, 0, 0, loc)
 	return start.Format("2006-01-02"), start, end
+}
+
+func runtimeAnniversaryWindow(now, anchor time.Time, loc *time.Location) (time.Time, time.Time) {
+	if now.Before(anchor) {
+		return anchor, runtimeAnniversaryBoundary(anchor, 1, loc)
+	}
+	months := (now.Year()-anchor.Year())*12 + int(now.Month()-anchor.Month())
+	start := runtimeAnniversaryBoundary(anchor, months, loc)
+	if now.Before(start) {
+		months--
+		start = runtimeAnniversaryBoundary(anchor, months, loc)
+	}
+	return start, runtimeAnniversaryBoundary(anchor, months+1, loc)
+}
+
+func runtimeAnniversaryBoundary(anchor time.Time, months int, loc *time.Location) time.Time {
+	monthStart := time.Date(anchor.Year(), anchor.Month()+time.Month(months), 1, anchor.Hour(), anchor.Minute(), anchor.Second(), anchor.Nanosecond(), loc)
+	day := runtimeClampedMonthDay(monthStart.Year(), monthStart.Month(), anchor.Day())
+	return time.Date(monthStart.Year(), monthStart.Month(), day, anchor.Hour(), anchor.Minute(), anchor.Second(), anchor.Nanosecond(), loc)
 }
 
 func runtimeClampedMonthDay(year int, month time.Month, day int) int {

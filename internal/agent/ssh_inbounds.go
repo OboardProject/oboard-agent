@@ -1062,7 +1062,8 @@ func copySSHInboundTraffic(dst io.Writer, src io.Reader, counter *sshInboundCoun
 func (c *sshInboundCounter) setPolicy(policy model.TrafficRuntimePolicy) {
 	c.mu.Lock()
 	previous := c.policy
-	if previous.PeriodKey != "" && policy.PeriodKey != "" && previous.PeriodKey != policy.PeriodKey {
+	periodChanged := previous.PeriodKey != "" && policy.PeriodKey != "" && previous.PeriodKey != policy.PeriodKey
+	if periodChanged && (policy.PreviousPeriodKey == "" || policy.PreviousPeriodKey != previous.PeriodKey) {
 		c.upload.Store(0)
 		c.download.Store(0)
 		c.acknowledgedUpload.Store(0)
@@ -1091,8 +1092,14 @@ func (c *sshInboundCounter) currentPolicy() model.TrafficRuntimePolicy {
 			loc = loaded
 		}
 	}
-	periodKey, start, end := agentTrafficWindow(time.Now(), policy.ResetMode, policy.ResetDay, loc)
-	if policy.PeriodKey != periodKey {
+	previousPeriod := policy.PeriodKey
+	anchor := time.Time{}
+	if policy.ResetAnchor != "" {
+		anchor, _ = time.Parse(time.RFC3339Nano, policy.ResetAnchor)
+	}
+	periodKey, start, end := agentTrafficWindow(time.Now(), policy.ResetMode, policy.ResetDay, anchor, loc)
+	resetCounters := policy.PeriodKey != periodKey && (policy.PreviousPeriodKey == "" || policy.PreviousPeriodKey != previousPeriod)
+	if resetCounters {
 		c.upload.Store(0)
 		c.download.Store(0)
 		c.acknowledgedUpload.Store(0)
@@ -1118,7 +1125,7 @@ func trafficPolicyExpired(policy model.TrafficRuntimePolicy, now time.Time) bool
 	return err == nil && !now.Before(end)
 }
 
-func agentTrafficWindow(now time.Time, mode string, day int, loc *time.Location) (string, time.Time, time.Time) {
+func agentTrafficWindow(now time.Time, mode string, day int, anchor time.Time, loc *time.Location) (string, time.Time, time.Time) {
 	if loc == nil {
 		loc = time.FixedZone("Asia/Shanghai", 8*60*60)
 	}
@@ -1128,6 +1135,19 @@ func agentTrafficWindow(now time.Time, mode string, day int, loc *time.Location)
 	}
 	if day > 31 {
 		day = 31
+	}
+	if mode == "never" {
+		if anchor.IsZero() {
+			anchor = now
+		}
+		return anchor.UTC().Format(time.RFC3339Nano), anchor.In(loc), time.Date(9999, time.December, 31, 23, 59, 59, 0, loc)
+	}
+	if mode == "anniversary_month" {
+		if anchor.IsZero() {
+			anchor = now
+		}
+		start, end := agentAnniversaryWindow(now, anchor.In(loc), loc)
+		return start.UTC().Format(time.RFC3339Nano), start, end
 	}
 	if mode != "month_day" {
 		start := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, loc)
@@ -1141,6 +1161,25 @@ func agentTrafficWindow(now time.Time, mode string, day int, loc *time.Location)
 	next := start.AddDate(0, 1, 0)
 	end := time.Date(next.Year(), next.Month(), agentClampedMonthDay(next.Year(), next.Month(), day), 0, 0, 0, 0, loc)
 	return start.Format("2006-01-02"), start, end
+}
+
+func agentAnniversaryWindow(now, anchor time.Time, loc *time.Location) (time.Time, time.Time) {
+	if now.Before(anchor) {
+		return anchor, agentAnniversaryBoundary(anchor, 1, loc)
+	}
+	months := (now.Year()-anchor.Year())*12 + int(now.Month()-anchor.Month())
+	start := agentAnniversaryBoundary(anchor, months, loc)
+	if now.Before(start) {
+		months--
+		start = agentAnniversaryBoundary(anchor, months, loc)
+	}
+	return start, agentAnniversaryBoundary(anchor, months+1, loc)
+}
+
+func agentAnniversaryBoundary(anchor time.Time, months int, loc *time.Location) time.Time {
+	monthStart := time.Date(anchor.Year(), anchor.Month()+time.Month(months), 1, anchor.Hour(), anchor.Minute(), anchor.Second(), anchor.Nanosecond(), loc)
+	day := agentClampedMonthDay(monthStart.Year(), monthStart.Month(), anchor.Day())
+	return time.Date(monthStart.Year(), monthStart.Month(), day, anchor.Hour(), anchor.Minute(), anchor.Second(), anchor.Nanosecond(), loc)
 }
 
 func agentClampedMonthDay(year int, month time.Month, day int) int {

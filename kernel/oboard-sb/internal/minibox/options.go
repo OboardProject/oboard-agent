@@ -74,6 +74,8 @@ type RuntimeUserLimit struct {
 	PeriodEnd         string `json:"period_end,omitempty"`
 	ResetMode         string `json:"reset_mode,omitempty"`
 	ResetDay          int    `json:"reset_day,omitempty"`
+	ResetAnchor       string `json:"reset_anchor,omitempty"`
+	PreviousPeriodKey string `json:"previous_period_key,omitempty"`
 	Timezone          string `json:"timezone,omitempty"`
 	QuotaState        string `json:"quota_state,omitempty"`
 	EnforcementMode   string `json:"enforcement_mode,omitempty"`
