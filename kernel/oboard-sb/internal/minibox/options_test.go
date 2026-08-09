@@ -138,6 +138,44 @@ func TestLoadConfigAcceptsShadowsocksUoTContract(t *testing.T) {
 	}
 }
 
+func TestLoadConfigAcceptsAuthenticatedSocks5InboundAndOutbound(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	raw := `{
+		"inbounds":[{
+			"type":"socks",
+			"tag":"socks-in",
+			"listen":"0.0.0.0",
+			"listen_port":1080,
+			"users":[{"username":"alice","password":"secret"}]
+		}],
+		"outbounds":[{
+			"type":"socks",
+			"tag":"socks-out",
+			"server":"127.0.0.1",
+			"server_port":1080,
+			"version":"5",
+			"username":"alice",
+			"password":"secret"
+		}],
+		"route":{"final":"socks-out"}
+	}`
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	opts, _, err := LoadConfig(path, HY2Tuning{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inbound, ok := opts.Inbounds[0].Options.(*option.SocksInboundOptions)
+	if !ok || len(inbound.Users) != 1 || inbound.Users[0].Username != "alice" || inbound.Users[0].Password != "secret" {
+		t.Fatalf("SOCKS5 inbound options not decoded: %#v", opts.Inbounds[0].Options)
+	}
+	outbound, ok := opts.Outbounds[0].Options.(*option.SOCKSOutboundOptions)
+	if !ok || outbound.Version != "5" || outbound.Username != "alice" || outbound.Password != "secret" {
+		t.Fatalf("SOCKS5 outbound options not decoded: %#v", opts.Outbounds[0].Options)
+	}
+}
+
 func TestLoadConfigAcceptsMieruOptionsFromLocalRegistry(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")

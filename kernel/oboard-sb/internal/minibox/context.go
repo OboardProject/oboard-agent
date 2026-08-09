@@ -44,6 +44,7 @@ func Context(parent context.Context, clocks ...*RuntimeClock) context.Context {
 	anytls.RegisterInbound(inbounds)
 	shadowsocks.RegisterInbound(inbounds)
 	mieru.RegisterInbound(inbounds)
+	socks.RegisterInbound(inbounds)
 
 	outbounds := outbound.NewRegistry()
 	direct.RegisterOutbound(outbounds)
