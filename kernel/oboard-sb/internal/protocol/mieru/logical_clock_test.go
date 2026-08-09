@@ -62,12 +62,8 @@ func TestMieruWireUsesInjectedLogicalClock(t *testing.T) {
 		}},
 	}}
 
-	startPair := func() (client.Client, server.Server) {
+	startServer := func() server.Server {
 		t.Helper()
-		mieruClient := client.NewClient()
-		if err := mieruClient.Store(clientConfig); err != nil {
-			t.Fatalf("store client config: %v", err)
-		}
 		mieruServer := server.NewServer()
 		if err := mieruServer.Store(serverConfig); err != nil {
 			t.Fatalf("store server config: %v", err)
@@ -75,11 +71,25 @@ func TestMieruWireUsesInjectedLogicalClock(t *testing.T) {
 		if err := mieruServer.Start(); err != nil {
 			t.Fatalf("start server: %v", err)
 		}
+		t.Cleanup(func() { _ = mieruServer.Stop() })
+		return mieruServer
+	}
+	startClient := func() client.Client {
+		t.Helper()
+		mieruClient := client.NewClient()
+		if err := mieruClient.Store(clientConfig); err != nil {
+			t.Fatalf("store client config: %v", err)
+		}
 		if err := mieruClient.Start(); err != nil {
-			_ = mieruServer.Stop()
 			t.Fatalf("start client: %v", err)
 		}
-		t.Cleanup(func() { _ = mieruClient.Stop(); _ = mieruServer.Stop() })
+		t.Cleanup(func() { _ = mieruClient.Stop() })
+		return mieruClient
+	}
+	startPair := func() (client.Client, server.Server) {
+		t.Helper()
+		mieruServer := startServer()
+		mieruClient := startClient()
 		return mieruClient, mieruServer
 	}
 
@@ -143,8 +153,9 @@ func TestMieruWireUsesInjectedLogicalClock(t *testing.T) {
 	t.Run("client left on wall clock", func(t *testing.T) {
 		mierucipher.SetTimeFunc(logical)
 		mieruprotocol.SetTimeFunc(logical)
-		mieruClient, mieruServer := startPair()
+		mieruServer := startServer()
 		restore()
+		mieruClient := startClient()
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		if _, err := mieruClient.DialContext(ctx, &net.TCPAddr{IP: net.ParseIP("1.2.3.4"), Port: 443}); err == nil {
