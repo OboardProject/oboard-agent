@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -128,5 +129,25 @@ func TestOutboundRelayUDPFramesDatagrams(t *testing.T) {
 	}
 	if _, err := io.ReadFull(reader, payload); err != nil || string(payload) != "pong" {
 		t.Fatalf("client read %q, %v", payload, err)
+	}
+
+	maxPayload := make([]byte, math.MaxUint16)
+	maxPayload[0] = 'a'
+	maxPayload[len(maxPayload)-1] = 'z'
+	if _, err := target.Write(maxPayload); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.ReadFull(reader, size[:]); err != nil {
+		t.Fatal(err)
+	}
+	if got := binary.BigEndian.Uint16(size[:]); got != math.MaxUint16 {
+		t.Fatalf("max reply size = %d", got)
+	}
+	maxReply := make([]byte, math.MaxUint16)
+	if _, err := io.ReadFull(reader, maxReply); err != nil {
+		t.Fatal(err)
+	}
+	if maxReply[0] != 'a' || maxReply[len(maxReply)-1] != 'z' {
+		t.Fatal("max reply payload was corrupted")
 	}
 }

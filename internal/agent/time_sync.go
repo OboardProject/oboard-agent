@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -297,23 +298,18 @@ func queryNTP(ctx context.Context, server string) (time.Duration, error) {
 
 func encodeNTPTimestamp(value time.Time) (uint64, error) {
 	seconds := value.Unix() + ntpUnixEpochDelta
-	if seconds < 0 || seconds > int64(^uint32(0)) {
+	if seconds < 0 || seconds > int64(math.MaxUint32) {
 		return 0, errors.New("local time is outside the supported NTP era")
 	}
-	fraction := (uint64(value.Nanosecond()) << 32) / 1_000_000_000
+	fraction := (uint64(value.Nanosecond()) << 32) / 1_000_000_000 // #nosec G115 -- time.Time.Nanosecond is always in [0, 1e9).
 	return uint64(seconds)<<32 | fraction, nil
 }
 
 func decodeNTPTimestamp(value uint64) time.Time {
 	seconds := int64(uint32(value>>32)) - ntpUnixEpochDelta
-	fraction := uint32(value)
-	nanoseconds := int64(uint64(fraction) * 1_000_000_000 >> 32)
+	fraction := value & math.MaxUint32
+	nanoseconds := int64(fraction * 1_000_000_000 >> 32)
 	return time.Unix(seconds, nanoseconds).UTC()
-}
-
-func validateNTPServers(servers []string) error {
-	_, err := normalizeNTPServers(servers)
-	return err
 }
 
 func normalizeNTPServers(servers []string) ([]string, error) {

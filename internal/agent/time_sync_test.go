@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -62,6 +63,33 @@ func TestNormalizeNTPServersCanonicalizesIPv6AndRejectsPorts(t *testing.T) {
 	}
 	if _, err := normalizeNTPServers([]string{"[2001:db8::1]:123", "time.example.com", "192.0.2.1"}); err == nil {
 		t.Fatal("NTP server with an explicit port was accepted")
+	}
+}
+
+func TestNTPTimestampCodecBoundaries(t *testing.T) {
+	tests := []time.Time{
+		time.Unix(-ntpUnixEpochDelta, 0).UTC(),
+		time.Unix(0, 123_456_789).UTC(),
+		time.Unix(int64(math.MaxUint32)-ntpUnixEpochDelta, 999_999_999).UTC(),
+	}
+	for _, value := range tests {
+		encoded, err := encodeNTPTimestamp(value)
+		if err != nil {
+			t.Fatalf("encode %s: %v", value, err)
+		}
+		decoded := decodeNTPTimestamp(encoded)
+		if delta := value.Sub(decoded); delta < 0 || delta > time.Nanosecond {
+			t.Fatalf("round trip %s = %s (delta %s)", value, decoded, delta)
+		}
+	}
+
+	for _, value := range []time.Time{
+		time.Unix(-ntpUnixEpochDelta-1, 0).UTC(),
+		time.Unix(int64(math.MaxUint32)-ntpUnixEpochDelta+1, 0).UTC(),
+	} {
+		if _, err := encodeNTPTimestamp(value); err == nil {
+			t.Fatalf("out-of-era time %s was encoded", value)
+		}
 	}
 }
 

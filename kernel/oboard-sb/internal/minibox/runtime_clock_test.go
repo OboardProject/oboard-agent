@@ -27,7 +27,7 @@ func TestRuntimeClockConfigureAdvanceAndDisable(t *testing.T) {
 	if err := clock.Configure(RuntimeClockConfig{Enabled: false, ReferenceTime: reference}); err != nil {
 		t.Fatal(err)
 	}
-	if clock.Snapshot().Enabled || !clock.Snapshot().ReferenceTime.IsZero() || absClockDuration(clock.Now().Sub(time.Now())) > time.Second {
+	if clock.Snapshot().Enabled || !clock.Snapshot().ReferenceTime.IsZero() || absClockDuration(time.Until(clock.Now())) > time.Second {
 		t.Fatalf("runtime clock was not disabled: %#v", clock.Snapshot())
 	}
 }

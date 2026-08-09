@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"strings"
@@ -55,13 +56,13 @@ func (c *framedRelayPacketConn) Read(p []byte) (int, error) {
 }
 
 func (c *framedRelayPacketConn) Write(p []byte) (int, error) {
-	if len(p) == 0 || len(p) > 65535 {
+	if len(p) == 0 || len(p) > math.MaxUint16 {
 		return 0, errors.New("invalid UDP relay payload size")
 	}
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 	var size [2]byte
-	binary.BigEndian.PutUint16(size[:], uint16(len(p)))
+	binary.BigEndian.PutUint16(size[:], uint16(len(p))) // #nosec G115 -- the payload length is bounded above.
 	if err := writeAll(c.Conn, size[:]); err != nil {
 		return 0, err
 	}

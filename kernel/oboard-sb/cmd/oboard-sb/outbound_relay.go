@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"regexp"
@@ -26,7 +27,7 @@ func registerOutboundRelayHandlers(mux *http.ServeMux, listen string, instance *
 		return
 	}
 	lookup := func(tag string) (N.Dialer, bool) {
-		if instance == nil || instance.Outbound() == nil {
+		if instance == nil {
 			return nil, false
 		}
 		outbound, loaded := instance.Outbound().Outbound(tag)
@@ -136,7 +137,7 @@ func relayFramedUDP(client net.Conn, reader *bufio.Reader, target net.Conn) {
 		done <- struct{}{}
 	}()
 	go func() {
-		payload := make([]byte, 65535)
+		payload := make([]byte, math.MaxUint16)
 		var size [2]byte
 		for {
 			n, err := target.Read(payload)
@@ -146,7 +147,7 @@ func relayFramedUDP(client net.Conn, reader *bufio.Reader, target net.Conn) {
 			if n == 0 {
 				continue
 			}
-			binary.BigEndian.PutUint16(size[:], uint16(n))
+			binary.BigEndian.PutUint16(size[:], uint16(n)) // #nosec G115 -- n cannot exceed the payload buffer length.
 			if err := writeRelayParts(client, size[:], payload[:n]); err != nil {
 				break
 			}

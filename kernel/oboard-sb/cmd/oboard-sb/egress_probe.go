@@ -29,7 +29,7 @@ type outboundEgressLookup func(tag string) (N.Dialer, bool)
 
 func registerOutboundEgressHandler(mux *http.ServeMux, instance *box.Box) {
 	lookup := func(tag string) (N.Dialer, bool) {
-		if instance == nil || instance.Outbound() == nil {
+		if instance == nil {
 			return nil, false
 		}
 		outbound, loaded := instance.Outbound().Outbound(tag)
