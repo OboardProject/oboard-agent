@@ -2250,6 +2250,7 @@ func monitoringLocalMetricsInterval(mode string) time.Duration {
 
 func (r *Runner) applyConnectivityProbe(health *model.HealthReport, enabled bool, target string, now time.Time) {
 	health.ConnectivityProbeEnabled = enabled
+	health.ConnectivityProbeTarget = normalizeConnectivityProbeTarget(target)
 	if !enabled {
 		return
 	}

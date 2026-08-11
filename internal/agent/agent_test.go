@@ -689,6 +689,15 @@ func TestConnectivityProbeEndpoints(t *testing.T) {
 	}
 }
 
+func TestDisabledConnectivityProbeReportsNormalizedTarget(t *testing.T) {
+	r := New(Config{ResourceProfile: "large", CommandTimeoutSeconds: 20})
+	health := model.HealthReport{}
+	r.applyConnectivityProbe(&health, false, "google", time.Now().UTC())
+	if health.ConnectivityProbeEnabled || health.ConnectivityProbeTarget != "google" {
+		t.Fatalf("connectivity probe policy = %#v", health)
+	}
+}
+
 func TestCommandOutputIsBounded(t *testing.T) {
 	out, err := commandOutput(2*time.Second, "sh", "-c", "i=0; while [ $i -lt 20000 ]; do printf 0123456789; i=$((i+1)); done")
 	if err != nil {
