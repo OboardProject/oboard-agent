@@ -101,6 +101,7 @@ type Runner struct {
 	lastNetworkSample          networkCounterSample
 	monitoringMode             string
 	connectivityProbeEnabled   bool
+	connectivityProbeTarget    string
 	connectivityCheckedAt      time.Time
 	connectivityAvailable      bool
 	connectivityLatencyMS      int64
@@ -606,6 +607,7 @@ func (r *Runner) connect(ctx context.Context) error {
 			ServerID                 int64            `json:"server_id"`
 			MonitoringMode           string           `json:"monitoring_mode"`
 			ConnectivityProbeEnabled bool             `json:"connectivity_probe_enabled"`
+			ConnectivityProbeTarget  string           `json:"connectivity_probe_target"`
 			ConnectionAuditEnabled   bool             `json:"connection_audit_enabled"`
 			ControllerTime           time.Time        `json:"ts"`
 		}
@@ -620,7 +622,7 @@ func (r *Runner) connect(ctx context.Context) error {
 			if err := r.bindServerIdentity(msg.ServerID); err != nil {
 				return err
 			}
-			r.setMonitoringPolicy(msg.MonitoringMode, msg.ConnectivityProbeEnabled)
+			r.setMonitoringPolicy(msg.MonitoringMode, msg.ConnectivityProbeEnabled, msg.ConnectivityProbeTarget)
 			r.setConnectionAuditPolicy(msg.ConnectionAuditEnabled)
 		case "task_request":
 			if msg.Task != nil {
@@ -651,7 +653,7 @@ func (r *Runner) connect(ctx context.Context) error {
 				}
 			}
 		case "heartbeat":
-			r.setMonitoringPolicy(msg.MonitoringMode, msg.ConnectivityProbeEnabled)
+			r.setMonitoringPolicy(msg.MonitoringMode, msg.ConnectivityProbeEnabled, msg.ConnectivityProbeTarget)
 			r.setConnectionAuditPolicy(msg.ConnectionAuditEnabled)
 			_ = r.maybeRunPeriodicDNSBenchmark(ctx)
 			_ = r.maybeRunPeriodicForwardProbes(ctx)
@@ -693,7 +695,7 @@ func (r *Runner) validateTaskServerID(task model.AgentTask) error {
 	return nil
 }
 
-func (r *Runner) setMonitoringPolicy(mode string, connectivityProbeEnabled bool) {
+func (r *Runner) setMonitoringPolicy(mode string, connectivityProbeEnabled bool, connectivityProbeTarget string) {
 	if strings.EqualFold(strings.TrimSpace(mode), "standard") {
 		mode = "standard"
 	} else {
@@ -701,10 +703,12 @@ func (r *Runner) setMonitoringPolicy(mode string, connectivityProbeEnabled bool)
 	}
 	r.mu.Lock()
 	r.monitoringMode = mode
-	if connectivityProbeEnabled && !r.connectivityProbeEnabled {
+	connectivityProbeTarget = normalizeConnectivityProbeTarget(connectivityProbeTarget)
+	if connectivityProbeEnabled && (!r.connectivityProbeEnabled || connectivityProbeTarget != r.connectivityProbeTarget) {
 		r.connectivityCheckedAt = time.Time{}
 	}
 	r.connectivityProbeEnabled = connectivityProbeEnabled
+	r.connectivityProbeTarget = connectivityProbeTarget
 	r.mu.Unlock()
 }
 
@@ -2109,6 +2113,7 @@ func (r *Runner) Probe(force bool) model.HealthReport {
 	r.mu.Lock()
 	monitoringMode := r.monitoringMode
 	connectivityEnabled := r.connectivityProbeEnabled
+	connectivityTarget := r.connectivityProbeTarget
 	localMin := monitoringLocalMetricsInterval(monitoringMode)
 	reuseLocal := !force && !r.lastLocalMetricsAt.IsZero() && now.Sub(r.lastLocalMetricsAt) < localMin && r.lastProbe.AgentID != ""
 	cached := r.lastProbe
@@ -2226,7 +2231,7 @@ func (r *Runner) Probe(force bool) model.HealthReport {
 	health.NetworkDownloadBPS = probe.NetworkDownloadBPS
 	health.NetworkTotalUploadBytes = probe.NetworkTotalUploadBytes
 	health.NetworkTotalDownloadBytes = probe.NetworkTotalDownloadBytes
-	r.applyConnectivityProbe(&health, connectivityEnabled, now)
+	r.applyConnectivityProbe(&health, connectivityEnabled, connectivityTarget, now)
 	health.Timestamp = now
 
 	r.mu.Lock()
@@ -2243,7 +2248,7 @@ func monitoringLocalMetricsInterval(mode string) time.Duration {
 	return 19 * time.Second
 }
 
-func (r *Runner) applyConnectivityProbe(health *model.HealthReport, enabled bool, now time.Time) {
+func (r *Runner) applyConnectivityProbe(health *model.HealthReport, enabled bool, target string, now time.Time) {
 	health.ConnectivityProbeEnabled = enabled
 	if !enabled {
 		return
@@ -2255,7 +2260,7 @@ func (r *Runner) applyConnectivityProbe(health *model.HealthReport, enabled bool
 	probeError := r.connectivityError
 	r.mu.Unlock()
 	if checkedAt.IsZero() || now.Sub(checkedAt) >= time.Minute {
-		available, latency, probeError = probeCloudflareConnectivity(5 * time.Second)
+		available, latency, probeError = probeConnectivity(target, 5*time.Second)
 		checkedAt = now
 		r.mu.Lock()
 		r.connectivityCheckedAt = checkedAt
@@ -2270,10 +2275,36 @@ func (r *Runner) applyConnectivityProbe(health *model.HealthReport, enabled bool
 	health.ConnectivityError = probeError
 }
 
-func probeCloudflareConnectivity(timeout time.Duration) (bool, int64, string) {
+type connectivityProbeEndpoint struct {
+	URL  string
+	Host string
+}
+
+func normalizeConnectivityProbeTarget(target string) string {
+	switch strings.ToLower(strings.TrimSpace(target)) {
+	case "12306", "google":
+		return strings.ToLower(strings.TrimSpace(target))
+	default:
+		return "cloudflare"
+	}
+}
+
+func connectivityProbeEndpointFor(target string) connectivityProbeEndpoint {
+	switch normalizeConnectivityProbeTarget(target) {
+	case "12306":
+		return connectivityProbeEndpoint{URL: "https://www.12306.cn/", Host: "12306.cn"}
+	case "google":
+		return connectivityProbeEndpoint{URL: "https://www.gstatic.com/generate_204", Host: "www.gstatic.com"}
+	default:
+		return connectivityProbeEndpoint{URL: "https://cp.cloudflare.com/generate_204", Host: "cp.cloudflare.com"}
+	}
+}
+
+func probeConnectivity(target string, timeout time.Duration) (bool, int64, string) {
 	if timeout <= 0 {
 		timeout = 5 * time.Second
 	}
+	endpoint := connectivityProbeEndpointFor(target)
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	transport := lowOverheadTransport()
@@ -2282,7 +2313,7 @@ func probeCloudflareConnectivity(timeout time.Duration) (bool, int64, string) {
 	transport.MaxConnsPerHost = 1
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Transport: transport, Timeout: timeout}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://cp.cloudflare.com/generate_204", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.URL, nil)
 	if err != nil {
 		return false, 0, err.Error()
 	}
@@ -2296,7 +2327,7 @@ func probeCloudflareConnectivity(timeout time.Duration) (bool, int64, string) {
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1024))
 	if resp.StatusCode < 200 || resp.StatusCode >= 400 {
-		return false, latency, fmt.Sprintf("cp.cloudflare.com returned %s", resp.Status)
+		return false, latency, fmt.Sprintf("%s returned %s", endpoint.Host, resp.Status)
 	}
 	return true, latency, ""
 }

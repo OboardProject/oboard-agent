@@ -648,19 +648,44 @@ func TestRunnerProbeUsesCachedFullProbe(t *testing.T) {
 
 func TestRunnerMonitoringPolicyModes(t *testing.T) {
 	r := New(Config{ResourceProfile: "large", CommandTimeoutSeconds: 20})
-	r.setMonitoringPolicy("standard", true)
+	r.setMonitoringPolicy("standard", true, "google")
 	r.mu.Lock()
-	mode, enabled := r.monitoringMode, r.connectivityProbeEnabled
+	mode, enabled, target := r.monitoringMode, r.connectivityProbeEnabled, r.connectivityProbeTarget
 	r.mu.Unlock()
 	if mode != "standard" || !enabled {
 		t.Fatalf("standard policy mode=%q enabled=%t", mode, enabled)
 	}
-	r.setMonitoringPolicy("unknown", false)
+	if target != "google" {
+		t.Fatalf("connectivity probe target=%q, want google", target)
+	}
+	r.setMonitoringPolicy("unknown", false, "unknown")
 	r.mu.Lock()
-	mode, enabled = r.monitoringMode, r.connectivityProbeEnabled
+	mode, enabled, target = r.monitoringMode, r.connectivityProbeEnabled, r.connectivityProbeTarget
 	r.mu.Unlock()
 	if mode != "lightweight" || enabled {
 		t.Fatalf("fallback policy mode=%q enabled=%t", mode, enabled)
+	}
+	if target != "cloudflare" {
+		t.Fatalf("fallback connectivity probe target=%q, want cloudflare", target)
+	}
+}
+
+func TestConnectivityProbeEndpoints(t *testing.T) {
+	tests := []struct {
+		target string
+		url    string
+		host   string
+	}{
+		{target: "cloudflare", url: "https://cp.cloudflare.com/generate_204", host: "cp.cloudflare.com"},
+		{target: "12306", url: "https://www.12306.cn/", host: "12306.cn"},
+		{target: "google", url: "https://www.gstatic.com/generate_204", host: "www.gstatic.com"},
+		{target: "unknown", url: "https://cp.cloudflare.com/generate_204", host: "cp.cloudflare.com"},
+	}
+	for _, test := range tests {
+		endpoint := connectivityProbeEndpointFor(test.target)
+		if endpoint.URL != test.url || endpoint.Host != test.host {
+			t.Fatalf("target %q endpoint=%+v, want url=%q host=%q", test.target, endpoint, test.url, test.host)
+		}
 	}
 }
 
