@@ -803,6 +803,20 @@ func (r *Runner) executeAgentTask(task model.AgentTask) (string, string) {
 			return "failed", string(raw)
 		}
 		return "succeeded", string(raw)
+	case model.AgentTaskTypeProbeLatencyTargets:
+		var plan model.LatencyProbeTargetsPlan
+		if err := json.Unmarshal([]byte(task.PayloadJSON), &plan); err != nil {
+			return "failed", jsonResult(err.Error())
+		}
+		result, err := r.runLatencyProbeTask(context.Background(), plan)
+		raw, marshalErr := json.Marshal(result)
+		if marshalErr != nil {
+			return "failed", jsonResult(marshalErr.Error())
+		}
+		if err != nil {
+			return "failed", string(raw)
+		}
+		return "succeeded", string(raw)
 	case model.AgentTaskTypeCollectLogs:
 		result := r.collectLogs(task.PayloadJSON)
 		return "succeeded", jsonMap(result)

@@ -731,6 +731,7 @@ const (
 	AgentTaskTypeProbeInbounds         = "probe_inbounds"
 	AgentTaskTypeProbePortForwards     = "probe_port_forwards"
 	AgentTaskTypeProbeExternalEgress   = "probe_external_egress"
+	AgentTaskTypeProbeLatencyTargets   = "probe_latency_targets"
 	AgentTaskTypeDetectMTU             = "detect_mtu"
 	AgentTaskTypeBenchmarkDNS          = "benchmark_dns"
 	AgentTaskTypeCollectLogs           = "collect_logs"
@@ -807,6 +808,44 @@ type ExternalEgressProbePlan struct {
 	ExpectedConfigVersion int64                       `json:"expected_config_version,omitempty"`
 	TimeoutMS             int                         `json:"timeout_ms"`
 	Targets               []ExternalEgressProbeTarget `json:"targets"`
+}
+
+type LatencyProbeTarget struct {
+	ProbeID  string `json:"probe_id"`
+	Province string `json:"province"`
+	Carrier  string `json:"carrier"`
+	IP       string `json:"ip"`
+}
+
+type LatencyProbeTargetsPlan struct {
+	Version         int64                `json:"version"`
+	ResourceVersion string               `json:"resource_version"`
+	SampleCount     int                  `json:"sample_count"`
+	IntervalMS      int                  `json:"interval_ms"`
+	TimeoutMS       int                  `json:"timeout_ms"`
+	Targets         []LatencyProbeTarget `json:"targets"`
+}
+
+type LatencyProbeResult struct {
+	ProbeID      string    `json:"probe_id"`
+	Province     string    `json:"province"`
+	Carrier      string    `json:"carrier"`
+	IP           string    `json:"ip"`
+	Available    bool      `json:"available"`
+	LatencyMS    int64     `json:"latency_ms"`
+	MinLatencyMS int64     `json:"min_latency_ms"`
+	P95LatencyMS int64     `json:"p95_latency_ms"`
+	JitterMS     int64     `json:"jitter_ms"`
+	SampleCount  int       `json:"sample_count"`
+	SuccessCount int       `json:"success_count"`
+	Error        string    `json:"error,omitempty"`
+	CheckedAt    time.Time `json:"checked_at"`
+}
+
+type LatencyProbeResultReport struct {
+	ResourceVersion string               `json:"resource_version"`
+	CheckedAt       time.Time            `json:"checked_at"`
+	Items           []LatencyProbeResult `json:"items"`
 }
 
 type ExternalEgressProbeTarget struct {
