@@ -3,6 +3,8 @@ package agent
 import (
 	"context"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -10,17 +12,17 @@ import (
 )
 
 func TestRunLatencyProbeRejectsInvalidTargetsAndKeepsOtherResults(t *testing.T) {
-	probe := func(_ context.Context, host string, count int, _, _ time.Duration) ([]int64, []string) {
+	probe := func(_ context.Context, host string, _ int, count int, _, _ time.Duration) ([]int64, []string) {
 		if host != "192.0.2.1" || count != 1 {
 			t.Fatalf("probe host=%q count=%d", host, count)
 		}
 		return []int64{12}, nil
 	}
 	report, runErr := (&Runner{}).runLatencyProbeTaskWithProbe(context.Background(), model.LatencyProbeTargetsPlan{
-		ResourceVersion: "v1", SampleCount: 1, IntervalMS: 25, TimeoutMS: 500,
+		ResourceVersion: "v1", Mode: model.LatencyProbeModeICMP, SampleCount: 1, IntervalMS: 25, TimeoutMS: 500,
 		Targets: []model.LatencyProbeTarget{
-			{ProbeID: "ok", Province: "测试", Carrier: "测试", IP: "192.0.2.1"},
-			{ProbeID: "bad", Province: "测试", Carrier: "测试", IP: "2001:db8::1"},
+			{ProbeID: "ok", Kind: "regional", Province: "测试", Carrier: "测试", Host: "192.0.2.1", IP: "192.0.2.1"},
+			{ProbeID: "bad", Kind: "regional", Province: "测试", Carrier: "测试", Host: "2001:db8::1", IP: "2001:db8::1"},
 		},
 	}, probe)
 	if runErr == nil || len(report.Items) != 2 || !report.Items[0].Available || report.Items[1].Error == "" {
@@ -68,5 +70,67 @@ func TestApplyLatencyStatsEmpty(t *testing.T) {
 	applyLatencyStats(&result, nil, 3)
 	if result.SuccessCount != 0 || result.LatencyMS != 0 || result.P95LatencyMS != 0 {
 		t.Fatalf("empty latency stats should remain zero: %#v", result)
+	}
+}
+
+func TestLatencyProbePlanVersionAndPendingStateSurviveRestart(t *testing.T) {
+	stateDir := t.TempDir()
+	plan := model.LatencyProbeTargetsPlan{Version: 10, ResourceVersion: "resource-v1", Mode: model.LatencyProbeModeTCP, Enabled: true, IntervalSeconds: 60, SampleCount: 1, IntervalMS: 150, TimeoutMS: 1000, Targets: []model.LatencyProbeTarget{{ProbeID: "public-cloudflare", Kind: "public", Host: "cp.cloudflare.com", Port: 443}}}
+	runner := New(Config{AgentID: "agent-latency", StateDir: stateDir, ResourceProfile: "large", CommandTimeoutSeconds: 20})
+	if err := runner.setLatencyProbePlan(plan); err != nil {
+		t.Fatal(err)
+	}
+	if err := runner.setLatencyProbePlan(plan); err != nil {
+		t.Fatalf("identical plan was not idempotent: %v", err)
+	}
+	conflict := plan
+	conflict.IntervalSeconds = 120
+	if err := runner.setLatencyProbePlan(conflict); err == nil {
+		t.Fatal("different content at the same version was accepted")
+	}
+	stale := plan
+	stale.Version = 9
+	if err := runner.setLatencyProbePlan(stale); err == nil {
+		t.Fatal("older plan version was accepted")
+	}
+	report := model.LatencyProbeResultReport{ReportID: "offline-report", ResourceVersion: plan.ResourceVersion, CheckedAt: time.Now().UTC(), Items: []model.LatencyProbeResult{{ProbeID: "public-cloudflare", Kind: "public", Mode: "tcp", Host: "cp.cloudflare.com", Port: 443, Available: true, LatencyMS: 20, MinLatencyMS: 20, P95LatencyMS: 20, SampleCount: 1, SuccessCount: 1}}}
+	runner.latencyProbeMu.Lock()
+	runner.latencyProbeState.Pending = append(runner.latencyProbeState.Pending, report)
+	if err := runner.persistLatencyProbeStateLocked(); err != nil {
+		runner.latencyProbeMu.Unlock()
+		t.Fatal(err)
+	}
+	runner.latencyProbeMu.Unlock()
+	if info, err := os.Stat(runner.latencyProbeStatePath()); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("state file mode=%v err=%v", info.Mode().Perm(), err)
+	}
+	restarted := New(Config{AgentID: "agent-latency", StateDir: stateDir, ResourceProfile: "large", CommandTimeoutSeconds: 20})
+	pending, ok := restarted.nextPendingLatencyProbeReport()
+	if !ok || pending.ReportID != report.ReportID || restarted.latencyProbeState.Plan.Version != plan.Version {
+		t.Fatalf("restored state = %#v pending=%#v", restarted.latencyProbeState, pending)
+	}
+	if err := restarted.ackLatencyProbeReport(report.ReportID); err != nil {
+		t.Fatal(err)
+	}
+	afterAck := New(Config{AgentID: "agent-latency", StateDir: stateDir, ResourceProfile: "large", CommandTimeoutSeconds: 20})
+	if _, ok := afterAck.nextPendingLatencyProbeReport(); ok {
+		t.Fatal("acknowledged report survived restart")
+	}
+}
+
+func TestQueueLatencyProbeReportRollsBackWhenPersistenceFails(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(statePath, []byte("blocked"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runner := New(Config{AgentID: "agent-latency", StateDir: statePath, ResourceProfile: "large", CommandTimeoutSeconds: 20})
+	runner.latencyProbeStateLoaded = true
+	runner.latencyProbeState.Pending = []model.LatencyProbeResultReport{{ReportID: "already-durable", CheckedAt: time.Now().UTC()}}
+	report := model.LatencyProbeResultReport{ReportID: "not-durable", CheckedAt: time.Now().UTC()}
+	if err := runner.queueLatencyProbeReport(report, time.Now().UTC()); err == nil {
+		t.Fatal("queue succeeded despite an unwritable state path")
+	}
+	if len(runner.latencyProbeState.Pending) != 1 || runner.latencyProbeState.Pending[0].ReportID != "already-durable" {
+		t.Fatalf("failed persistence changed pending state: %#v", runner.latencyProbeState.Pending)
 	}
 }

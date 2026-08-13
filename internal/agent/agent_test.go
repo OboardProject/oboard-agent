@@ -648,53 +648,19 @@ func TestRunnerProbeUsesCachedFullProbe(t *testing.T) {
 
 func TestRunnerMonitoringPolicyModes(t *testing.T) {
 	r := New(Config{ResourceProfile: "large", CommandTimeoutSeconds: 20})
-	r.setMonitoringPolicy("standard", true, "google")
+	r.setMonitoringPolicy("standard")
 	r.mu.Lock()
-	mode, enabled, target := r.monitoringMode, r.connectivityProbeEnabled, r.connectivityProbeTarget
+	mode := r.monitoringMode
 	r.mu.Unlock()
-	if mode != "standard" || !enabled {
-		t.Fatalf("standard policy mode=%q enabled=%t", mode, enabled)
+	if mode != "standard" {
+		t.Fatalf("standard policy mode=%q", mode)
 	}
-	if target != "google" {
-		t.Fatalf("connectivity probe target=%q, want google", target)
-	}
-	r.setMonitoringPolicy("unknown", false, "unknown")
+	r.setMonitoringPolicy("unknown")
 	r.mu.Lock()
-	mode, enabled, target = r.monitoringMode, r.connectivityProbeEnabled, r.connectivityProbeTarget
+	mode = r.monitoringMode
 	r.mu.Unlock()
-	if mode != "lightweight" || enabled {
-		t.Fatalf("fallback policy mode=%q enabled=%t", mode, enabled)
-	}
-	if target != "cloudflare" {
-		t.Fatalf("fallback connectivity probe target=%q, want cloudflare", target)
-	}
-}
-
-func TestConnectivityProbeEndpoints(t *testing.T) {
-	tests := []struct {
-		target string
-		url    string
-		host   string
-	}{
-		{target: "cloudflare", url: "https://cp.cloudflare.com/generate_204", host: "cp.cloudflare.com"},
-		{target: "12306", url: "https://www.12306.cn/", host: "12306.cn"},
-		{target: "google", url: "https://www.gstatic.com/generate_204", host: "www.gstatic.com"},
-		{target: "unknown", url: "https://cp.cloudflare.com/generate_204", host: "cp.cloudflare.com"},
-	}
-	for _, test := range tests {
-		endpoint := connectivityProbeEndpointFor(test.target)
-		if endpoint.URL != test.url || endpoint.Host != test.host {
-			t.Fatalf("target %q endpoint=%+v, want url=%q host=%q", test.target, endpoint, test.url, test.host)
-		}
-	}
-}
-
-func TestDisabledConnectivityProbeReportsNormalizedTarget(t *testing.T) {
-	r := New(Config{ResourceProfile: "large", CommandTimeoutSeconds: 20})
-	health := model.HealthReport{}
-	r.applyConnectivityProbe(&health, false, "google", time.Now().UTC())
-	if health.ConnectivityProbeEnabled || health.ConnectivityProbeTarget != "google" {
-		t.Fatalf("connectivity probe policy = %#v", health)
+	if mode != "lightweight" {
+		t.Fatalf("fallback policy mode=%q", mode)
 	}
 }
 

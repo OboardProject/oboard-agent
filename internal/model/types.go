@@ -812,14 +812,32 @@ type ExternalEgressProbePlan struct {
 
 type LatencyProbeTarget struct {
 	ProbeID  string `json:"probe_id"`
+	Kind     string `json:"kind"`
+	Province string `json:"province,omitempty"`
+	Carrier  string `json:"carrier,omitempty"`
+	Host     string `json:"host"`
+	IP       string `json:"ip,omitempty"`
+	Port     int    `json:"port"`
+}
+
+type LatencyProbeMode string
+
+const (
+	LatencyProbeModeTCP  LatencyProbeMode = "tcp"
+	LatencyProbeModeICMP LatencyProbeMode = "icmp"
+)
+
+type LatencyProbeRegion struct {
 	Province string `json:"province"`
 	Carrier  string `json:"carrier"`
-	IP       string `json:"ip"`
 }
 
 type LatencyProbeTargetsPlan struct {
 	Version         int64                `json:"version"`
 	ResourceVersion string               `json:"resource_version"`
+	Mode            LatencyProbeMode     `json:"mode"`
+	Enabled         bool                 `json:"enabled"`
+	IntervalSeconds int                  `json:"interval_seconds"`
 	SampleCount     int                  `json:"sample_count"`
 	IntervalMS      int                  `json:"interval_ms"`
 	TimeoutMS       int                  `json:"timeout_ms"`
@@ -828,9 +846,13 @@ type LatencyProbeTargetsPlan struct {
 
 type LatencyProbeResult struct {
 	ProbeID      string    `json:"probe_id"`
+	Kind         string    `json:"kind"`
+	Mode         string    `json:"mode"`
 	Province     string    `json:"province"`
 	Carrier      string    `json:"carrier"`
+	Host         string    `json:"host"`
 	IP           string    `json:"ip"`
+	Port         int       `json:"port"`
 	Available    bool      `json:"available"`
 	LatencyMS    int64     `json:"latency_ms"`
 	MinLatencyMS int64     `json:"min_latency_ms"`
@@ -843,6 +865,7 @@ type LatencyProbeResult struct {
 }
 
 type LatencyProbeResultReport struct {
+	ReportID        string               `json:"report_id"`
 	ResourceVersion string               `json:"resource_version"`
 	CheckedAt       time.Time            `json:"checked_at"`
 	Items           []LatencyProbeResult `json:"items"`
@@ -1141,12 +1164,12 @@ type HealthReport struct {
 	NetworkDownloadBPS        uint64       `json:"network_download_bps"`
 	NetworkTotalUploadBytes   uint64       `json:"network_total_upload_bytes"`
 	NetworkTotalDownloadBytes uint64       `json:"network_total_download_bytes"`
-	ConnectivityProbeEnabled  bool         `json:"connectivity_probe_enabled"`
-	ConnectivityProbeTarget   string       `json:"connectivity_probe_target"`
-	ConnectivityAvailable     bool         `json:"connectivity_available"`
-	ConnectivityLatencyMS     int64        `json:"connectivity_latency_ms"`
-	ConnectivityCheckedAt     time.Time    `json:"connectivity_checked_at"`
-	ConnectivityError         string       `json:"connectivity_error"`
+	ConnectivityProbeEnabled  bool         `json:"-"`
+	ConnectivityProbeTarget   string       `json:"-"`
+	ConnectivityAvailable     bool         `json:"-"`
+	ConnectivityLatencyMS     int64        `json:"-"`
+	ConnectivityCheckedAt     time.Time    `json:"-"`
+	ConnectivityError         string       `json:"-"`
 	Timestamp                 time.Time    `json:"timestamp"`
 }
 
