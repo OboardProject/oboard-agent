@@ -4,6 +4,7 @@ import (
 	"math"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -26,7 +27,11 @@ type systemProbe struct {
 	MemoryUsedBytes           uint64
 	MemoryTotalBytes          uint64
 	AgentMemoryBytes          uint64
-	DiskBytes                 uint64
+	DiskUsedBytes             uint64
+	DiskTotalBytes            uint64
+	TCPConnectionCount        uint64
+	UDPConnectionCount        uint64
+	ProcessCount              uint64
 	NetworkUploadBPS          uint64
 	NetworkDownloadBPS        uint64
 	NetworkTotalUploadBytes   uint64
@@ -79,9 +84,12 @@ func sampleSystemProbe(cpuName string, previousCPU procCPU) (systemProbe, procCP
 		runtime.ReadMemStats(&mem)
 		p.AgentMemoryBytes = mem.Sys
 	}
-	if disk := linuxDiskUsed("/"); disk > 0 {
-		p.DiskBytes = disk
+	if used, total := linuxDiskUsage("/"); total > 0 {
+		p.DiskUsedBytes = used
+		p.DiskTotalBytes = total
 	}
+	p.TCPConnectionCount, p.UDPConnectionCount = linuxConnectionCounts("/proc/net")
+	p.ProcessCount = linuxProcessCount("/proc")
 	currentCPU, ok := readProcStatCPU()
 	if !ok {
 		return p, previousCPU
@@ -117,11 +125,16 @@ func clampCPUPercent(value float64) float64 {
 }
 
 func linuxDiskUsed(path string) uint64 {
+	used, _ := linuxDiskUsage(path)
+	return used
+}
+
+func linuxDiskUsage(path string) (used, total uint64) {
 	var st syscall.Statfs_t
 	if err := syscall.Statfs(path, &st); err != nil {
-		return 0
+		return 0, 0
 	}
-	return diskUsedBytes(st.Blocks, st.Bfree, int64(st.Bsize))
+	return diskUsedBytes(st.Blocks, st.Bfree, int64(st.Bsize)), diskTotalBytes(st.Blocks, int64(st.Bsize))
 }
 
 func diskUsedBytes(blocks, free uint64, blockSize int64) uint64 {
@@ -136,6 +149,56 @@ func diskUsedBytes(blocks, free uint64, blockSize int64) uint64 {
 		return math.MaxUint64
 	}
 	return used * bsize
+}
+
+func diskTotalBytes(blocks uint64, blockSize int64) uint64 {
+	if blocks == 0 || blockSize <= 0 {
+		return 0
+	}
+	bsize := uint64(blockSize)
+	if blocks > math.MaxUint64/bsize {
+		return math.MaxUint64
+	}
+	return blocks * bsize
+}
+
+func linuxConnectionCounts(procNet string) (tcp, udp uint64) {
+	for _, name := range []string{"tcp", "tcp6"} {
+		tcp += linuxSocketCount(filepath.Join(procNet, name))
+	}
+	for _, name := range []string{"udp", "udp6"} {
+		udp += linuxSocketCount(filepath.Join(procNet, name))
+	}
+	return tcp, udp
+}
+
+func linuxSocketCount(path string) uint64 {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+	if len(lines) <= 1 {
+		return 0
+	}
+	return uint64(len(lines) - 1)
+}
+
+func linuxProcessCount(procRoot string) uint64 {
+	entries, err := os.ReadDir(procRoot)
+	if err != nil {
+		return 0
+	}
+	var count uint64
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		if _, err := strconv.ParseUint(entry.Name(), 10, 64); err == nil {
+			count++
+		}
+	}
+	return count
 }
 
 func linuxCPUName() string {

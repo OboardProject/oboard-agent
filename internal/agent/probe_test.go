@@ -4,6 +4,8 @@ import (
 	"context"
 	"math"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -215,6 +217,64 @@ func TestDiskUsedBytesValidatesAndSaturates(t *testing.T) {
 	}
 	if got := diskUsedBytes(math.MaxUint64, 0, 2); got != math.MaxUint64 {
 		t.Fatalf("overflow result = %d, want saturation", got)
+	}
+}
+
+func TestDiskTotalBytesValidatesAndSaturates(t *testing.T) {
+	if got := diskTotalBytes(100, 4096); got != 100*4096 {
+		t.Fatalf("total bytes = %d", got)
+	}
+	for _, test := range []struct {
+		name      string
+		blocks    uint64
+		blockSize int64
+	}{
+		{name: "no blocks", blockSize: 4096},
+		{name: "zero block size", blocks: 10},
+		{name: "negative block size", blocks: 10, blockSize: -1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := diskTotalBytes(test.blocks, test.blockSize); got != 0 {
+				t.Fatalf("total bytes = %d, want 0", got)
+			}
+		})
+	}
+	if got := diskTotalBytes(math.MaxUint64, 2); got != math.MaxUint64 {
+		t.Fatalf("overflow result = %d, want saturation", got)
+	}
+}
+
+func TestLinuxConnectionCounts(t *testing.T) {
+	procNet := t.TempDir()
+	files := map[string]string{
+		"tcp":  "header\nconnection-1\nconnection-2\n",
+		"tcp6": "header\nconnection-3\n",
+		"udp":  "header\nconnection-1\n",
+		"udp6": "header\n",
+	}
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(procNet, name), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tcp, udp := linuxConnectionCounts(procNet)
+	if tcp != 3 || udp != 1 {
+		t.Fatalf("connection counts = tcp:%d udp:%d, want tcp:3 udp:1", tcp, udp)
+	}
+}
+
+func TestLinuxProcessCountIgnoresNonPIDEntries(t *testing.T) {
+	procRoot := t.TempDir()
+	for _, name := range []string{"1", "42", "self", "net"} {
+		if err := os.Mkdir(filepath.Join(procRoot, name), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(procRoot, "123"), []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := linuxProcessCount(procRoot); got != 2 {
+		t.Fatalf("process count = %d, want 2", got)
 	}
 }
 

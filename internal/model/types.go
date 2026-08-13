@@ -187,47 +187,51 @@ type SubscriptionAssignment struct {
 }
 
 type Server struct {
-	ID               int64          `json:"id"`
-	Name             string         `json:"name"`
-	AgentID          string         `json:"agent_id"`
-	AgentTokenHash   string         `json:"-"`
-	EnrollmentHash   string         `json:"-"`
-	PublicIPv4       string         `json:"public_ipv4"`
-	PublicIPv6       string         `json:"public_ipv6"`
-	EntryIPMode      EntryIPMode    `json:"entry_ip_mode"`
-	ListenIP         string         `json:"listen_ip"`
-	IPStack          IPStack        `json:"ip_stack"`
-	UDPInboundMode   UDPInboundMode `json:"udp_inbound_mode"`
-	MTUMode          MTUMode        `json:"mtu_mode"`
-	MTUValue         int            `json:"mtu_value"`
-	MTUProbeHost     string         `json:"mtu_probe_host"`
-	MTUProbePort     int            `json:"mtu_probe_port"`
-	MTUOverheadBytes int            `json:"mtu_overhead_bytes"`
-	PortRangeStart   int            `json:"port_range_start"`
-	PortRangeEnd     int            `json:"port_range_end"`
-	Status           ServerStatus   `json:"status"`
-	OS               string         `json:"os"`
-	DistroID         string         `json:"distro_id"`
-	DistroVersion    string         `json:"distro_version"`
-	DistroName       string         `json:"distro_name"`
-	Libc             string         `json:"libc"`
-	ServiceManager   string         `json:"service_manager"`
-	PackageManager   string         `json:"package_manager"`
-	Arch             string         `json:"arch"`
-	Kernel           string         `json:"kernel"`
-	CPU              string         `json:"cpu"`
-	MemoryBytes      uint64         `json:"memory_bytes"`
-	CPUUsagePercent  float64        `json:"cpu_usage_percent"`
-	MemoryUsedBytes  uint64         `json:"memory_used_bytes"`
-	MemoryTotalBytes uint64         `json:"memory_total_bytes"`
-	AgentMemoryBytes uint64         `json:"agent_memory_bytes"`
-	DiskBytes        uint64         `json:"disk_bytes"`
-	AgentVersion     string         `json:"agent_version"`
-	AgentBuild       string         `json:"agent_build"`
-	SingBoxVersion   string         `json:"sing_box_version"`
-	LastSeenAt       *time.Time     `json:"last_seen_at,omitempty"`
-	CreatedAt        time.Time      `json:"created_at"`
-	UpdatedAt        time.Time      `json:"updated_at"`
+	ID                 int64          `json:"id"`
+	Name               string         `json:"name"`
+	AgentID            string         `json:"agent_id"`
+	AgentTokenHash     string         `json:"-"`
+	EnrollmentHash     string         `json:"-"`
+	PublicIPv4         string         `json:"public_ipv4"`
+	PublicIPv6         string         `json:"public_ipv6"`
+	EntryIPMode        EntryIPMode    `json:"entry_ip_mode"`
+	ListenIP           string         `json:"listen_ip"`
+	IPStack            IPStack        `json:"ip_stack"`
+	UDPInboundMode     UDPInboundMode `json:"udp_inbound_mode"`
+	MTUMode            MTUMode        `json:"mtu_mode"`
+	MTUValue           int            `json:"mtu_value"`
+	MTUProbeHost       string         `json:"mtu_probe_host"`
+	MTUProbePort       int            `json:"mtu_probe_port"`
+	MTUOverheadBytes   int            `json:"mtu_overhead_bytes"`
+	PortRangeStart     int            `json:"port_range_start"`
+	PortRangeEnd       int            `json:"port_range_end"`
+	Status             ServerStatus   `json:"status"`
+	OS                 string         `json:"os"`
+	DistroID           string         `json:"distro_id"`
+	DistroVersion      string         `json:"distro_version"`
+	DistroName         string         `json:"distro_name"`
+	Libc               string         `json:"libc"`
+	ServiceManager     string         `json:"service_manager"`
+	PackageManager     string         `json:"package_manager"`
+	Arch               string         `json:"arch"`
+	Kernel             string         `json:"kernel"`
+	CPU                string         `json:"cpu"`
+	MemoryBytes        uint64         `json:"memory_bytes"`
+	CPUUsagePercent    float64        `json:"cpu_usage_percent"`
+	MemoryUsedBytes    uint64         `json:"memory_used_bytes"`
+	MemoryTotalBytes   uint64         `json:"memory_total_bytes"`
+	AgentMemoryBytes   uint64         `json:"agent_memory_bytes"`
+	DiskBytes          uint64         `json:"disk_bytes"`
+	DiskTotalBytes     uint64         `json:"disk_total_bytes"`
+	TCPConnectionCount uint64         `json:"tcp_connection_count"`
+	UDPConnectionCount uint64         `json:"udp_connection_count"`
+	ProcessCount       uint64         `json:"process_count"`
+	AgentVersion       string         `json:"agent_version"`
+	AgentBuild         string         `json:"agent_build"`
+	SingBoxVersion     string         `json:"sing_box_version"`
+	LastSeenAt         *time.Time     `json:"last_seen_at,omitempty"`
+	CreatedAt          time.Time      `json:"created_at"`
+	UpdatedAt          time.Time      `json:"updated_at"`
 }
 
 type Inbound struct {
@@ -1157,6 +1161,10 @@ type HealthReport struct {
 	MemoryTotalBytes          uint64       `json:"memory_total_bytes"`
 	AgentMemoryBytes          uint64       `json:"agent_memory_bytes"`
 	DiskBytes                 uint64       `json:"disk_bytes"`
+	DiskTotalBytes            uint64       `json:"disk_total_bytes"`
+	TCPConnectionCount        uint64       `json:"tcp_connection_count"`
+	UDPConnectionCount        uint64       `json:"udp_connection_count"`
+	ProcessCount              uint64       `json:"process_count"`
 	AgentVersion              string       `json:"agent_version"`
 	AgentBuild                string       `json:"agent_build"`
 	SingBoxVersion            string       `json:"sing_box_version"`
