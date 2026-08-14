@@ -2,7 +2,9 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -161,5 +163,37 @@ func TestManagedAssetDirectoryRejectsSymlink(t *testing.T) {
 	}
 	if err := ensurePrivateAssetDirectory(link); err == nil {
 		t.Fatal("symbolic-link managed asset directory was accepted")
+	}
+}
+
+func TestManagedRoutingRuleSetAssetInstallResolveAndCleanupByKind(t *testing.T) {
+	content := []byte(`{"version":1,"rules":[{"domain":["example.com"]}]}`)
+	sum := sha256.Sum256(content)
+	reference := model.ManagedAssetReference{Kind: "routing_rule_set", ID: 7, Revision: hex.EncodeToString(sum[:])}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(model.ManagedAssetResponse{Assets: []model.ManagedAsset{{ManagedAssetReference: reference, Files: []model.ManagedAssetFile{{Name: "rules.json", ContentB64: base64.StdEncoding.EncodeToString(content), Mode: 0o600}}}}})
+	}))
+	defer server.Close()
+	runner := New(Config{ControllerURL: server.URL, AgentID: "agent-1", AgentToken: "token-1", StateDir: t.TempDir(), AllowInsecureController: true})
+	config := `{"route":{"rule_set":[{"type":"local","tag":"routing-rule-set-7","format":"source","path":"oboard-asset://routing-rule-set/7/rules.json"}]}}`
+	resolved, changed, err := runner.syncManagedAssets(context.Background(), []model.ManagedAssetReference{reference}, config)
+	if err != nil || !changed || strings.Contains(resolved, "oboard-asset://") {
+		t.Fatalf("rule-set sync changed=%v err=%v config=%s", changed, err, resolved)
+	}
+	certificateReference := model.ManagedAssetReference{Kind: "certificate", ID: 7, Revision: managedCertificateRevision([]byte("cert"), []byte("key"))}
+	if err := runner.cleanupManagedAssets([]model.ManagedAssetReference{reference}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(runner.managedAssetDir(reference)); err != nil {
+		t.Fatalf("rule-set asset removed by same numeric certificate id: %v", err)
+	}
+	if _, err := os.Stat(runner.managedAssetDir(certificateReference)); err == nil {
+		t.Fatal("unexpected certificate asset exists")
+	}
+	if err := os.WriteFile(filepath.Join(runner.managedAssetDir(reference), "rules.json"), []byte("corrupt"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if runner.managedAssetFilesReady(reference) {
+		t.Fatal("corrupt rule-set cache was accepted")
 	}
 }

@@ -708,6 +708,8 @@ type SSHInboundUser struct {
 	PathID           int64  `json:"path_id"`
 	RouteKind        string `json:"route_kind"`
 	OutboundTag      string `json:"outbound_tag,omitempty"`
+	RouteInboundTag  string `json:"route_inbound_tag,omitempty"`
+	RouteAuthUser    string `json:"route_auth_user,omitempty"`
 	Enabled          bool   `json:"enabled"`
 }
 

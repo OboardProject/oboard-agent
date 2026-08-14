@@ -59,7 +59,7 @@ func (r *Runner) syncManagedAssets(ctx context.Context, references []model.Manag
 func validateManagedAssetReferences(references []model.ManagedAssetReference) (map[string]model.ManagedAssetReference, error) {
 	out := make(map[string]model.ManagedAssetReference, len(references))
 	for _, reference := range references {
-		if reference.Kind != "certificate" || reference.ID <= 0 || strings.TrimSpace(reference.Revision) == "" {
+		if !supportedManagedAssetKind(reference.Kind) || reference.ID <= 0 || strings.TrimSpace(reference.Revision) == "" {
 			return nil, errors.New("invalid managed asset reference")
 		}
 		key := managedAssetKey(reference)
@@ -69,6 +69,17 @@ func validateManagedAssetReferences(references []model.ManagedAssetReference) (m
 		out[key] = reference
 	}
 	return out, nil
+}
+
+func supportedManagedAssetKind(kind string) bool {
+	return kind == "certificate" || kind == "routing_rule_set"
+}
+
+func managedAssetFileNames(kind string) []string {
+	if kind == "routing_rule_set" {
+		return []string{"rules.json", "rules.srs"}
+	}
+	return []string{"fullchain.pem", "privkey.pem"}
 }
 
 func managedAssetKey(reference model.ManagedAssetReference) string {
@@ -149,18 +160,36 @@ func (r *Runner) managedAssetFilesReady(reference model.ManagedAssetReference) b
 		return false
 	}
 	files := map[string][]byte{}
-	for _, name := range []string{"fullchain.pem", "privkey.pem"} {
+	found := 0
+	for _, name := range managedAssetFileNames(reference.Kind) {
 		info, err := os.Lstat(filepath.Join(dir, name))
+		if errors.Is(err, os.ErrNotExist) && reference.Kind == "routing_rule_set" {
+			continue
+		}
 		if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 || info.Size() == 0 {
 			return false
 		}
 		content, err := os.ReadFile(filepath.Join(dir, name)) // #nosec G304 -- fixed filenames below a validated managed asset directory.
-		if err != nil || len(content) == 0 || len(content) > 1<<20 {
+		limit := 1 << 20
+		if reference.Kind == "routing_rule_set" {
+			limit = 8 << 20
+		}
+		if err != nil || len(content) == 0 || len(content) > limit {
 			return false
 		}
 		files[name] = content
+		found++
 	}
-	return managedCertificateRevision(files["fullchain.pem"], files["privkey.pem"]) == reference.Revision
+	if reference.Kind == "routing_rule_set" {
+		if found != 1 {
+			return false
+		}
+		for _, content := range files {
+			sum := sha256.Sum256(content)
+			return hex.EncodeToString(sum[:]) == reference.Revision
+		}
+	}
+	return found == 2 && managedCertificateRevision(files["fullchain.pem"], files["privkey.pem"]) == reference.Revision
 }
 
 func managedCertificateRevision(fullchain, privateKey []byte) string {
@@ -189,23 +218,28 @@ func (r *Runner) installManagedAssets(requested []model.ManagedAssetReference, a
 		}
 		seen[key] = true
 		files := map[string][]byte{}
+		allowedNames := map[string]bool{}
+		for _, name := range managedAssetFileNames(reference.Kind) {
+			allowedNames[name] = true
+		}
 		for _, file := range asset.Files {
-			if file.Name != "fullchain.pem" && file.Name != "privkey.pem" {
+			if !allowedNames[file.Name] {
 				return errors.New("controller returned an invalid managed asset filename")
 			}
 			if _, exists := files[file.Name]; exists || file.Mode != 0o600 {
 				return errors.New("controller returned invalid managed asset file metadata")
 			}
 			content, err := base64.StdEncoding.DecodeString(file.ContentB64)
-			if err != nil || len(content) == 0 || len(content) > 1<<20 {
+			limit := 1 << 20
+			if reference.Kind == "routing_rule_set" {
+				limit = 8 << 20
+			}
+			if err != nil || len(content) == 0 || len(content) > limit {
 				return errors.New("controller returned invalid managed asset file content")
 			}
 			files[file.Name] = content
 		}
-		if len(files) != 2 {
-			return errors.New("controller returned incomplete certificate material")
-		}
-		if managedCertificateRevision(files["fullchain.pem"], files["privkey.pem"]) != reference.Revision {
+		if !managedAssetContentMatches(reference, files) {
 			return errors.New("controller returned managed asset content that does not match its revision")
 		}
 		root := r.managedAssetsRoot()
@@ -223,13 +257,28 @@ func (r *Runner) installManagedAssets(requested []model.ManagedAssetReference, a
 			}
 			return err
 		}
-		for _, name := range []string{"fullchain.pem", "privkey.pem"} {
+		for name := range files {
 			if err := atomicWriteFile(filepath.Join(dir, name), files[name], 0o600); err != nil {
 				return err
 			}
 		}
 	}
 	return nil
+}
+
+func managedAssetContentMatches(reference model.ManagedAssetReference, files map[string][]byte) bool {
+	if reference.Kind == "certificate" {
+		return len(files) == 2 && len(files["fullchain.pem"]) > 0 && len(files["privkey.pem"]) > 0 && managedCertificateRevision(files["fullchain.pem"], files["privkey.pem"]) == reference.Revision
+	}
+	if reference.Kind == "routing_rule_set" && len(files) == 1 {
+		content := files["rules.json"]
+		if len(content) == 0 {
+			content = files["rules.srs"]
+		}
+		sum := sha256.Sum256(content)
+		return len(content) > 0 && hex.EncodeToString(sum[:]) == reference.Revision
+	}
+	return false
 }
 
 func ensurePrivateAssetDirectory(path string) error {
@@ -283,23 +332,37 @@ func (r *Runner) resolveManagedAssetValue(value any, desired map[string]model.Ma
 		}
 		return item, nil
 	case string:
-		const prefix = "oboard-asset://certificate/"
-		if !strings.HasPrefix(item, prefix) {
+		const assetPrefix = "oboard-asset://"
+		if !strings.HasPrefix(item, assetPrefix) {
 			return item, nil
 		}
-		parts := strings.Split(strings.TrimPrefix(item, prefix), "/")
-		if len(parts) != 2 || (parts[1] != "fullchain.pem" && parts[1] != "privkey.pem") {
-			return nil, errors.New("invalid managed certificate placeholder")
+		parts := strings.Split(strings.TrimPrefix(item, assetPrefix), "/")
+		if len(parts) != 3 {
+			return nil, errors.New("invalid managed asset placeholder")
 		}
-		id, err := strconv.ParseInt(parts[0], 10, 64)
+		kind := parts[0]
+		if kind == "routing-rule-set" {
+			kind = "routing_rule_set"
+		}
+		if !supportedManagedAssetKind(kind) {
+			return nil, errors.New("invalid managed asset placeholder")
+		}
+		allowed := false
+		for _, name := range managedAssetFileNames(kind) {
+			allowed = allowed || parts[2] == name
+		}
+		if !allowed {
+			return nil, errors.New("invalid managed asset filename")
+		}
+		id, err := strconv.ParseInt(parts[1], 10, 64)
 		if err != nil || id <= 0 {
-			return nil, errors.New("invalid managed certificate id")
+			return nil, errors.New("invalid managed asset id")
 		}
-		reference, ok := desired["certificate/"+parts[0]]
+		reference, ok := desired[kind+"/"+parts[1]]
 		if !ok || reference.ID != id {
-			return nil, errors.New("configuration references an undeclared managed certificate")
+			return nil, errors.New("configuration references an undeclared managed asset")
 		}
-		return filepath.Join(r.managedAssetDir(reference), parts[1]), nil
+		return filepath.Join(r.managedAssetDir(reference), parts[2]), nil
 	default:
 		return value, nil
 	}
@@ -311,13 +374,16 @@ func (r *Runner) cleanupManagedAssets(references []model.ManagedAssetReference) 
 		return err
 	}
 	nextState := managedAssetState{Version: 1, Assets: make(map[string]string, len(desired))}
-	desiredByID := make(map[int64]model.ManagedAssetReference, len(desired))
+	desiredByKind := make(map[string]map[int64]model.ManagedAssetReference)
 	for key, reference := range desired {
 		if !r.managedAssetFilesReady(reference) {
 			return fmt.Errorf("managed asset %s revision %q is not ready", key, reference.Revision)
 		}
 		nextState.Assets[key] = reference.Revision
-		desiredByID[reference.ID] = reference
+		if desiredByKind[reference.Kind] == nil {
+			desiredByKind[reference.Kind] = map[int64]model.ManagedAssetReference{}
+		}
+		desiredByKind[reference.Kind][reference.ID] = reference
 	}
 	currentState, err := r.loadManagedAssetState()
 	if err != nil {
@@ -329,45 +395,47 @@ func (r *Runner) cleanupManagedAssets(references []model.ManagedAssetReference) 
 		}
 	}
 
-	certificateRoot := filepath.Join(r.managedAssetsRoot(), "certificate")
-	entries, err := os.ReadDir(certificateRoot)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	for _, entry := range entries {
-		id, parseErr := strconv.ParseInt(entry.Name(), 10, 64)
-		if parseErr != nil || id <= 0 {
-			return errors.New("invalid managed certificate directory")
-		}
-		idPath := filepath.Join(certificateRoot, entry.Name())
-		reference, keep := desiredByID[id]
-		if !keep {
-			if err := os.RemoveAll(idPath); err != nil {
-				return err
-			}
+	for _, kind := range []string{"certificate", "routing_rule_set"} {
+		kindRoot := filepath.Join(r.managedAssetsRoot(), kind)
+		entries, err := os.ReadDir(kindRoot)
+		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
-		info, err := os.Lstat(idPath)
-		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-			if err == nil {
-				err = errors.New("managed certificate path is not a directory")
-			}
-			return err
-		}
-		revisions, err := os.ReadDir(idPath)
 		if err != nil {
 			return err
 		}
-		keepRevision := managedAssetRevisionDir(reference.Revision)
-		for _, revision := range revisions {
-			if revision.Name() == keepRevision {
+		for _, entry := range entries {
+			id, parseErr := strconv.ParseInt(entry.Name(), 10, 64)
+			if parseErr != nil || id <= 0 {
+				return errors.New("invalid managed asset directory")
+			}
+			idPath := filepath.Join(kindRoot, entry.Name())
+			reference, keep := desiredByKind[kind][id]
+			if !keep {
+				if err := os.RemoveAll(idPath); err != nil {
+					return err
+				}
 				continue
 			}
-			if err := os.RemoveAll(filepath.Join(idPath, revision.Name())); err != nil {
+			info, err := os.Lstat(idPath)
+			if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+				if err == nil {
+					err = errors.New("managed asset path is not a directory")
+				}
 				return err
+			}
+			revisions, err := os.ReadDir(idPath)
+			if err != nil {
+				return err
+			}
+			keepRevision := managedAssetRevisionDir(reference.Revision)
+			for _, revision := range revisions {
+				if revision.Name() == keepRevision {
+					continue
+				}
+				if err := os.RemoveAll(filepath.Join(idPath, revision.Name())); err != nil {
+					return err
+				}
 			}
 		}
 	}

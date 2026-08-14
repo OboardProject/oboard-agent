@@ -22,7 +22,16 @@ import (
 )
 
 func testSSHInboundUser(id int64, username, password string) model.SSHInboundUser {
-	return model.SSHInboundUser{UserID: id, Username: username, Password: password, PathID: 1, RouteKind: "direct", Enabled: true}
+	return model.SSHInboundUser{UserID: id, Username: username, Password: password, PathID: 1, RouteKind: "kernel", RouteInboundTag: "in-1", RouteAuthUser: username + "__oboard_path_1", Enabled: true}
+}
+
+func newTestSSHRunner(t *testing.T, cfg Config) *Runner {
+	t.Helper()
+	runner := New(cfg)
+	runner.coreClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"capabilities":["route_relay_v1"]}`)), Header: make(http.Header)}, nil
+	})}
+	return runner
 }
 
 func TestSSHInboundRejectsUnsafeDestinationAddresses(t *testing.T) {
@@ -45,7 +54,7 @@ func TestSSHInboundAllowsOnlyPasswordAndDirectTCPIP(t *testing.T) {
 	}
 	port := reserve.Addr().(*net.TCPAddr).Port
 	_ = reserve.Close()
-	runner := New(Config{StateDir: t.TempDir()})
+	runner := newTestSSHRunner(t, Config{StateDir: t.TempDir()})
 	plan := model.SSHInboundPlan{Version: 1, Inbounds: []model.SSHInbound{{InboundID: 71, ServerID: 1, Name: "restricted", ListenIP: "127.0.0.1", Port: port, Enabled: true, Users: []model.SSHInboundUser{user}}}}
 	if _, err := runner.applySSHInbounds(plan); err != nil {
 		t.Fatal(err)
@@ -100,7 +109,7 @@ func TestSSHInboundCredentialStatusUpdatePreservesExistingConnection(t *testing.
 	}
 	port := reserve.Addr().(*net.TCPAddr).Port
 	_ = reserve.Close()
-	runner := New(Config{StateDir: t.TempDir()})
+	runner := newTestSSHRunner(t, Config{StateDir: t.TempDir()})
 	plan := model.SSHInboundPlan{Version: 1, Inbounds: []model.SSHInbound{{InboundID: 71, ServerID: 1, Name: "restricted", ListenIP: "127.0.0.1", Port: port, Enabled: true, Users: []model.SSHInboundUser{user}}}}
 	if _, err := runner.applySSHInbounds(plan); err != nil {
 		t.Fatal(err)
@@ -131,7 +140,7 @@ func TestSSHInboundCredentialStatusUpdatePreservesExistingConnection(t *testing.
 
 func TestSSHInboundApplyReportsPersistentHostIdentity(t *testing.T) {
 	stateDir := filepath.Join(t.TempDir(), "state")
-	runner := New(Config{StateDir: stateDir})
+	runner := newTestSSHRunner(t, Config{StateDir: stateDir})
 	first, err := runner.applySSHInbounds(model.SSHInboundPlan{Version: 1})
 	if err != nil {
 		t.Fatal(err)
@@ -160,7 +169,7 @@ func TestSSHInboundApplyReportsPersistentHostIdentity(t *testing.T) {
 		t.Fatalf("unchanged apply changed host identity: first=%#v unchanged=%#v", first, unchanged)
 	}
 
-	restarted := New(Config{StateDir: stateDir})
+	restarted := newTestSSHRunner(t, Config{StateDir: stateDir})
 	if err := restarted.restoreManagedSSHInboundsOnStartup(); err != nil {
 		t.Fatal(err)
 	}
@@ -174,7 +183,7 @@ func TestSSHInboundApplyReportsPersistentHostIdentity(t *testing.T) {
 }
 
 func TestDeploymentReplayIncludesSSHHostIdentity(t *testing.T) {
-	runner := New(Config{StateDir: t.TempDir()})
+	runner := newTestSSHRunner(t, Config{StateDir: t.TempDir()})
 	status, resultJSON := runner.deploymentReplayResponse(model.DeploymentTaskPayload{Version: 9, SSHInbounds: model.SSHInboundPlan{Version: 9}})
 	if status != "succeeded" {
 		t.Fatalf("replay status = %q, result=%s", status, resultJSON)
@@ -276,7 +285,7 @@ func TestSSHInboundPolicyPartitionUsesFloorHalfOfCoreLease(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "sing-box.json"), []byte(config), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	runner := New(Config{StateDir: dir})
+	runner := newTestSSHRunner(t, Config{StateDir: dir})
 	plan := model.SSHInboundPlan{Inbounds: []model.SSHInbound{{InboundID: 17, Policies: map[string]model.TrafficRuntimePolicy{
 		"user:7": {UserID: 7, LeaseEnforced: true, LeaseBytes: 101, ResetLeaseBytes: 51},
 	}}}}
@@ -300,7 +309,7 @@ func TestEmptySSHInboundPlanRestoresFullCoreLease(t *testing.T) {
 		t.Fatal(err)
 	}
 	var received model.TrafficRuntimePolicy
-	runner := New(Config{StateDir: dir})
+	runner := newTestSSHRunner(t, Config{StateDir: dir})
 	runner.coreClient = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		if request.Method != http.MethodPost || request.URL.Path != "/traffic/policy" {
 			t.Fatalf("unexpected core policy request: %s %s", request.Method, request.URL.Path)
@@ -451,7 +460,7 @@ func TestSSHInboundRejectsCredentialMarkedRejectNew(t *testing.T) {
 	}
 	port := reserve.Addr().(*net.TCPAddr).Port
 	_ = reserve.Close()
-	runner := New(Config{StateDir: t.TempDir()})
+	runner := newTestSSHRunner(t, Config{StateDir: t.TempDir()})
 	plan := model.SSHInboundPlan{Version: 1, Inbounds: []model.SSHInbound{{InboundID: 71, ServerID: 1, Name: "restricted", ListenIP: "127.0.0.1", Port: port, Enabled: true, Users: []model.SSHInboundUser{user}}}}
 	if _, err := runner.applySSHInbounds(plan); err != nil {
 		t.Fatal(err)
@@ -468,11 +477,12 @@ func TestSSHInboundPlanValidatesBoundRoute(t *testing.T) {
 		return model.SSHInboundPlan{Inbounds: []model.SSHInbound{{InboundID: 1, ServerID: 1, ListenIP: "127.0.0.1", Port: 2222, Enabled: true, Users: []model.SSHInboundUser{candidate}}}}
 	}
 	for name, mutate := range map[string]func(*model.SSHInboundUser){
-		"missing path":         func(user *model.SSHInboundUser) { user.PathID = 0 },
-		"missing route":        func(user *model.SSHInboundUser) { user.RouteKind = "" },
-		"direct with tag":      func(user *model.SSHInboundUser) { user.OutboundTag = "path-1-step-1" },
-		"outbound without tag": func(user *model.SSHInboundUser) { user.RouteKind = "outbound" },
-		"unmanaged tag":        func(user *model.SSHInboundUser) { user.RouteKind = "outbound"; user.OutboundTag = "direct" },
+		"missing path":      func(user *model.SSHInboundUser) { user.PathID = 0 },
+		"missing route":     func(user *model.SSHInboundUser) { user.RouteKind = "" },
+		"legacy direct":     func(user *model.SSHInboundUser) { user.RouteKind = "direct" },
+		"outbound tag":      func(user *model.SSHInboundUser) { user.OutboundTag = "path-1-step-1" },
+		"invalid inbound":   func(user *model.SSHInboundUser) { user.RouteInboundTag = "direct" },
+		"wrong branch user": func(user *model.SSHInboundUser) { user.RouteAuthUser = "alice__oboard_path_2" },
 	} {
 		t.Run(name, func(t *testing.T) {
 			candidate := user
@@ -482,23 +492,19 @@ func TestSSHInboundPlanValidatesBoundRoute(t *testing.T) {
 			}
 		})
 	}
-	user.RouteKind = "outbound"
-	user.OutboundTag = "path-9-step-2"
 	if err := validateSSHInboundPlan(plan(user)); err != nil {
-		t.Fatalf("valid outbound route was rejected: %v", err)
+		t.Fatalf("valid kernel route was rejected: %v", err)
 	}
 }
 
-func TestSSHOutboundRouteRequiresKernelCapability(t *testing.T) {
+func TestSSHRouteRequiresKernelCapability(t *testing.T) {
 	runner := New(Config{StateDir: t.TempDir()})
 	runner.coreClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"capabilities":["runtime_clock_v1"]}`)), Header: make(http.Header)}, nil
 	})}
 	user := testSSHInboundUser(1, "alice", "password")
-	user.RouteKind = "outbound"
-	user.OutboundTag = "path-9-step-1"
 	plan := model.SSHInboundPlan{Inbounds: []model.SSHInbound{{InboundID: 1, ServerID: 1, ListenIP: "127.0.0.1", Port: 2222, Enabled: true, Users: []model.SSHInboundUser{user}}}}
-	if _, err := runner.newSSHInboundManager(plan); err == nil || !strings.Contains(err.Error(), outboundRelayCapability) {
+	if _, err := runner.newSSHInboundManager(plan); err == nil || !strings.Contains(err.Error(), routeRelayCapability) {
 		t.Fatalf("missing relay capability error = %v", err)
 	}
 }

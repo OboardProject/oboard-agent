@@ -116,6 +116,7 @@ type Runner struct {
 	tuning                     RuntimeTuning
 	sshInboundManager          *sshInboundManager
 	sshOutboundRelayDial       outboundRelayDialFunc
+	sshRouteRelayDial          routeRelayDialFunc
 	forwardDesiredState        string
 	tunnelDesiredState         string
 	sshInboundDesiredState     string

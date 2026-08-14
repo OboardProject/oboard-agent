@@ -11,6 +11,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"net/netip"
 	"strings"
 	"sync"
 	"time"
@@ -18,7 +19,10 @@ import (
 
 const outboundRelayCapability = "outbound_relay_v1"
 
+const routeRelayCapability = "route_relay_v1"
+
 type outboundRelayDialFunc func(context.Context, string, string, string) (net.Conn, error)
+type routeRelayDialFunc func(context.Context, string, string, string, string, []netip.Addr) (net.Conn, error)
 
 type bufferedRelayConn struct {
 	net.Conn
@@ -73,6 +77,14 @@ func (c *framedRelayPacketConn) Write(p []byte) (int, error) {
 }
 
 func (r *Runner) validateOutboundRelayCapability(ctx context.Context) error {
+	return r.validateKernelCapability(ctx, outboundRelayCapability)
+}
+
+func (r *Runner) validateRouteRelayCapability(ctx context.Context) error {
+	return r.validateKernelCapability(ctx, routeRelayCapability)
+}
+
+func (r *Runner) validateKernelCapability(ctx context.Context, required string) error {
 	client := r.coreClient
 	if client == nil {
 		client = unixHTTPClient(coreAPISocket)
@@ -96,11 +108,11 @@ func (r *Runner) validateOutboundRelayCapability(ctx context.Context) error {
 		return fmt.Errorf("decode kernel relay capability: %w", err)
 	}
 	for _, capability := range payload.Capabilities {
-		if capability == outboundRelayCapability {
+		if capability == required {
 			return nil
 		}
 	}
-	return errors.New("kernel does not support outbound_relay_v1")
+	return fmt.Errorf("kernel does not support %s", required)
 }
 
 func (r *Runner) dialSSHOutboundRelay(ctx context.Context, network, outboundTag, destination string) (net.Conn, error) {
@@ -143,6 +155,60 @@ func dialCoreOutboundRelay(ctx context.Context, socket, network, outboundTag, de
 		_ = response.Body.Close()
 		_ = conn.Close()
 		return nil, fmt.Errorf("kernel outbound relay status %d: %s", response.StatusCode, strings.TrimSpace(string(message)))
+	}
+	_ = conn.SetDeadline(time.Time{})
+	stream := &bufferedRelayConn{Conn: conn, reader: reader}
+	if network == "udp" {
+		return &framedRelayPacketConn{Conn: stream}, nil
+	}
+	return stream, nil
+}
+
+func (r *Runner) dialSSHRouteRelay(ctx context.Context, network, inboundTag, authUser, destination string, resolved []netip.Addr) (net.Conn, error) {
+	if r.sshRouteRelayDial != nil {
+		return r.sshRouteRelayDial(ctx, network, inboundTag, authUser, destination, resolved)
+	}
+	return dialCoreRouteRelay(ctx, coreAPISocket, network, inboundTag, authUser, destination, resolved)
+}
+
+func dialCoreRouteRelay(ctx context.Context, socket, network, inboundTag, authUser, destination string, resolved []netip.Addr) (net.Conn, error) {
+	if network != "tcp" && network != "udp" {
+		return nil, errors.New("unsupported route relay network")
+	}
+	dialer := net.Dialer{Timeout: 3 * time.Second}
+	conn, err := dialer.DialContext(ctx, "unix", socket)
+	if err != nil {
+		return nil, err
+	}
+	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+	req, err := http.NewRequest(http.MethodConnect, "http://oboard-sb/routes/relay/"+network, nil)
+	if err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	req.Header.Set("X-OBoard-Inbound-Tag", inboundTag)
+	req.Header.Set("X-OBoard-Auth-User", authUser)
+	req.Header.Set("X-OBoard-Destination", destination)
+	addresses := make([]string, 0, len(resolved))
+	for _, address := range resolved {
+		addresses = append(addresses, address.Unmap().String())
+	}
+	req.Header.Set("X-OBoard-Resolved-Addresses", strings.Join(addresses, ","))
+	if err := req.Write(conn); err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	reader := bufio.NewReader(conn)
+	response, err := http.ReadResponse(reader, req)
+	if err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	if response.StatusCode != http.StatusOK {
+		message, _ := io.ReadAll(io.LimitReader(response.Body, 1024))
+		_ = response.Body.Close()
+		_ = conn.Close()
+		return nil, fmt.Errorf("kernel route relay status %d: %s", response.StatusCode, strings.TrimSpace(string(message)))
 	}
 	_ = conn.SetDeadline(time.Time{})
 	stream := &bufferedRelayConn{Conn: conn, reader: reader}

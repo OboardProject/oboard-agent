@@ -21,7 +21,7 @@ import (
 	C "github.com/sagernet/sing-box/constant"
 )
 
-var kernelCapabilities = []string{"trusted_forward_v1", "outbound_egress_probe_v1", "outbound_relay_v1", "runtime_clock_v1", "connection_presence_v1"}
+var kernelCapabilities = []string{"trusted_forward_v1", "outbound_egress_probe_v1", "outbound_relay_v1", "route_relay_v1", "runtime_clock_v1", "connection_presence_v1"}
 
 func main() {
 	config := flag.String("config", "config.json", "sing-box config path")
@@ -127,6 +127,7 @@ func serveHealth(ctx context.Context, listen string, instance *box.Box, tracker 
 	mux := http.NewServeMux()
 	registerOutboundEgressHandler(mux, instance)
 	registerOutboundRelayHandlers(mux, listen, instance)
+	registerRouteRelayHandlers(mux, listen, instance)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) { _, _ = fmt.Fprintln(w, "ok") })
 	mux.HandleFunc("/version", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
