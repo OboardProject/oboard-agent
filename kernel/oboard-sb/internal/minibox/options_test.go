@@ -9,10 +9,11 @@ import (
 	"github.com/sagernet/sing-box/option"
 
 	mieruprotocol "github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/protocol/mieru"
+	sourceprefixprotocol "github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/protocol/sourceprefix"
 )
 
 func TestSupportedProtocolsRemainMinimal(t *testing.T) {
-	want := []string{"vless", "hysteria2", "anytls", "shadowsocks", "mieru", "socks", "wireguard"}
+	want := []string{"vless", "hysteria2", "anytls", "shadowsocks", "mieru", "socks", "wireguard", "source-prefix"}
 	if !slices.Equal(SupportedProtocols, want) {
 		t.Fatalf("supported protocols = %v, want %v", SupportedProtocols, want)
 	}
@@ -217,5 +218,28 @@ func TestLoadConfigAcceptsMieruOptionsFromLocalRegistry(t *testing.T) {
 	outboundOptions, ok := opts.Outbounds[0].Options.(*mieruprotocol.OutboundOptions)
 	if !ok || outboundOptions.Username != "oboard-u7" || len(outboundOptions.ServerPortRanges) != 1 {
 		t.Fatalf("mieru outbound options not decoded: %#v", opts.Outbounds[0].Options)
+	}
+}
+
+func TestLoadConfigAcceptsSourcePrefixOutbound(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	raw := `{
+		"outbounds":[{
+			"type":"source-prefix",
+			"tag":"dynamic-v6",
+			"prefix":"2001:db8:55::/64"
+		}],
+		"route":{"final":"dynamic-v6"}
+	}`
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	opts, _, err := LoadConfig(path, HY2Tuning{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	outboundOptions, ok := opts.Outbounds[0].Options.(*sourceprefixprotocol.OutboundOptions)
+	if !ok || outboundOptions.Prefix != "2001:db8:55::/64" {
+		t.Fatalf("source-prefix outbound options not decoded: %#v", opts.Outbounds[0].Options)
 	}
 }
