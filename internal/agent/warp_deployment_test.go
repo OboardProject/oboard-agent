@@ -14,7 +14,7 @@ import (
 )
 
 func TestResolveDeploymentWARPConfigReplacesControllerPlaceholder(t *testing.T) {
-	config := `{"endpoints":[{"type":"wireguard","tag":"warp-7","_oboard_warp_pending":7}],"route":{"rules":[{"action":"route","outbound":"warp-7"}]}}`
+	config := `{"endpoints":[{"type":"wireguard","tag":"warp-7","_oboard_warp_pending":7},{"type":"wireguard","tag":"routing-rule-11-warp-7","_oboard_warp_pending":7,"bind_interface":"eth1"},{"type":"wireguard","tag":"routing-rule-12-warp-7","_oboard_warp_pending":7,"detour":"source-prefix-example"}],"route":{"rules":[{"action":"route","outbound":"warp-7"}]}}`
 	plan := model.WARPRequestPlan{ProfileID: 7, OutboundTag: "warp-7", DNSStrategy: "prefer_ipv4"}
 	report := model.WARPConfigReport{ProfileID: 7, Status: model.WARPStatusReady, ConfigJSON: `{"type":"wireguard","private_key":"private","address":["172.16.0.2/32"],"peers":[],"domain_resolver":{"server":"bootstrap","strategy":"prefer_ipv6"}}`}
 	resolved, err := resolveDeploymentWARPConfig(config, []model.WARPRequestPlan{plan}, map[int64]model.WARPConfigReport{7: report})
@@ -28,9 +28,21 @@ func TestResolveDeploymentWARPConfigReplacesControllerPlaceholder(t *testing.T) 
 	if err := json.Unmarshal([]byte(resolved), &root); err != nil {
 		t.Fatal(err)
 	}
-	endpoint := root["endpoints"].([]any)[0].(map[string]any)
+	endpoints := root["endpoints"].([]any)
+	if len(endpoints) != 3 {
+		t.Fatalf("resolved WARP endpoints = %#v", endpoints)
+	}
+	endpoint := endpoints[0].(map[string]any)
 	if endpoint["tag"] != "warp-7" || endpoint["private_key"] != "private" {
 		t.Fatalf("resolved WARP endpoint = %#v", endpoint)
+	}
+	interfaceBound := endpoints[1].(map[string]any)
+	if interfaceBound["tag"] != "routing-rule-11-warp-7" || interfaceBound["private_key"] != "private" || interfaceBound["bind_interface"] != "eth1" {
+		t.Fatalf("interface-bound WARP endpoint = %#v", interfaceBound)
+	}
+	sourceBound := endpoints[2].(map[string]any)
+	if sourceBound["tag"] != "routing-rule-12-warp-7" || sourceBound["private_key"] != "private" || sourceBound["detour"] != "source-prefix-example" {
+		t.Fatalf("source-bound WARP endpoint = %#v", sourceBound)
 	}
 	resolver, ok := endpoint["domain_resolver"].(map[string]any)
 	if !ok || resolver["server"] != warpBootstrapResolverTag || resolver["strategy"] != "prefer_ipv4" {

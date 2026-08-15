@@ -240,12 +240,6 @@ func resolveDeploymentWARPConfig(config string, plans []model.WARPRequestPlan, r
 		return "", fmt.Errorf("decode core config for WARP: %w", err)
 	}
 	endpoints, _ := root["endpoints"].([]any)
-	existing := map[string]int{}
-	for index, raw := range endpoints {
-		if endpoint, ok := raw.(map[string]any); ok {
-			existing[strings.TrimSpace(fmt.Sprint(endpoint["tag"]))] = index
-		}
-	}
 	for _, plan := range plans {
 		tag := strings.TrimSpace(plan.OutboundTag)
 		if tag == "" {
@@ -263,14 +257,39 @@ func resolveDeploymentWARPConfig(config string, plans []model.WARPRequestPlan, r
 			return "", fmt.Errorf("WARP profile %d is not a WireGuard endpoint", plan.ProfileID)
 		}
 		normalizeWARPDomainResolver(endpoint, plan)
-		endpoint["tag"] = tag
-		if index, found := existing[tag]; found {
-			placeholder, _ := endpoints[index].(map[string]any)
-			if int64FromAny(placeholder["_oboard_warp_pending"]) != plan.ProfileID {
-				return "", fmt.Errorf("WARP outbound tag %q already exists", tag)
+		baseFound := false
+		for index, raw := range endpoints {
+			placeholder, ok := raw.(map[string]any)
+			if !ok {
+				continue
 			}
-			endpoints[index] = endpoint
-		} else {
+			placeholderTag := strings.TrimSpace(fmt.Sprint(placeholder["tag"]))
+			placeholderProfileID := int64FromAny(placeholder["_oboard_warp_pending"])
+			if placeholderTag == tag {
+				baseFound = true
+				if placeholderProfileID != plan.ProfileID {
+					return "", fmt.Errorf("WARP outbound tag %q already exists", tag)
+				}
+			}
+			if placeholderProfileID != plan.ProfileID {
+				continue
+			}
+			resolvedEndpoint := make(map[string]any, len(endpoint)+3)
+			for key, value := range endpoint {
+				resolvedEndpoint[key] = value
+			}
+			resolvedEndpoint["tag"] = placeholderTag
+			if value, exists := placeholder["bind_interface"]; exists {
+				delete(resolvedEndpoint, "detour")
+				resolvedEndpoint["bind_interface"] = value
+			} else if value, exists := placeholder["detour"]; exists {
+				delete(resolvedEndpoint, "bind_interface")
+				resolvedEndpoint["detour"] = value
+			}
+			endpoints[index] = resolvedEndpoint
+		}
+		if !baseFound {
+			endpoint["tag"] = tag
 			endpoints = append(endpoints, endpoint)
 		}
 	}
