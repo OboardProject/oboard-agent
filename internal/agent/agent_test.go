@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -1616,6 +1617,89 @@ func TestControllerCannotGrantPanelUpdateConsent(t *testing.T) {
 	}
 	if granted.Config().AllowPanelUpdate {
 		t.Fatal("consent withdrawal was ignored")
+	}
+}
+
+func TestAgentProcessHelper(t *testing.T) {
+	if os.Getenv("OBOARD_AGENT_PROCESS_HELPER") != "1" {
+		return
+	}
+	serverID := int64(1)
+	r := New(Config{
+		ControllerURL: os.Getenv("OBOARD_AGENT_PROCESS_CONTROLLER"), AgentID: "agent-process", AgentToken: os.Getenv("OBOARD_AGENT_PROCESS_TOKEN"),
+		ServerID: serverID, StateDir: os.Getenv("OBOARD_AGENT_PROCESS_STATE"), TimeSyncCommand: "none", ReloadCommand: "none", RestartCommand: "none", ResourceProfile: "large",
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	if err := r.connect(ctx); err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+}
+
+func TestAgentSubprocessExecutesDeploymentAndReportsAppliedMetadata(t *testing.T) {
+	t.Setenv("OBOARD_DISABLE_PUBLIC_IP_DETECT", "1")
+	token := "agent-process-token"
+	stateDir := t.TempDir()
+	config := `{"log":{"level":"warn"}}`
+	if err := os.WriteFile(filepath.Join(stateDir, "sing-box.json"), []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	payload := model.DeploymentTaskPayload{Version: 52, Config: model.ApplyCoreConfigTaskPayload{Config: config}, ConfigChanged: false, PortForwards: model.PortForwardPlan{Version: 52}, Tunnels: model.TunnelPlan{Version: 52}}
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := model.AgentTask{ID: 101, ServerID: 1, Type: model.AgentTaskTypeApplyDeployment, PayloadJSON: string(payloadJSON), ConfigVersion: 52, Nonce: "process-deployment"}
+	signature := security.SignTaskEnvelope(security.HashSecret(token), security.TaskEnvelope{ID: task.ID, ServerID: task.ServerID, Type: task.Type, ConfigVersion: task.ConfigVersion, Nonce: task.Nonce, PayloadJSON: task.PayloadJSON})
+	resultCh := make(chan model.AgentTaskResultReport, 1)
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		switch req.URL.Path {
+		case "/api/v1/agent/connect":
+			conn, err := upgrader.Upgrade(w, req, nil)
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+			var initial map[string]any
+			if conn.ReadJSON(&initial) != nil {
+				return
+			}
+			if conn.WriteJSON(map[string]any{"type": "hello", "server_id": task.ServerID}) != nil || conn.WriteJSON(map[string]any{"type": "task_request", "task": task, "signature_version": 2, "signature": signature}) != nil {
+				return
+			}
+			var ack map[string]any
+			_ = conn.ReadJSON(&ack)
+		case "/api/v1/agent/task-results":
+			var result model.AgentTaskResultReport
+			if json.NewDecoder(req.Body).Decode(&result) == nil {
+				resultCh <- result
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		default:
+			http.NotFound(w, req)
+		}
+	}))
+	defer server.Close()
+
+	command := exec.Command(os.Args[0], "-test.run=^TestAgentProcessHelper$", "-test.v")
+	command.Env = append(os.Environ(), "OBOARD_AGENT_PROCESS_HELPER=1", "OBOARD_AGENT_PROCESS_CONTROLLER="+server.URL, "OBOARD_AGENT_PROCESS_TOKEN="+token, "OBOARD_AGENT_PROCESS_STATE="+stateDir, "OBOARD_DISABLE_PUBLIC_IP_DETECT=1")
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if command.Process != nil {
+			_ = command.Process.Kill()
+		}
+		_ = command.Wait()
+	}()
+	select {
+	case result := <-resultCh:
+		if result.Status != "succeeded" || result.HealthReport == nil || result.HealthReport.AppliedConfigVersion != task.ConfigVersion || result.HealthReport.AppliedConfigDigest != appliedPayloadID(task.Type, payloadJSON) {
+			t.Fatalf("subprocess convergence result = %#v", result)
+		}
+	case <-time.After(6 * time.Second):
+		t.Fatal("Agent subprocess did not execute and report deployment")
 	}
 }
 
