@@ -1618,3 +1618,85 @@ func TestControllerCannotGrantPanelUpdateConsent(t *testing.T) {
 		t.Fatal("consent withdrawal was ignored")
 	}
 }
+
+func TestConnectExecutesDeploymentAndReportsAppliedMetadata(t *testing.T) {
+	t.Setenv("OBOARD_DISABLE_PUBLIC_IP_DETECT", "1")
+	token := "agent-token"
+	stateDir := t.TempDir()
+	config := `{"log":{"level":"warn"}}`
+	if err := os.WriteFile(filepath.Join(stateDir, "sing-box.json"), []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	payload := model.DeploymentTaskPayload{
+		Version: 42, Config: model.ApplyCoreConfigTaskPayload{Config: config}, ConfigChanged: false,
+		PortForwards: model.PortForwardPlan{Version: 42}, Tunnels: model.TunnelPlan{Version: 42},
+	}
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := model.AgentTask{ID: 91, ServerID: 1, Type: model.AgentTaskTypeApplyDeployment, PayloadJSON: string(payloadJSON), ConfigVersion: 42, Nonce: "deployment-reconnect"}
+	signature := security.SignTaskEnvelope(security.HashSecret(token), security.TaskEnvelope{ID: task.ID, ServerID: task.ServerID, Type: task.Type, ConfigVersion: task.ConfigVersion, Nonce: task.Nonce, PayloadJSON: task.PayloadJSON})
+	resultCh := make(chan model.AgentTaskResultReport, 1)
+	ackCh := make(chan bool, 1)
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		switch req.URL.Path {
+		case "/api/v1/agent/connect":
+			conn, err := upgrader.Upgrade(w, req, nil)
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+			var initial map[string]any
+			if conn.ReadJSON(&initial) != nil {
+				return
+			}
+			if conn.WriteJSON(map[string]any{"type": "hello", "server_id": task.ServerID}) != nil || conn.WriteJSON(map[string]any{"type": "task_request", "task": task, "signature_version": 2, "signature": signature}) != nil {
+				return
+			}
+			var ack map[string]any
+			if conn.ReadJSON(&ack) == nil {
+				ackCh <- ack["type"] == "task_ack" && ack["task_id"] == float64(task.ID)
+			}
+		case "/api/v1/agent/task-results":
+			var result model.AgentTaskResultReport
+			if err := json.NewDecoder(req.Body).Decode(&result); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			resultCh <- result
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		default:
+			http.NotFound(w, req)
+		}
+	}))
+	defer server.Close()
+
+	r := New(Config{ControllerURL: server.URL, AgentID: "agent-1", AgentToken: token, ServerID: 1, StateDir: stateDir, TimeSyncCommand: "none", ReloadCommand: "none", RestartCommand: "none", ResourceProfile: "large"})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	connectDone := make(chan error, 1)
+	go func() { connectDone <- r.connect(ctx) }()
+	select {
+	case result := <-resultCh:
+		if result.TaskID != task.ID || result.Status != "succeeded" || result.HealthReport == nil {
+			t.Fatalf("deployment result = %#v", result)
+		}
+		if result.HealthReport.AppliedConfigVersion != task.ConfigVersion || result.HealthReport.AppliedConfigDigest != appliedPayloadID(task.Type, payloadJSON) {
+			t.Fatalf("applied metadata = version:%d digest:%q", result.HealthReport.AppliedConfigVersion, result.HealthReport.AppliedConfigDigest)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Agent did not execute and report deployment")
+	}
+	select {
+	case ok := <-ackCh:
+		if !ok {
+			t.Fatal("Agent did not acknowledge the executed deployment")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Agent did not send task acknowledgement")
+	}
+	cancel()
+	<-connectDone
+}
