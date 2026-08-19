@@ -307,6 +307,78 @@ func TestUpdateAgentControllerURLReportsResultThroughNewBasePath(t *testing.T) {
 	}
 }
 
+func TestConnectReportsAppliedConfigurationOnConnectAndHeartbeat(t *testing.T) {
+	t.Setenv("OBOARD_DISABLE_PUBLIC_IP_DETECT", "1")
+	stateDir := t.TempDir()
+	r := New(Config{ControllerURL: "", AgentID: "agent-applied", AgentToken: "agent-token", ServerID: 1, StateDir: stateDir, CommandTimeoutSeconds: 1})
+	payload := []byte(`{"version":51}`)
+	if err := r.persistAppliedVersion(model.AgentTaskTypeApplyDeployment, 51, payload); err != nil {
+		t.Fatal(err)
+	}
+	wantDigest := appliedPayloadID(model.AgentTaskTypeApplyDeployment, payload)
+	reports := make(chan []model.HealthReport, 1)
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.URL.Path != "/api/v1/agent/connect" {
+			http.NotFound(w, req)
+			return
+		}
+		conn, err := upgrader.Upgrade(w, req, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		seen := make([]model.HealthReport, 0, 2)
+		readHealth := func() bool {
+			_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+			for {
+				var message struct {
+					Type   string             `json:"type"`
+					Health model.HealthReport `json:"health_report"`
+				}
+				if conn.ReadJSON(&message) != nil {
+					return false
+				}
+				if message.Type == "health_report" {
+					seen = append(seen, message.Health)
+					return true
+				}
+			}
+		}
+		if !readHealth() {
+			return
+		}
+		if conn.WriteJSON(map[string]any{"type": "hello", "server_id": 1, "desired_config_revision": 9}) != nil ||
+			conn.WriteJSON(map[string]any{"type": "heartbeat", "desired_config_revision": 9, "configuration_sync_state": "queued", "configuration_sync_version": 51}) != nil || !readHealth() {
+			return
+		}
+		reports <- seen
+	}))
+	defer server.Close()
+	cfg := r.Config()
+	cfg.ControllerURL = server.URL
+	r.storeConfig(cfg)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- r.connect(ctx) }()
+	select {
+	case seen := <-reports:
+		if len(seen) != 2 {
+			t.Fatalf("health report count = %d", len(seen))
+		}
+		for index, health := range seen {
+			if health.AppliedConfigVersion != 51 || health.AppliedConfigDigest != wantDigest {
+				t.Fatalf("health report %d applied state = version:%d digest:%q", index, health.AppliedConfigVersion, health.AppliedConfigDigest)
+			}
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Agent did not report applied configuration on connect and heartbeat")
+	}
+	cancel()
+	<-done
+}
+
 func TestConnectClosesSocketWhenTaskResultReportFails(t *testing.T) {
 	token := "agent-token"
 	task := model.AgentTask{ID: 42, ServerID: 1, Type: "unknown", PayloadJSON: "{}", ConfigVersion: 1, Nonce: "task-nonce"}

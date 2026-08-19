@@ -323,6 +323,28 @@ func TestProbeRefreshesLocalMetricsWhileThrottlingPublicIP(t *testing.T) {
 	}
 }
 
+func TestProbeReportsPersistedAppliedConfigurationState(t *testing.T) {
+	stateDir := t.TempDir()
+	r := New(Config{AgentID: "agent-applied", StateDir: stateDir, CommandTimeoutSeconds: 1})
+	r.resources = ResourceInfo{Profile: ResourceProfileLarge, EffectiveMemoryBytes: 2 << 30}
+	r.lastPublicIPv4 = "203.0.113.10"
+	r.lastPublicIPAt = time.Now().UTC()
+	r.lastCoreVersion = "oboard-sb test"
+	r.lastCoreVersionAt = time.Now().UTC()
+	t.Setenv("OBOARD_DISABLE_PUBLIC_IP_DETECT", "1")
+	payload := []byte(`{"version":41}`)
+	if err := r.persistAppliedVersion("apply_deployment", 41, payload); err != nil {
+		t.Fatal(err)
+	}
+	health := r.Probe(false)
+	if health.AppliedConfigVersion != 41 {
+		t.Fatalf("applied version = %d, want 41", health.AppliedConfigVersion)
+	}
+	if health.AppliedConfigDigest != appliedPayloadID("apply_deployment", payload) {
+		t.Fatalf("applied digest = %q", health.AppliedConfigDigest)
+	}
+}
+
 func TestParseLinuxNetworkTotalsExcludesVirtualInterfaces(t *testing.T) {
 	raw := `Inter-|   Receive                                                |  Transmit
  face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed

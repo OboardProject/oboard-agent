@@ -2284,6 +2284,10 @@ func (r *Runner) Probe(force bool) model.HealthReport {
 	health.NetworkTotalUploadBytes = probe.NetworkTotalUploadBytes
 	health.NetworkTotalDownloadBytes = probe.NetworkTotalDownloadBytes
 	health.Timestamp = now
+	if applied, appliedErr := r.loadAppliedVersion(); appliedErr == nil {
+		health.AppliedConfigVersion = applied.Version
+		health.AppliedConfigDigest = applied.PayloadID
+	}
 
 	r.mu.Lock()
 	r.lastProbe = health
