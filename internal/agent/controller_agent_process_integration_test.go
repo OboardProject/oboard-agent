@@ -67,16 +67,16 @@ func TestControllerAndAgentProcessesConvergeOfflineSavedConfiguration(t *testing
 		return response.StatusCode == http.StatusOK
 	})
 
-	login := processJSONRequest(t, baseURL, http.MethodPost, "/api/v2/ui/auth/login", "", map[string]any{"username": "admin", "password": "very-secure-password"}, http.StatusOK)
+	login := processJSONRequest(t, baseURL, http.MethodPost, "/api/v1/ui/auth/login", "", map[string]any{"username": "admin", "password": "very-secure-password"}, http.StatusOK)
 	token, _ := login["token"].(string)
 	if token == "" {
 		t.Fatal("Controller login did not return a token")
 	}
-	created := processJSONRequest(t, baseURL, http.MethodPost, "/api/v2/ui/servers", token, map[string]any{
+	created := processJSONRequest(t, baseURL, http.MethodPost, "/api/v1/ui/servers", token, map[string]any{
 		"name": "process-node", "listen_ip": "0.0.0.0", "entry_address": "198.51.100.20", "public_ipv4": "198.51.100.20", "port_range_start": 10000, "port_range_end": 11000,
 	}, http.StatusCreated)
 	serverID := int64(created["server"].(map[string]any)["id"].(float64))
-	enroll := processJSONRequest(t, baseURL, http.MethodPost, "/api/v2/ui/servers/"+strconv.FormatInt(serverID, 10)+"/enroll-token", token, map[string]any{}, http.StatusOK)
+	enroll := processJSONRequest(t, baseURL, http.MethodPost, "/api/v1/ui/servers/"+strconv.FormatInt(serverID, 10)+"/enroll-token", token, map[string]any{}, http.StatusOK)
 	enrollmentToken, _ := enroll["enrollment_token"].(string)
 	if enrollmentToken == "" {
 		t.Fatal("Controller did not return an enrollment token")
@@ -103,7 +103,7 @@ func TestControllerAndAgentProcessesConvergeOfflineSavedConfiguration(t *testing
 	}
 	t.Cleanup(func() { stopProcess(agentProcess) })
 	waitProcessCondition(t, 20*time.Second, func() bool {
-		servers := processJSONRequestOptional(baseURL, http.MethodGet, "/api/v2/ui/servers", token, nil)
+		servers := processJSONRequestOptional(baseURL, http.MethodGet, "/api/v1/ui/servers", token, nil)
 		for _, raw := range processArray(servers["servers"]) {
 			server, _ := raw.(map[string]any)
 			if int64(processNumber(server["id"])) == serverID && server["status"] == "online" {
@@ -117,7 +117,7 @@ func TestControllerAndAgentProcessesConvergeOfflineSavedConfiguration(t *testing
 	// durable desired revision must survive the disconnect and converge after
 	// the real Agent process reconnects.
 	stopProcess(agentProcess)
-	processJSONRequest(t, baseURL, http.MethodPost, "/api/v2/ui/inbounds", token, map[string]any{
+	processJSONRequest(t, baseURL, http.MethodPost, "/api/v1/ui/inbounds", token, map[string]any{
 		"server_id": serverID, "name": "process-entry", "protocol": "vless", "listen_ip": "0.0.0.0", "port": 10443, "config_json": "{}", "enabled": true,
 	}, http.StatusCreated)
 	agentProcess = exec.Command(agentBinary,
@@ -130,7 +130,7 @@ func TestControllerAndAgentProcessesConvergeOfflineSavedConfiguration(t *testing
 	}
 
 	waitProcessCondition(t, 30*time.Second, func() bool {
-		response := processJSONRequestOptional(baseURL, http.MethodGet, "/api/v2/ui/configuration-sync", token, nil)
+		response := processJSONRequestOptional(baseURL, http.MethodGet, "/api/v1/ui/configuration-sync", token, nil)
 		for _, raw := range processArray(response["configuration_sync"]) {
 			state, _ := raw.(map[string]any)
 			if int64(processNumber(state["server_id"])) == serverID && state["state"] == "synced" && processNumber(state["config_version"]) > 0 {
