@@ -1006,6 +1006,27 @@ Payload:
 - `panel`: download from Controller `/install/agent-self-update.sh` and `/downloads/*`. Release Agents reject this unless `allow_panel_update=true` or the Agent build is dev.
 - `github`: run the GitHub update script from `github_repo`.
 
+### `uninstall_agent`
+
+Payload:
+
+```json
+{
+  "purge": true
+}
+```
+
+Controller queues this admin-only task from
+`POST /api/v1/servers/:id/agent-uninstall`. The Agent requires root and a
+supported service manager (`systemd` or `OpenRC`). The task stops and removes
+the core service, kernel binary, `obag`, and profile shortcut, then reports a
+succeeded result. After receiving `task_ack`, the Agent schedules a transient
+`systemd-run` / nohup finalizer that stops, disables, and removes the Agent and
+core service definitions, deletes the Agent binary, kernel binary, profile, and
+with `purge=true` also removes the config directory and state directory.
+Controller deletes the server record only after the succeeded task callback;
+failed or offline uninstall tasks leave the server in place.
+
 ### `update_agent_config`
 
 Payload is a partial Agent config patch:

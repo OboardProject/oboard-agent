@@ -682,6 +682,11 @@ func (r *Runner) connect(ctx context.Context) error {
 						return fmt.Errorf("schedule agent restart after update: %w", err)
 					}
 				}
+				if msg.Task.Type == model.AgentTaskTypeUninstallAgent && status == "succeeded" {
+					if err := r.finalizeAgentUninstall(); err != nil {
+						log.Printf("schedule agent uninstall finalizer: %v", err)
+					}
+				}
 			}
 		case "heartbeat":
 			r.setMonitoringPolicy(msg.MonitoringMode)
@@ -801,6 +806,15 @@ func (r *Runner) executeAgentTask(task model.AgentTask) (string, string) {
 		r.coreLifecycleMu.Lock()
 		defer r.coreLifecycleMu.Unlock()
 		result, err := r.updateAgentBinary(task.PayloadJSON)
+		if err != nil {
+			result["error"] = err.Error()
+			return "failed", jsonMap(result)
+		}
+		return "succeeded", jsonMap(result)
+	case model.AgentTaskTypeUninstallAgent:
+		r.coreLifecycleMu.Lock()
+		defer r.coreLifecycleMu.Unlock()
+		result, err := r.uninstallAgent(task.PayloadJSON)
 		if err != nil {
 			result["error"] = err.Error()
 			return "failed", jsonMap(result)
