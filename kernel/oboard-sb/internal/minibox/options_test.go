@@ -13,7 +13,7 @@ import (
 )
 
 func TestSupportedProtocolsRemainMinimal(t *testing.T) {
-	want := []string{"vless", "hysteria2", "anytls", "shadowsocks", "mieru", "socks", "wireguard", "source-prefix"}
+	want := []string{"vless", "hysteria2", "anytls", "shadowsocks", "mieru", "snell", "socks", "wireguard", "source-prefix"}
 	if !slices.Equal(SupportedProtocols, want) {
 		t.Fatalf("supported protocols = %v, want %v", SupportedProtocols, want)
 	}
@@ -218,6 +218,88 @@ func TestLoadConfigAcceptsMieruOptionsFromLocalRegistry(t *testing.T) {
 	outboundOptions, ok := opts.Outbounds[0].Options.(*mieruprotocol.OutboundOptions)
 	if !ok || outboundOptions.Username != "oboard-u7" || len(outboundOptions.ServerPortRanges) != 1 {
 		t.Fatalf("mieru outbound options not decoded: %#v", opts.Outbounds[0].Options)
+	}
+}
+
+func TestLoadConfigAcceptsSnellOptions(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	raw := `{
+		"inbounds":[{
+			"type":"snell",
+			"tag":"snell-in",
+			"listen":"0.0.0.0",
+			"listen_port":6160,
+			"version":5,
+			"psk":"server-psk",
+			"obfs_mode":"http"
+		}],
+		"outbounds":[{
+			"type":"snell",
+			"tag":"snell-out",
+			"server":"127.0.0.1",
+			"server_port":6160,
+			"version":4,
+			"psk":"server-psk",
+			"obfs_mode":"http",
+			"obfs_host":"bing.com"
+		}],
+		"route":{"final":"snell-out"}
+	}`
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	opts, _, err := LoadConfig(path, HY2Tuning{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inboundOptions, ok := opts.Inbounds[0].Options.(*option.SnellInboundOptions)
+	if !ok || inboundOptions.Version != 5 || inboundOptions.PSK != "server-psk" || inboundOptions.V6Options.Mode != "" {
+		t.Fatalf("snell inbound options not decoded: %#v", opts.Inbounds[0].Options)
+	}
+	outboundOptions, ok := opts.Outbounds[0].Options.(*option.SnellOutboundOptions)
+	if !ok || outboundOptions.Version != 4 || outboundOptions.PSK != "server-psk" || outboundOptions.ObfsOptions.ObfsHost != "bing.com" {
+		t.Fatalf("snell outbound options not decoded: %#v", opts.Outbounds[0].Options)
+	}
+}
+
+func TestLoadConfigAcceptsSnellV6Options(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	raw := `{
+		"inbounds":[{
+			"type":"snell",
+			"tag":"snell-v6-in",
+			"listen":"0.0.0.0",
+			"listen_port":7177,
+			"version":6,
+			"psk":"v6-psk",
+			"mode":"unshaped"
+		}],
+		"outbounds":[{
+			"type":"snell",
+			"tag":"snell-v6-out",
+			"server":"127.0.0.1",
+			"server_port":7177,
+			"version":6,
+			"psk":"v6-psk",
+			"mode":"unsafe-raw",
+			"reuse":true
+		}],
+		"route":{"final":"snell-v6-out"}
+	}`
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	opts, _, err := LoadConfig(path, HY2Tuning{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inboundOptions, ok := opts.Inbounds[0].Options.(*option.SnellInboundOptions)
+	if !ok || inboundOptions.Version != 6 || inboundOptions.V6Options.Mode != "unshaped" {
+		t.Fatalf("snell v6 inbound options not decoded: %#v", opts.Inbounds[0].Options)
+	}
+	outboundOptions, ok := opts.Outbounds[0].Options.(*option.SnellOutboundOptions)
+	if !ok || outboundOptions.Version != 6 || outboundOptions.V6Options.Mode != "unsafe-raw" || !outboundOptions.Reuse {
+		t.Fatalf("snell v6 outbound options not decoded: %#v", opts.Outbounds[0].Options)
 	}
 }
 

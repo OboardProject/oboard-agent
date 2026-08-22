@@ -17,6 +17,7 @@ import (
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
 	"github.com/sagernet/sing/common/ntp"
+	"github.com/sagernet/sing-tun"
 	"github.com/sagernet/sing/service"
 	"golang.org/x/time/rate"
 )
@@ -536,6 +537,11 @@ func (t *RateLimitTracker) LimiterForUser(user string) *rate.Limiter {
 		return nil
 	}
 	return state.currentLimiter()
+}
+
+func (t *RateLimitTracker) RoutedFlow(ctx context.Context, _ adapter.InboundContext, _ adapter.Rule, _ adapter.Outbound) tun.FlowTracker {
+	// oboard-sb never hosts TUN inbounds; flow tracking is not used.
+	return nil
 }
 
 func (t *RateLimitTracker) RoutedConnection(ctx context.Context, conn net.Conn, metadata adapter.InboundContext, _ adapter.Rule, outbound adapter.Outbound) net.Conn {

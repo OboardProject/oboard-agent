@@ -4,6 +4,7 @@ import (
 	"context"
 
 	box "github.com/sagernet/sing-box"
+	"github.com/sagernet/sing-box/adapter/certificate"
 	"github.com/sagernet/sing-box/adapter/endpoint"
 	"github.com/sagernet/sing-box/adapter/inbound"
 	"github.com/sagernet/sing-box/adapter/outbound"
@@ -18,6 +19,7 @@ import (
 	outboundDNS "github.com/sagernet/sing-box/protocol/dns"
 	"github.com/sagernet/sing-box/protocol/hysteria2"
 	"github.com/sagernet/sing-box/protocol/shadowsocks"
+	"github.com/sagernet/sing-box/protocol/snell"
 	"github.com/sagernet/sing-box/protocol/socks"
 	"github.com/sagernet/sing-box/protocol/vless"
 	"github.com/sagernet/sing-box/protocol/wireguard"
@@ -31,7 +33,7 @@ import (
 // SupportedProtocols is the intentionally small protocol surface exposed by the
 // OBoard sing-box kernel. Do not add protocols here unless the Controller can
 // generate, validate, audit, and subscribe them.
-var SupportedProtocols = []string{"vless", "hysteria2", "anytls", "shadowsocks", "mieru", "socks", "wireguard", "source-prefix"}
+var SupportedProtocols = []string{"vless", "hysteria2", "anytls", "shadowsocks", "mieru", "snell", "socks", "wireguard", "source-prefix"}
 
 // Context returns a sing-box context with only the inbounds/outbounds that
 // OBoard supports in the first kernel line: VLESS, HY2, AnyTLS, and SS.
@@ -45,6 +47,7 @@ func Context(parent context.Context, clocks ...*RuntimeClock) context.Context {
 	anytls.RegisterInbound(inbounds)
 	shadowsocks.RegisterInbound(inbounds)
 	mieru.RegisterInbound(inbounds)
+	snell.RegisterInbound(inbounds)
 	socks.RegisterInbound(inbounds)
 
 	outbounds := outbound.NewRegistry()
@@ -56,6 +59,7 @@ func Context(parent context.Context, clocks ...*RuntimeClock) context.Context {
 	anytls.RegisterOutbound(outbounds)
 	shadowsocks.RegisterOutbound(outbounds)
 	mieru.RegisterOutbound(outbounds)
+	snell.RegisterOutbound(outbounds)
 	sourceprefix.RegisterOutbound(outbounds)
 	socks.RegisterOutbound(outbounds)
 
@@ -70,7 +74,7 @@ func Context(parent context.Context, clocks ...*RuntimeClock) context.Context {
 	dnsLocal.RegisterTransport(dnsTransports)
 	dnsHosts.RegisterTransport(dnsTransports)
 
-	ctx := box.Context(parent, inbounds, outbounds, endpoints, dnsTransports, boxService.NewRegistry())
+	ctx := box.Context(parent, inbounds, outbounds, endpoints, dnsTransports, boxService.NewRegistry(), certificate.NewRegistry())
 	clock := NewRuntimeClock()
 	if len(clocks) > 0 && clocks[0] != nil {
 		clock = clocks[0]

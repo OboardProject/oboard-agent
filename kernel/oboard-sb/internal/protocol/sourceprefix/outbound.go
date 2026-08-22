@@ -62,7 +62,7 @@ func NewOutbound(ctx context.Context, _ adapter.Router, logger log.ContextLogger
 		prefix:     prefix,
 		options:    baseOptions,
 		dnsRouter:  service.FromContext[adapter.DNSRouter](ctx),
-		dnsOptions: *dnsOptions,
+		dnsOptions: dnsOptions,
 	}, nil
 }
 
