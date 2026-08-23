@@ -51,6 +51,7 @@ func TestProbeForwardUsesMultipleTargetSamples(t *testing.T) {
 	result := probeForward(model.PortForward{
 		ID: 7, Protocol: model.ForwardProtocolTCP, ListenIP: "127.0.0.1",
 		ListenPort: listen.Addr().(*net.TCPAddr).Port, TargetAddress: "127.0.0.1", TargetPort: target.Addr().(*net.TCPAddr).Port,
+		UpdatedAt: time.Date(2026, time.August, 24, 8, 30, 0, 123000000, time.UTC),
 	}, "task")
 	if !result.Available || result.SampleCount != defaultProbeSamples {
 		t.Fatalf("unexpected forward result: %#v", result)
@@ -61,6 +62,9 @@ func TestProbeForwardUsesMultipleTargetSamples(t *testing.T) {
 	}
 	if details["success_count"] != float64(defaultProbeSamples) || details["listener_ok"] != true {
 		t.Fatalf("missing multi-sample details: %#v", details)
+	}
+	if details["forward_updated_at"] != "2026-08-24T08:30:00.123Z" {
+		t.Fatalf("missing forward revision marker: %#v", details)
 	}
 }
 

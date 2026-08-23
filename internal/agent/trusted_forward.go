@@ -216,7 +216,7 @@ func probeTrustedForwardAt(rule model.PortForward, mode string, now func() time.
 		}
 		if err != nil {
 			result.Error = err.Error()
-			result.ResultJSON = marshalProbeDetails(map[string]any{"kind": "trusted_forward", "target": target, "tcp": false})
+			result.ResultJSON = marshalForwardProbeDetails(rule, map[string]any{"kind": "trusted_forward", "target": target, "tcp": false})
 			return result
 		}
 		checks = append(checks, "tcp")
@@ -249,13 +249,13 @@ func probeTrustedForwardAt(rule model.PortForward, mode string, now func() time.
 		}
 		if err != nil {
 			result.Error = err.Error()
-			result.ResultJSON = marshalProbeDetails(map[string]any{"kind": "trusted_forward", "target": target, "udp": false})
+			result.ResultJSON = marshalForwardProbeDetails(rule, map[string]any{"kind": "trusted_forward", "target": target, "udp": false})
 			return result
 		}
 		checks = append(checks, "udp")
 	}
 	result.Available = true
 	result.LatencyMS = time.Since(started).Milliseconds()
-	result.ResultJSON = marshalProbeDetails(map[string]any{"kind": "trusted_forward", "target": target, "networks": checks, "authenticated": true})
+	result.ResultJSON = marshalForwardProbeDetails(rule, map[string]any{"kind": "trusted_forward", "target": target, "networks": checks, "authenticated": true})
 	return result
 }

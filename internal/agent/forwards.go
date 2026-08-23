@@ -739,8 +739,8 @@ func (r *Runner) handleBuiltinForwardConn(src net.Conn, rule forwardRule) {
 	dst, err := net.DialTimeout("tcp", target, 5*time.Second)
 	latency := time.Since(start)
 	if shouldSample(rule.SampleRate) {
-		details, _ := json.Marshal(map[string]any{"kind": "passive_target_connect", "target": target})
-		res := model.PortForwardProbeResult{PortForwardID: rule.ID, Mode: "sampled", Available: err == nil, LatencyMS: latency.Milliseconds(), SampleCount: 1, ResultJSON: string(details)}
+		details := marshalForwardProbeDetails(rule.PortForward, map[string]any{"kind": "passive_target_connect", "target": target})
+		res := model.PortForwardProbeResult{PortForwardID: rule.ID, Mode: "sampled", Available: err == nil, LatencyMS: latency.Milliseconds(), SampleCount: 1, ResultJSON: details}
 		if err != nil {
 			res.Error = err.Error()
 		}
@@ -886,7 +886,7 @@ func probeForwardAt(rule model.PortForward, mode string, now func() time.Time) m
 		if !res.Available {
 			res.Error = "UDP 转发监听或目标发包失败"
 		}
-		res.ResultJSON = marshalProbeDetails(details)
+		res.ResultJSON = marshalForwardProbeDetails(rule, details)
 		return res
 	}
 	localHost := localProbeHost(rule.ListenIP)
@@ -915,8 +915,15 @@ func probeForwardAt(rule model.PortForward, mode string, now func() time.Time) m
 	if !res.Available {
 		res.Error = fmt.Sprintf("转发探测失败：本地监听=%t，A-B 目标成功=%d/%d", listenerOK, stats.SuccessCount, stats.SampleCount)
 	}
-	res.ResultJSON = marshalProbeDetails(details)
+	res.ResultJSON = marshalForwardProbeDetails(rule, details)
 	return res
+}
+
+func marshalForwardProbeDetails(rule model.PortForward, details map[string]any) string {
+	if !rule.UpdatedAt.IsZero() {
+		details["forward_updated_at"] = rule.UpdatedAt.UTC().Format(time.RFC3339Nano)
+	}
+	return marshalProbeDetails(details)
 }
 
 func udpSignalProbe(host string, port, count int, interval, timeout time.Duration) (bool, error) {
