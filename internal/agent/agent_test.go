@@ -1010,6 +1010,27 @@ func TestApplyCoreConfigRejectsRollbackAndPersistsVersion(t *testing.T) {
 	}
 }
 
+func TestFamilySelectorCoreConfigUsesPersistentVersionGate(t *testing.T) {
+	dir := t.TempDir()
+	cfg := Config{StateDir: dir, CoreBinary: filepath.Join(dir, "missing-sb"), ReloadCommand: "none", RestartCommand: "none", ResourceProfile: "large"}
+	familyConfig := `{"outbounds":[{"type":"direct","tag":"family-v4"},{"type":"direct","tag":"family-v6"},{"type":"family-selector","tag":"family","ipv4_outbound":"family-v4","ipv6_outbound":"family-v6","strategy":"prefer_ipv4","fallback":true}]}`
+	runner := New(cfg)
+	if _, err := runner.applyCoreConfigTask(30, model.ApplyCoreConfigTaskPayload{Config: familyConfig}); err != nil {
+		t.Fatal(err)
+	}
+	restarted := New(cfg)
+	result, err := restarted.applyCoreConfigTask(30, model.ApplyCoreConfigTaskPayload{Config: familyConfig})
+	if err != nil || result["idempotent_replay"] != true {
+		t.Fatalf("family-selector same-version replay was not idempotent: result=%#v err=%v", result, err)
+	}
+	if _, err := restarted.applyCoreConfigTask(30, model.ApplyCoreConfigTaskPayload{Config: strings.Replace(familyConfig, "prefer_ipv4", "prefer_ipv6", 1)}); err == nil || !strings.Contains(err.Error(), "different content") {
+		t.Fatalf("family-selector same-version replacement was accepted: %v", err)
+	}
+	if _, err := restarted.applyCoreConfigTask(29, model.ApplyCoreConfigTaskPayload{Config: familyConfig}); err == nil || !strings.Contains(err.Error(), "older") {
+		t.Fatalf("family-selector rollback was accepted: %v", err)
+	}
+}
+
 func TestDeploymentVersionGateCoversUnchangedConfigPlans(t *testing.T) {
 	dir := t.TempDir()
 	r := New(Config{StateDir: dir, ReloadCommand: "none", RestartCommand: "none", ResourceProfile: "large"})

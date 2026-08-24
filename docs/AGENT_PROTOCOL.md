@@ -578,6 +578,23 @@ Agent behavior:
 - Roll back to last good config on failure when possible.
 - Commit managed asset revision state and delete old/unreferenced revisions only after a successful config apply.
 
+#### `family-selector` desired state
+
+Controller may emit the OBoard-only `family-selector` outbound only after this Agent has reported `family_selector_v1` in `kernel_capabilities`:
+
+```json
+{
+  "type": "family-selector",
+  "tag": "routing-rule-7-family",
+  "ipv4_outbound": "routing-rule-7-ipv4-path-41-step-1",
+  "ipv6_outbound": "routing-rule-7-ipv6-path-51-step-1",
+  "strategy": "prefer_ipv4",
+  "fallback": true
+}
+```
+
+The two children are distinct existing path outbounds. IPv4/IPv6 literals are strict. Domain lookup retains bounded A and AAAA candidates; TCP may switch families once only after all preferred-family candidates fail, while UDP selects one family when its association is created. The kernel performs no NAT64/NAT46 or parallel Happy Eyeballs. It propagates the successful child tag/type to connection audit. Agent applies this JSON through the same persistent version gate as every other core config: older versions and same-version different content fail, while an identical same-version replay is idempotent.
+
 Result shape:
 
 ```json
