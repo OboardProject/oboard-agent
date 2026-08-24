@@ -727,6 +727,11 @@ Agent backend selection:
 - `builtin`: built-in TCP and UDP forwarder.
 - `auto`: chooses `realm`, then `nft`, then `builtin`.
 
+`target_server_id` is optional metadata for a Controller-managed destination.
+When it is omitted, `target_address` contains the explicit external IP or
+hostname. Agent forwarding and probing always use the resolved
+`target_address:target_port` pair.
+
 `trusted_forward` is Controller-internal desired state and appears only on the
 first derived forwarding rule of a transparent proxy-path prefix. It is never
 accepted from the independent port-forward API or returned by public
