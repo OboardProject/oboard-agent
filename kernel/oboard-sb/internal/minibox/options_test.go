@@ -177,6 +177,35 @@ func TestLoadConfigAcceptsAuthenticatedSocks5InboundAndOutbound(t *testing.T) {
 	}
 }
 
+func TestLoadConfigAcceptsAnyTLSPaddingScheme(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	raw := `{
+		"inbounds":[{
+			"type":"anytls",
+			"tag":"anytls-in",
+			"listen":"127.0.0.1",
+			"listen_port":443,
+			"users":[{"name":"alice","password":"secret"}],
+			"padding_scheme":["stop=3","0=900-1400","1=900-1400","2=900-1400"],
+			"tls":{"enabled":true,"certificate_path":"/tmp/cert.pem","key_path":"/tmp/key.pem"}
+		}],
+		"outbounds":[{"type":"direct","tag":"direct"}],
+		"route":{"final":"direct"}
+	}`
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	opts, _, err := LoadConfig(path, HY2Tuning{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inbound, ok := opts.Inbounds[0].Options.(*option.AnyTLSInboundOptions)
+	want := []string{"stop=3", "0=900-1400", "1=900-1400", "2=900-1400"}
+	if !ok || !slices.Equal(inbound.PaddingScheme, want) {
+		t.Fatalf("AnyTLS padding scheme not decoded: %#v", opts.Inbounds[0].Options)
+	}
+}
+
 func TestLoadConfigAcceptsMieruOptionsFromLocalRegistry(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
