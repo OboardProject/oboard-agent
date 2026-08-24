@@ -1,6 +1,7 @@
 package minibox
 
 import (
+	"context"
 	"sort"
 	"strconv"
 	"strings"
@@ -85,6 +86,64 @@ type connectionPresenceState struct {
 	lastEmittedAt time.Time
 }
 
+func (t *RateLimitTracker) FamilySelectorSelected(ctx context.Context, selectorTag, childTag, childType string) {
+	selectorTag = strings.TrimSpace(selectorTag)
+	childTag = strings.TrimSpace(childTag)
+	childType = strings.TrimSpace(childType)
+	if t == nil || selectorTag == "" || childTag == "" {
+		return
+	}
+	metadata := adapter.ContextFrom(ctx)
+	if metadata == nil {
+		return
+	}
+	metadata.Outbound = childTag
+	if !t.auditEnabled.Load() {
+		return
+	}
+	t.auditMu.Lock()
+	if t.auditFamilyChildTypes == nil {
+		t.auditFamilyChildTypes = make(map[string]string)
+	}
+	if len(t.auditFamilyChildTypes) < maxConnectionAuditBuckets || t.auditFamilyChildTypes[childTag] != "" {
+		t.auditFamilyChildTypes[childTag] = childType
+	}
+	t.auditMu.Unlock()
+	state := t.runtimeFor(*metadata)
+	if state == nil || state.currentConfig().policy.UserID <= 0 {
+		return
+	}
+	sourceAddr, _, sourceOK := t.trustedAuditSource(*metadata)
+	if !sourceOK {
+		return
+	}
+	destination := strings.TrimSpace(metadata.Destination.AddrString())
+	if len(destination) > 255 {
+		destination = destination[:255]
+	}
+	network := strings.TrimSpace(metadata.Network)
+	if network == "" {
+		network = "tcp"
+	}
+	baseKey := strings.Join([]string{
+		state.key,
+		sourceAddr.String(),
+		network,
+		destination,
+		strconv.Itoa(int(metadata.Destination.Port)),
+		selectorTag,
+		"family-selector",
+	}, "\x00")
+	t.auditMu.Lock()
+	defer t.auditMu.Unlock()
+	bucket := t.auditBuckets[strconv.FormatUint(t.auditGeneration, 10)+"\x00"+baseKey]
+	if bucket == nil {
+		return
+	}
+	bucket.OutboundTag = childTag
+	bucket.OutboundType = childType
+}
+
 func (t *RateLimitTracker) recordConnectionStart(state *runtimeState, metadata adapter.InboundContext, outbound adapter.Outbound, network string, admittedValue ...bool) string {
 	if t == nil || state == nil || !t.auditEnabled.Load() {
 		return ""
@@ -111,8 +170,19 @@ func (t *RateLimitTracker) recordConnectionStart(state *runtimeState, metadata a
 	outboundTag := strings.TrimSpace(metadata.Outbound)
 	outboundType := ""
 	if outbound != nil {
-		outboundTag = strings.TrimSpace(outbound.Tag())
-		outboundType = strings.TrimSpace(outbound.Type())
+		declaredTag := strings.TrimSpace(outbound.Tag())
+		declaredType := strings.TrimSpace(outbound.Type())
+		if declaredType == "family-selector" && outboundTag != "" && outboundTag != declaredTag {
+			t.auditMu.Lock()
+			outboundType = strings.TrimSpace(t.auditFamilyChildTypes[outboundTag])
+			t.auditMu.Unlock()
+			if outboundType == "" {
+				outboundType = "family-branch"
+			}
+		} else {
+			outboundTag = declaredTag
+			outboundType = declaredType
+		}
 	}
 	sourceGeoCode := strings.ToUpper(strings.TrimSpace(metadata.SourceGeoIPCode))
 	if trustedSource {

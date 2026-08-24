@@ -1181,6 +1181,7 @@ type HealthReport struct {
 	AgentVersion              string       `json:"agent_version"`
 	AgentBuild                string       `json:"agent_build"`
 	SingBoxVersion            string       `json:"sing_box_version"`
+	KernelCapabilities        []string     `json:"kernel_capabilities,omitempty"`
 	NetworkUploadBPS          uint64       `json:"network_upload_bps"`
 	NetworkDownloadBPS        uint64       `json:"network_download_bps"`
 	NetworkTotalUploadBytes   uint64       `json:"network_total_upload_bytes"`

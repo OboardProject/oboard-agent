@@ -1,0 +1,39 @@
+{
+  "log": {
+    "disabled": true
+  },
+  "dns": {
+    "servers": [
+      {
+        "type": "local",
+        "tag": "local"
+      }
+    ],
+    "final": "local"
+  },
+  "outbounds": [
+    {
+      "type": "direct",
+      "tag": "family-v4"
+    },
+    {
+      "type": "direct",
+      "tag": "family-v6"
+    },
+    {
+      "type": "family-selector",
+      "tag": "family",
+      "ipv4_outbound": "family-v4",
+      "ipv6_outbound": "family-v6",
+      "strategy": "prefer_ipv4",
+      "fallback": true,
+      "domain_resolver": {
+        "server": "local",
+        "strategy": "prefer_ipv4"
+      }
+    }
+  ],
+  "route": {
+    "final": "family"
+  }
+}

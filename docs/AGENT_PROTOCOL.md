@@ -96,7 +96,8 @@ Request:
     "agent_memory_bytes": 16777216,
     "agent_version": "0.1.0-dev",
     "agent_build": "20260708005400",
-    "sing_box_version": "oboard-sb 0.1.0-dev build 20260708005400"
+    "sing_box_version": "oboard-sb 0.1.0-dev build 20260708005400",
+    "kernel_capabilities": ["family_selector_v1", "connection_presence_v1"]
   }
 }
 ```
@@ -355,14 +356,14 @@ to one multi-server deployment carry the same allocated version.
     "agent_version": "0.1.0-dev",
     "agent_build": "20260708005400",
     "sing_box_version": "oboard-sb 0.1.0-dev",
+    "kernel_capabilities": ["family_selector_v1", "connection_presence_v1"],
     "applied_config_version": 17,
     "applied_config_digest": "sha256-of-last-applied-task-payload"
   }
 }
 ```
 
-Health reports are best-effort. `region_code` is the upper-case two-letter region detected from the Agent's own exit network and is refreshed with the public-IP probe. `public_ipv4`/`public_ipv6` come from outbound probes of the Agent's exit network. `interface_ipv6` is a local, network-free scan of global IPv6 addresses assigned to interfaces; it reports inbound IPv6 capability for hosts whose IPv6 is inbound-only, and Controller uses it for listener binding and as the IPv6 entry-address fallback only (never for egress IP-stack decisions). `applied_config_version` and `applied_config_digest` are local persistent version metadata only; they never contain configuration, credentials, or task payloads. Controller uses them to detect local drift or a lost task notification. Missing optional fields must not fail enrollment or heartbeat handling.
-
+Health reports are best-effort. `region_code` is the upper-case two-letter region detected from the Agent's own exit network and is refreshed with the public-IP probe. `public_ipv4`/`public_ipv6` come from outbound probes of the Agent's exit network. `interface_ipv6` is a local, network-free scan of global IPv6 addresses assigned to interfaces; it reports inbound IPv6 capability for hosts whose IPv6 is inbound-only, and Controller uses it for listener binding and as the IPv6 entry-address fallback only (never for egress IP-stack decisions). `kernel_capabilities` is the sorted, unique, bounded capability list parsed from `oboard-sb version` JSON (at most 64 entries and 128 bytes per entry); Controller stores it as runtime metadata and refuses desired state requiring an absent capability rather than sending unsupported kernel JSON. `applied_config_version` and `applied_config_digest` are local persistent version metadata only; they never contain configuration, credentials, or task payloads. Controller uses them to detect local drift or a lost task notification. Missing optional fields must not fail enrollment or heartbeat handling.
 
 `metric_report` carries historical resource samples only and never updates live
 server state, `last_seen_at`, traffic baselines, or SLA state:

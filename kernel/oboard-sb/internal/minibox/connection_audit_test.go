@@ -1,6 +1,9 @@
 package minibox
 
 import (
+	"context"
+	"errors"
+	"net"
 	"net/netip"
 	"testing"
 	"time"
@@ -40,6 +43,36 @@ func TestConnectionAuditDoesNotAllocateUntilEnabled(t *testing.T) {
 	tracker.SetConnectionAuditEnabled(false)
 	if tracker.auditBuckets != nil || tracker.auditActiveByIdentity != nil || tracker.ConnectionAuditEnabled() {
 		t.Fatalf("disabling audit retained state: enabled=%v buckets=%#v active=%#v", tracker.ConnectionAuditEnabled(), tracker.auditBuckets, tracker.auditActiveByIdentity)
+	}
+}
+
+func TestFamilySelectorAuditUsesSuccessfulChildOutbound(t *testing.T) {
+	tracker := NewRateLimitTracker(RuntimeMetadata{RateLimits: RuntimeRateLimits{Users: map[string]RuntimeUserLimit{
+		"alice": {UserID: 7, InboundID: 11, Billable: true},
+	}}})
+	tracker.SetConnectionAuditEnabled(true)
+	state := tracker.states["user:alice"]
+	metadata := adapter.InboundContext{
+		User:        "alice",
+		Source:      M.Socksaddr{Addr: netip.MustParseAddr("198.51.100.10"), Port: 51000},
+		Destination: M.Socksaddr{Fqdn: "dual.example", Port: 443},
+		Network:     "tcp",
+		Outbound:    "routing-rule-7-family",
+	}
+	selector := &auditTestOutbound{tag: "routing-rule-7-family", outboundType: "family-selector"}
+	ctx := adapter.WithContext(context.Background(), &metadata)
+	tracker.FamilySelectorSelected(ctx, selector.tag, "routing-rule-7-ipv6-path-51-step-1", "vless")
+	if metadata.Outbound != "routing-rule-7-ipv6-path-51-step-1" {
+		t.Fatalf("selected child was not propagated to routing metadata: %q", metadata.Outbound)
+	}
+	key := tracker.recordConnectionStart(state, metadata, selector, "tcp")
+	if key == "" {
+		t.Fatal("family selector audit did not start")
+	}
+	tracker.recordConnectionEnd(key)
+	items := tracker.DrainConnectionAudits()
+	if len(items) != 1 || items[0].OutboundTag != "routing-rule-7-ipv6-path-51-step-1" || items[0].OutboundType != "vless" {
+		t.Fatalf("family selector audit attribution = %#v", items)
 	}
 }
 
@@ -126,6 +159,22 @@ func TestConnectionAuditOldCloseDoesNotAffectReenabledGeneration(t *testing.T) {
 		t.Fatalf("old close affected re-enabled audit state: %#v", items)
 	}
 	tracker.recordConnectionEnd(newKey)
+}
+
+type auditTestOutbound struct {
+	tag          string
+	outboundType string
+}
+
+func (o *auditTestOutbound) Type() string           { return o.outboundType }
+func (o *auditTestOutbound) Tag() string            { return o.tag }
+func (o *auditTestOutbound) Network() []string      { return []string{"tcp", "udp"} }
+func (o *auditTestOutbound) Dependencies() []string { return nil }
+func (o *auditTestOutbound) DialContext(context.Context, string, M.Socksaddr) (net.Conn, error) {
+	return nil, errors.New("not implemented")
+}
+func (o *auditTestOutbound) ListenPacket(context.Context, M.Socksaddr) (net.PacketConn, error) {
+	return nil, errors.New("not implemented")
 }
 
 func TestConnectionPresenceEmitsAuthenticationPayloadCloseAndRejection(t *testing.T) {

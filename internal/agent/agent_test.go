@@ -1541,10 +1541,15 @@ func TestRecommendMTUUsesLowestVerifiedSignalAndOverhead(t *testing.T) {
 }
 
 func TestFormatCoreVersionJSON(t *testing.T) {
-	got := formatCoreVersion(`{"name":"oboard-sb","version":"0.1.0-dev","build":"20260705225905","sing_box_version":"1.13.14"}`)
+	raw := `{"name":"oboard-sb","version":"0.1.0-dev","build":"20260705225905","sing_box_version":"1.13.14","capabilities":["family_selector_v1","connection_presence_v1","family_selector_v1",""]}`
+	got := formatCoreVersion(raw)
 	want := "oboard-sb 0.1.0-dev / build 20260705225905 / sing-box 1.13.14"
 	if got != want {
 		t.Fatalf("formatCoreVersion() = %q, want %q", got, want)
+	}
+	capabilities := parseKernelCapabilities(raw)
+	if len(capabilities) != 2 || capabilities[0] != "connection_presence_v1" || capabilities[1] != "family_selector_v1" {
+		t.Fatalf("parseKernelCapabilities() = %v", capabilities)
 	}
 }
 

@@ -12,14 +12,16 @@ import (
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-tun"
 	"github.com/sagernet/sing/common/buf"
 	"github.com/sagernet/sing/common/bufio"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
 	"github.com/sagernet/sing/common/ntp"
-	"github.com/sagernet/sing-tun"
 	"github.com/sagernet/sing/service"
 	"golang.org/x/time/rate"
+
+	"github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/protocol/familyselector"
 )
 
 const rateLimitIOChunk = 64 * 1024
@@ -32,6 +34,7 @@ type RateLimitTracker struct {
 	auditMu               sync.Mutex
 	auditBuckets          map[string]*ConnectionAuditBucket
 	auditActiveByIdentity map[string]int64
+	auditFamilyChildTypes map[string]string
 	auditGeneration       uint64
 	auditDropped          int64
 	auditWindowStart      time.Time
@@ -187,6 +190,7 @@ func (t *RateLimitTracker) SetConnectionAuditEnabled(enabled bool) {
 	t.auditMu.Lock()
 	t.auditBuckets = nil
 	t.auditActiveByIdentity = nil
+	t.auditFamilyChildTypes = nil
 	t.presenceStates = nil
 	t.presenceEvents = nil
 	t.presenceDropped = 0
@@ -612,6 +616,7 @@ func newRuntimeLimiters(limit RuntimeUserLimit) (*rate.Limiter, *rate.Limiter) {
 
 func AttachRuntimeTrackers(ctx context.Context, metadata RuntimeMetadata) *RateLimitTracker {
 	tracker := newRateLimitTracker(metadata, ntp.TimeFuncFromContext(ctx))
+	service.MustRegister[familyselector.SelectionObserver](ctx, tracker)
 	if !tracker.Enabled() {
 		return tracker
 	}

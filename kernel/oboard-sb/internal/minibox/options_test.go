@@ -13,7 +13,7 @@ import (
 )
 
 func TestSupportedProtocolsRemainMinimal(t *testing.T) {
-	want := []string{"vless", "hysteria2", "anytls", "shadowsocks", "mieru", "snell", "socks", "wireguard", "source-prefix"}
+	want := []string{"vless", "hysteria2", "anytls", "shadowsocks", "mieru", "snell", "socks", "wireguard", "source-prefix", "family-selector"}
 	if !slices.Equal(SupportedProtocols, want) {
 		t.Fatalf("supported protocols = %v, want %v", SupportedProtocols, want)
 	}

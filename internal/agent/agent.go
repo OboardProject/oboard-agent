@@ -102,6 +102,7 @@ type Runner struct {
 	lastPublicIPv6             string
 	lastRegionCode             string
 	lastCoreVersion            string
+	lastKernelCapabilities     []string
 	lastCoreVersionAt          time.Time
 	hostInfo                   hostStaticInfo
 	lastCPUSample              procCPU
@@ -2232,7 +2233,7 @@ func (r *Runner) Probe(force bool) model.HealthReport {
 	lastNetwork := r.lastNetworkSample
 	lastIPv4, lastIPv6, lastRegionCode := r.lastPublicIPv4, r.lastPublicIPv6, r.lastRegionCode
 	lastPublicAt := r.lastPublicIPAt
-	lastCoreVersion, lastCoreVersionAt := r.lastCoreVersion, r.lastCoreVersionAt
+	lastCoreVersion, lastKernelCapabilities, lastCoreVersionAt := r.lastCoreVersion, append([]string(nil), r.lastKernelCapabilities...), r.lastCoreVersionAt
 	r.mu.Unlock()
 
 	var probe systemProbe
@@ -2330,16 +2331,18 @@ func (r *Runner) Probe(force bool) model.HealthReport {
 	}
 
 	coreVersion := lastCoreVersion
+	kernelCapabilities := lastKernelCapabilities
 	refreshCore := force || lastCoreVersion == "" || lastCoreVersionAt.IsZero() || now.Sub(lastCoreVersionAt) >= publicInterval
 	if refreshCore {
-		coreVersion = singBoxVersion(r.coreBinary(), r.commandTimeout())
+		coreVersion, kernelCapabilities = singBoxIdentity(r.coreBinary(), r.commandTimeout())
 		r.mu.Lock()
 		r.lastCoreVersion = coreVersion
+		r.lastKernelCapabilities = append([]string(nil), kernelCapabilities...)
 		r.lastCoreVersionAt = now
 		r.mu.Unlock()
 	}
 
-	health := buildHealthReport(r.coreBinary(), r.commandTimeout(), r.hostInfo, probe, publicIPv4, publicIPv6, coreVersion)
+	health := buildHealthReport(r.coreBinary(), r.commandTimeout(), r.hostInfo, probe, publicIPv4, publicIPv6, coreVersion, kernelCapabilities)
 	health.AgentID = r.Config().AgentID
 	health.RegionCode = regionCode
 	health.NetworkUploadBPS = probe.NetworkUploadBPS
@@ -2374,13 +2377,13 @@ func (r *Runner) commandTimeout() time.Duration {
 	return time.Duration(seconds) * time.Second
 }
 
-func buildHealthReport(binary string, timeout time.Duration, host hostStaticInfo, probe systemProbe, publicIPv4, publicIPv6, coreVersion string) model.HealthReport {
+func buildHealthReport(binary string, timeout time.Duration, host hostStaticInfo, probe systemProbe, publicIPv4, publicIPv6, coreVersion string, kernelCapabilities []string) model.HealthReport {
 	if publicIPv4 == "" && publicIPv6 == "" {
 		// First-run paths detect public addresses here before the probe cache is warm.
 		publicIPv4, publicIPv6 = detectPublicIPs(timeout)
 	}
 	if coreVersion == "" {
-		coreVersion = singBoxVersion(binary, timeout)
+		coreVersion, kernelCapabilities = singBoxIdentity(binary, timeout)
 	}
 	return model.HealthReport{
 		Status:             model.ServerOnline,
@@ -2410,6 +2413,7 @@ func buildHealthReport(binary string, timeout time.Duration, host hostStaticInfo
 		AgentVersion:       version.Version,
 		AgentBuild:         version.Build,
 		SingBoxVersion:     coreVersion,
+		KernelCapabilities: append([]string(nil), kernelCapabilities...),
 		Timestamp:          time.Now().UTC(),
 	}
 }
@@ -2641,6 +2645,11 @@ func parsePublicIP(value, family string) string {
 }
 
 func singBoxVersion(binary string, timeout time.Duration) string {
+	version, _ := singBoxIdentity(binary, timeout)
+	return version
+}
+
+func singBoxIdentity(binary string, timeout time.Duration) (string, []string) {
 	if binary == "" {
 		binary = detectCoreBinary()
 	}
@@ -2649,9 +2658,34 @@ func singBoxVersion(binary string, timeout time.Duration) string {
 		out, err = commandOutput(timeout, "sing-box", "version")
 	}
 	if err != nil {
-		return "not-installed"
+		return "not-installed", nil
 	}
-	return formatCoreVersion(out)
+	return formatCoreVersion(out), parseKernelCapabilities(out)
+}
+
+func parseKernelCapabilities(out string) []string {
+	out = strings.TrimSpace(out)
+	if !strings.HasPrefix(out, "{") {
+		return nil
+	}
+	var payload struct {
+		Capabilities []string `json:"capabilities"`
+	}
+	if json.Unmarshal([]byte(out), &payload) != nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	result := make([]string, 0, len(payload.Capabilities))
+	for _, capability := range payload.Capabilities {
+		capability = strings.TrimSpace(capability)
+		if capability == "" || len(capability) > 64 || seen[capability] || len(result) >= 64 {
+			continue
+		}
+		seen[capability] = true
+		result = append(result, capability)
+	}
+	sort.Strings(result)
+	return result
 }
 
 func formatCoreVersion(out string) string {
