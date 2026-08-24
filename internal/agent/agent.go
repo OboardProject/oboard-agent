@@ -2385,6 +2385,7 @@ func buildHealthReport(binary string, timeout time.Duration, host hostStaticInfo
 	if coreVersion == "" {
 		coreVersion, kernelCapabilities = singBoxIdentity(binary, timeout)
 	}
+	tfoState, tfoValue := detectTCPFastOpen()
 	return model.HealthReport{
 		Status:             model.ServerOnline,
 		OS:                 runtime.GOOS,
@@ -2414,6 +2415,8 @@ func buildHealthReport(binary string, timeout time.Duration, host hostStaticInfo
 		AgentBuild:         version.Build,
 		SingBoxVersion:     coreVersion,
 		KernelCapabilities: append([]string(nil), kernelCapabilities...),
+		TCPFastOpenState:   tfoState,
+		TCPFastOpenValue:   tfoValue,
 		Timestamp:          time.Now().UTC(),
 	}
 }

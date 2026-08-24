@@ -73,7 +73,7 @@ func TestControllerAndAgentProcessesConvergeOfflineSavedConfiguration(t *testing
 		t.Fatal("Controller login did not return a token")
 	}
 	created := processJSONRequest(t, baseURL, http.MethodPost, "/api/v1/ui/servers", token, map[string]any{
-		"name": "process-node", "listen_ip": "0.0.0.0", "entry_address": "198.51.100.20", "public_ipv4": "198.51.100.20", "port_range_start": 10000, "port_range_end": 11000,
+		"name": "process-node", "listen_ip": "0.0.0.0", "entry_ip_mode": "custom", "entry_address": "198.51.100.20", "public_ipv4": "198.51.100.20", "port_range_start": 10000, "port_range_end": 11000,
 	}, http.StatusCreated)
 	serverID := int64(created["server"].(map[string]any)["id"].(float64))
 	enroll := processJSONRequest(t, baseURL, http.MethodPost, "/api/v1/ui/servers/"+strconv.FormatInt(serverID, 10)+"/enroll-token", token, map[string]any{}, http.StatusOK)

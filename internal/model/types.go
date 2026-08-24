@@ -1151,6 +1151,43 @@ type TrafficRuntimePolicy struct {
 	EnforcementMode   string `json:"enforcement_mode,omitempty"`
 }
 
+// Linux exposes TCP Fast Open through the net.ipv4.tcp_fastopen bitmask, where
+// the client and server halves are enabled independently. Agent reports the raw
+// value plus the derived state so Controller never has to guess whether a
+// generated tcp_fast_open listen option can take effect; most hosts ship with
+// the client bit only.
+const (
+	TCPFastOpenClientBit = 0x1
+	TCPFastOpenServerBit = 0x2
+)
+
+// TCPFastOpen* are the reported host states. An empty state means no report,
+// which is different from a host that answered "disabled".
+const (
+	TCPFastOpenStateUnknown      = ""
+	TCPFastOpenStateUnavailable  = "unavailable"
+	TCPFastOpenStateDisabled     = "disabled"
+	TCPFastOpenStateClient       = "client"
+	TCPFastOpenStateServer       = "server"
+	TCPFastOpenStateClientServer = "client_server"
+)
+
+// TCPFastOpenStateFromMask maps a net.ipv4.tcp_fastopen value to a report state.
+func TCPFastOpenStateFromMask(mask int) string {
+	client := mask&TCPFastOpenClientBit != 0
+	server := mask&TCPFastOpenServerBit != 0
+	switch {
+	case client && server:
+		return TCPFastOpenStateClientServer
+	case server:
+		return TCPFastOpenStateServer
+	case client:
+		return TCPFastOpenStateClient
+	default:
+		return TCPFastOpenStateDisabled
+	}
+}
+
 type HealthReport struct {
 	AgentID                   string       `json:"agent_id"`
 	Status                    ServerStatus `json:"status"`
@@ -1182,6 +1219,8 @@ type HealthReport struct {
 	AgentBuild                string       `json:"agent_build"`
 	SingBoxVersion            string       `json:"sing_box_version"`
 	KernelCapabilities        []string     `json:"kernel_capabilities,omitempty"`
+	TCPFastOpenState          string       `json:"tcp_fastopen_state,omitempty"`
+	TCPFastOpenValue          int          `json:"tcp_fastopen_value,omitempty"`
 	NetworkUploadBPS          uint64       `json:"network_upload_bps"`
 	NetworkDownloadBPS        uint64       `json:"network_download_bps"`
 	NetworkTotalUploadBytes   uint64       `json:"network_total_upload_bytes"`
