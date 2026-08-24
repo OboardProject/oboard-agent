@@ -144,9 +144,12 @@ Auth headers are required.
    snapshot over HTTP, then sends a small `task_ack` on the socket. While
    connection audit is enabled it also sends independent `presence_delta`
    messages on this socket.
-6. The scheduled latency loop belongs to the Agent process, not the WebSocket.
-   It continues while Controller is unreachable and queues reports for replay.
-7. If a connection drops while a task is in-flight, Controller requeues that
+6. The scheduled latency and metric loops belong to the Agent process, not the
+   WebSocket. They continue while Controller is unreachable and queue reports
+   for acknowledged replay. Metric samples are captured every 60 seconds.
+7. Controller acknowledges a committed or equivalent historical metric sample
+   with `metric_report_ack`; Agent then advances its durable queue immediately.
+8. If a connection drops while a task is in-flight, Controller requeues that
    task as pending with a readable result message.
 
 ### Controller Messages
@@ -359,6 +362,45 @@ to one multi-server deployment carry the same allocated version.
 ```
 
 Health reports are best-effort. `region_code` is the upper-case two-letter region detected from the Agent's own exit network and is refreshed with the public-IP probe. `public_ipv4`/`public_ipv6` come from outbound probes of the Agent's exit network. `interface_ipv6` is a local, network-free scan of global IPv6 addresses assigned to interfaces; it reports inbound IPv6 capability for hosts whose IPv6 is inbound-only, and Controller uses it for listener binding and as the IPv6 entry-address fallback only (never for egress IP-stack decisions). `applied_config_version` and `applied_config_digest` are local persistent version metadata only; they never contain configuration, credentials, or task payloads. Controller uses them to detect local drift or a lost task notification. Missing optional fields must not fail enrollment or heartbeat handling.
+
+
+`metric_report` carries historical resource samples only and never updates live
+server state, `last_seen_at`, traffic baselines, or SLA state:
+
+```json
+{
+  "type": "metric_report",
+  "metric_report": {
+    "report_id": "9fb4e53e8d934b8c88af870266f305c1",
+    "sampled_at": "2026-08-23T12:34:17.123Z",
+    "cpu_usage_percent": 18.5,
+    "memory_used_bytes": 1073741824,
+    "memory_total_bytes": 4294967296,
+    "disk_used_bytes": 21474836480,
+    "disk_total_bytes": 107374182400,
+    "tcp_connection_count": 81,
+    "udp_connection_count": 12,
+    "process_count": 146,
+    "network_upload_bps": 12000,
+    "network_download_bps": 42000
+  }
+}
+```
+
+Controller preserves the original `sampled_at` and uses its fixed UTC-minute
+slot only as the idempotency key. After persisting the sample, or finding that
+the slot already contains an equivalent sample, Controller replies:
+
+```json
+{"type":"metric_report_ack","report_id":"9fb4e53e8d934b8c88af870266f305c1","ts":"2026-08-23T12:35:02Z"}
+```
+
+Agent stores unacknowledged metric reports in a root-owned `0600` atomic state
+file, ordered by original `sampled_at`. The queue retains at most 2,048 reports
+and drops reports older than 35 days; the count limit is reached first during a
+long outage at the normal one-minute cadence. Only the matching head ACK removes
+a report. Disconnects, restarts, lost ACKs, and Controller updates therefore
+replay the same immutable sample until it is accepted.
 
 ## Task Result Callback
 

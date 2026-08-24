@@ -69,6 +69,7 @@ type Runner struct {
 	trafficMu                  sync.Mutex
 	connectionAuditMu          sync.Mutex
 	latencyProbeMu             sync.Mutex
+	metricReportMu             sync.Mutex
 	connectionAuditCoreMu      sync.Mutex
 	deploymentMu               sync.Mutex
 	sshInboundLifecycleMu      sync.Mutex
@@ -84,6 +85,9 @@ type Runner struct {
 	connectionAuditStateLoaded bool
 	latencyProbeState          latencyProbeLocalState
 	latencyProbeStateLoaded    bool
+	metricReportState          metricReportLocalState
+	metricReportStateLoaded    bool
+	metricReportWake           chan struct{}
 	connectionAudit            *connectionAuditAccumulator
 	connectionAuditCoreKnown   bool
 	connectionAuditCoreEnabled bool
@@ -134,7 +138,7 @@ func New(cfg Config) *Runner {
 	resources := DetectResourceInfo(cfg.ResourceProfile)
 	tuning := ApplyRuntimeTuning(resources)
 	clock := newRuntimeClock(cfg.StateDir)
-	runner := &Runner{coreClient: unixHTTPClient(coreAPISocket), builtinForwardStops: map[int64]func(){}, lastForwardProbe: map[int64]time.Time{}, resources: resources, tuning: tuning, hostInfo: detectHostStaticInfo(), logDir: "/var/log", logMaintenanceEvery: logMaintenanceInterval, monitoringMode: "lightweight", connectionAudit: newConnectionAuditAccumulator(cfg.ConnectionAuditEnabled), clock: clock}
+	runner := &Runner{coreClient: unixHTTPClient(coreAPISocket), builtinForwardStops: map[int64]func(){}, lastForwardProbe: map[int64]time.Time{}, resources: resources, tuning: tuning, hostInfo: detectHostStaticInfo(), logDir: "/var/log", logMaintenanceEvery: logMaintenanceInterval, monitoringMode: "lightweight", metricReportWake: make(chan struct{}, 1), connectionAudit: newConnectionAuditAccumulator(cfg.ConnectionAuditEnabled), clock: clock}
 	runner.client = &http.Client{Timeout: 20 * time.Second, Transport: runner.lowOverheadTransport()}
 	runner.storeConfig(cfg)
 	return runner
@@ -458,6 +462,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	r.startLogMaintenance(ctx)
 	r.startTrafficLoop(ctx)
 	r.startLatencyProbeLoop(ctx)
+	r.startMetricReportLoop(ctx)
 	_ = r.configureCoreConnectionAudit(ctx, cfg.ConnectionAuditEnabled)
 	_ = r.configureCoreClock(ctx)
 	go r.startCoreWatchdog(ctx)
@@ -605,6 +610,44 @@ func (r *Runner) connect(ctx context.Context) error {
 		}
 	}()
 	go func() {
+		retry := time.NewTicker(metricReportRetryInterval)
+		defer retry.Stop()
+		lastSent := ""
+		lastSentAt := time.Time{}
+		sendNext := func() bool {
+			report, ok := r.nextPendingMetricReport()
+			if !ok {
+				lastSent = ""
+				lastSentAt = time.Time{}
+				return true
+			}
+			if report.ReportID == lastSent && time.Since(lastSentAt) < metricReportRetryInterval {
+				return true
+			}
+			if writeMessage(map[string]any{"type": "metric_report", "metric_report": report}, true) != nil {
+				return false
+			}
+			lastSent = report.ReportID
+			lastSentAt = time.Now()
+			return true
+		}
+		for {
+			select {
+			case <-connectionCtx.Done():
+				return
+			case <-r.metricReportWake:
+				if !sendNext() {
+					return
+				}
+			case <-retry.C:
+				if !sendNext() {
+					return
+				}
+			}
+		}
+	}()
+	r.notifyMetricReportSender()
+	go func() {
 		ticker := time.NewTicker(connectionPresencePollInterval)
 		defer ticker.Stop()
 		for {
@@ -702,6 +745,12 @@ func (r *Runner) connect(ctx context.Context) error {
 		case "latency_probe_ack":
 			if msg.ReportID != "" {
 				if err := r.ackLatencyProbeReport(msg.ReportID); err != nil {
+					return err
+				}
+			}
+		case "metric_report_ack":
+			if msg.ReportID != "" {
+				if err := r.ackMetricReport(msg.ReportID); err != nil {
 					return err
 				}
 			}
