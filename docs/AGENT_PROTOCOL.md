@@ -516,7 +516,9 @@ Agent creates or reuses one persistent Ed25519 host key under `state_dir` with f
 Agent compares passwords in constant time, accepts no client public-key authentication, permits only `direct-tcpip` channels, and applies the existing per-user traffic policy after authentication. The persistent host key is protocol-required server identity rather than a user login credential. Controller validates that the reported fingerprint matches `host_public_key` and derives keyed password deployment digests only from the signed task payload. A successful deployment result without a usable `ssh_inbounds` step clears the recorded SSH host and password state. Passwords are redacted from public task views and logs; the Agent host private key never enters an Agent task or result.
 
 Every enabled SSH credential has `route_kind=kernel` plus a synthetic sing-box `inbound` and branch
-`auth_user` identity. Agent resolves and rejects non-public destinations, then calls the current kernel only through
+`auth_user` identity. A branchless SSH inbound receives one Controller-derived implicit direct-exit branch whose
+virtual `path_id` equals the inbound ID; it uses the same kernel route relay and never becomes an Agent direct dial.
+Agent resolves and rejects non-public destinations, then calls the current kernel only through
 the Unix local API using `CONNECT /routes/relay/tcp`. Headers carry `X-OBoard-Inbound-Tag`,
 `X-OBoard-Auth-User`, `X-OBoard-Destination`, and the bounded public
 `X-OBoard-Resolved-Addresses` list. The kernel evaluates the normal route table with that identity; Agent never
