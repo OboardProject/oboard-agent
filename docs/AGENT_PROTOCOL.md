@@ -1041,14 +1041,26 @@ Payload is `WARPRequestPlan`:
 ```
 
 Agent's default `warp_command=auto` mode registers a Cloudflare WireGuard device
-directly and has no `wgcf` dependency. The WARP WireGuard tunnel MTU is fixed at
-1280 (Cloudflare standard); the Agent clamps any larger requested value and
-Controller never seeds the request from the server's main-network `mtu_value`,
-because oversized encrypted datagrams get fragmented and dropped on typical
-paths, stalling page loads while small control packets still pass. A cleaned absolute path whose basename is
-`wgcf` enables the legacy command flow. `warp_command=none` disables automatic
-WARP request. Each report is returned in the parent deployment's `steps` array
-and persisted by Controller from the `task-results` callback.
+directly and has no `wgcf` dependency. When the signed core config contains one
+explicit interface or source-prefix binding for a pending WARP profile, Agent
+uses a local address from that binding for registration and binds the Linux
+socket to the owning interface. Conflicting bindings fail before registration
+instead of selecting one nondeterministically. The legacy external `wgcf` flow
+rejects a bound registration because it cannot enforce that socket route.
+
+The WARP WireGuard tunnel MTU is fixed at 1280 (Cloudflare standard); the Agent
+clamps any larger requested value and Controller never seeds the request from
+the server's main-network `mtu_value`, because oversized encrypted datagrams get
+fragmented and dropped on typical paths, stalling page loads while small control
+packets still pass. A cleaned absolute path whose basename is `wgcf` enables the
+legacy command flow. `warp_command=none` disables automatic WARP request. Each
+report is returned in the parent deployment's `steps` array and persisted by
+Controller from the `task-results` callback.
+
+For rule-specific WARP endpoints, Controller derives the outer peer DNS family
+from the selected interface inventory or source prefix. Agent preserves that
+endpoint-specific resolver while replacing pending placeholders, so an IPv6-only
+HE tunnel never inherits the server's default IPv4 WARP peer resolution.
 
 For an explicit `dns_strategy`, the managed WireGuard endpoint uses
 `domain_resolver.server=bootstrap-primary`. For `auto` or an empty strategy, the

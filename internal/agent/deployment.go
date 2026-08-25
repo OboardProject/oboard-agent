@@ -71,9 +71,17 @@ func (r *Runner) executeDeploymentTask(payload model.DeploymentTaskPayload) (str
 	}
 
 	warpReports := make(map[int64]model.WARPConfigReport, len(payload.WARPRequests))
+	warpBindings := map[int64]warpRegistrationBinding{}
+	if len(payload.WARPRequests) > 0 {
+		warpBindings, err = deriveWARPRegistrationBindings(payload.Config.Config)
+		if err != nil {
+			add("warp_config", "准备 WARP 出口", true, time.Now(), nil, err, false, "WARP 出口绑定已检查")
+			return deploymentTaskResponse(payload.Version, steps, criticalFailures, warnings)
+		}
+	}
 	for _, plan := range payload.WARPRequests {
 		started := time.Now()
-		report := r.requestWARPConfig(ctx, plan)
+		report := r.requestWARPConfig(ctx, plan, warpBindings[plan.ProfileID])
 		var err error
 		if report.Status != model.WARPStatusReady {
 			err = fmt.Errorf("%s", report.Error)
@@ -279,6 +287,9 @@ func resolveDeploymentWARPConfig(config string, plans []model.WARPRequestPlan, r
 				resolvedEndpoint[key] = value
 			}
 			resolvedEndpoint["tag"] = placeholderTag
+			if value, exists := placeholder["domain_resolver"]; exists {
+				resolvedEndpoint["domain_resolver"] = value
+			}
 			if value, exists := placeholder["bind_interface"]; exists {
 				delete(resolvedEndpoint, "detour")
 				resolvedEndpoint["bind_interface"] = value

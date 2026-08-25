@@ -14,7 +14,7 @@ import (
 )
 
 func TestResolveDeploymentWARPConfigReplacesControllerPlaceholder(t *testing.T) {
-	config := `{"endpoints":[{"type":"wireguard","tag":"warp-7","_oboard_warp_pending":7},{"type":"wireguard","tag":"routing-rule-11-warp-7","_oboard_warp_pending":7,"bind_interface":"eth1"},{"type":"wireguard","tag":"routing-rule-12-warp-7","_oboard_warp_pending":7,"detour":"source-prefix-example"}],"route":{"rules":[{"action":"route","outbound":"warp-7"}]}}`
+	config := `{"endpoints":[{"type":"wireguard","tag":"warp-7","_oboard_warp_pending":7},{"type":"wireguard","tag":"routing-rule-11-warp-7","_oboard_warp_pending":7,"bind_interface":"eth1","domain_resolver":{"server":"bootstrap-primary","strategy":"ipv6_only"}},{"type":"wireguard","tag":"routing-rule-12-warp-7","_oboard_warp_pending":7,"detour":"source-prefix-example","domain_resolver":{"server":"bootstrap-primary","strategy":"ipv6_only"}}],"route":{"rules":[{"action":"route","outbound":"warp-7"}]}}`
 	plan := model.WARPRequestPlan{ProfileID: 7, OutboundTag: "warp-7", DNSStrategy: "prefer_ipv4"}
 	report := model.WARPConfigReport{ProfileID: 7, Status: model.WARPStatusReady, ConfigJSON: `{"type":"wireguard","private_key":"private","address":["172.16.0.2/32"],"peers":[],"domain_resolver":{"server":"bootstrap","strategy":"prefer_ipv6"}}`}
 	resolved, err := resolveDeploymentWARPConfig(config, []model.WARPRequestPlan{plan}, map[int64]model.WARPConfigReport{7: report})
@@ -40,13 +40,56 @@ func TestResolveDeploymentWARPConfigReplacesControllerPlaceholder(t *testing.T) 
 	if interfaceBound["tag"] != "routing-rule-11-warp-7" || interfaceBound["private_key"] != "private" || interfaceBound["bind_interface"] != "eth1" {
 		t.Fatalf("interface-bound WARP endpoint = %#v", interfaceBound)
 	}
+	interfaceResolver, ok := interfaceBound["domain_resolver"].(map[string]any)
+	if !ok || interfaceResolver["strategy"] != "ipv6_only" {
+		t.Fatalf("interface-bound WARP domain_resolver = %#v", interfaceBound["domain_resolver"])
+	}
 	sourceBound := endpoints[2].(map[string]any)
 	if sourceBound["tag"] != "routing-rule-12-warp-7" || sourceBound["private_key"] != "private" || sourceBound["detour"] != "source-prefix-example" {
 		t.Fatalf("source-bound WARP endpoint = %#v", sourceBound)
 	}
+	sourceResolver, ok := sourceBound["domain_resolver"].(map[string]any)
+	if !ok || sourceResolver["strategy"] != "ipv6_only" {
+		t.Fatalf("source-bound WARP domain_resolver = %#v", sourceBound["domain_resolver"])
+	}
 	resolver, ok := endpoint["domain_resolver"].(map[string]any)
 	if !ok || resolver["server"] != warpBootstrapResolverTag || resolver["strategy"] != "prefer_ipv4" {
 		t.Fatalf("resolved WARP domain_resolver = %#v", endpoint["domain_resolver"])
+	}
+}
+
+func TestDeriveWARPRegistrationBindingFromPendingEndpoints(t *testing.T) {
+	config := `{"outbounds":[{"type":"source-prefix","tag":"source-prefix-v6","prefix":"2001:db8:100::/64"}],"endpoints":[{"type":"wireguard","tag":"warp-7","_oboard_warp_pending":7},{"type":"wireguard","tag":"routing-rule-11-warp-7","_oboard_warp_pending":7,"bind_interface":"he-ipv6"},{"type":"wireguard","tag":"routing-rule-12-warp-8","_oboard_warp_pending":8,"detour":"source-prefix-v6"}]}`
+	bindings, err := deriveWARPRegistrationBindings(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bindings[7].InterfaceName != "he-ipv6" || bindings[7].SourcePrefix != "" {
+		t.Fatalf("interface binding = %#v", bindings[7])
+	}
+	if bindings[8].SourcePrefix != "2001:db8:100::/64" || bindings[8].InterfaceName != "" {
+		t.Fatalf("source-prefix binding = %#v", bindings[8])
+	}
+}
+
+func TestDeriveWARPRegistrationBindingRejectsConflicts(t *testing.T) {
+	_, err := deriveWARPRegistrationBindings(`{"endpoints":[{"_oboard_warp_pending":7,"bind_interface":"eth0"},{"_oboard_warp_pending":7,"bind_interface":"he-ipv6"}]}`)
+	if err == nil || !strings.Contains(err.Error(), "conflicting registration bindings") {
+		t.Fatalf("conflicting bindings error = %v", err)
+	}
+}
+
+func TestSelectWARPRegistrationAddressUsesHEIPv6Interface(t *testing.T) {
+	interfaces := []model.NetworkInterfaceInfo{
+		{Name: "eth0", Up: true, Running: true, Addresses: []string{"192.0.2.10/24"}},
+		{Name: "he-ipv6", Up: true, Running: true, Addresses: []string{"2001:470:1f00::2/64", "fe80::1/64"}},
+	}
+	name, address, err := selectWARPRegistrationAddress(interfaces, warpRegistrationBinding{InterfaceName: "he-ipv6"}, model.IPStackIPv4Only)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if name != "he-ipv6" || address.String() != "2001:470:1f00::2" {
+		t.Fatalf("selected registration source = %s %s", name, address)
 	}
 }
 

@@ -7,6 +7,5 @@ require (
 	github.com/sagernet/quic-go v0.59.0-sing-box-mod.4
 	golang.org/x/crypto v0.53.0
 	golang.org/x/net v0.55.0
+	golang.org/x/sys v0.46.0
 )
-
-require golang.org/x/sys v0.46.0 // indirect

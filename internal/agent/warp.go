@@ -64,7 +64,7 @@ func resolveWarpCommand(raw string) (string, error) {
 	}
 }
 
-func (r *Runner) requestWARPConfig(ctx context.Context, plan model.WARPRequestPlan) model.WARPConfigReport {
+func (r *Runner) requestWARPConfig(ctx context.Context, plan model.WARPRequestPlan, binding warpRegistrationBinding) model.WARPConfigReport {
 	report := model.WARPConfigReport{ServerID: plan.ServerID, ProfileID: plan.ProfileID, Status: model.WARPStatusFailed, MTU: plan.MTU}
 	if plan.ProfileID == 0 {
 		report.Error = "profile_id required"
@@ -79,12 +79,21 @@ func (r *Runner) requestWARPConfig(ctx context.Context, plan model.WARPRequestPl
 		return report
 	}
 	if strings.TrimSpace(cfg.WarpCommand) == "" || strings.TrimSpace(cfg.WarpCommand) == "auto" {
-		outbound, err := registerWARPWireGuard(ctx, r.client, warpRegistrationURL, plan)
+		client, err := boundWARPRegistrationClient(ctx, r.client, binding, plan)
+		if err != nil {
+			report.Error = fmt.Sprintf("prepare bound WARP registration: %v", err)
+			return report
+		}
+		outbound, err := registerWARPWireGuard(ctx, client, warpRegistrationURL, plan)
 		if err != nil {
 			report.Error = err.Error()
 			return report
 		}
 		return r.persistReadyWARPReport(report, outbound)
+	}
+	if binding.key() != "" {
+		report.Error = "custom wgcf registration cannot honor the selected interface or source-prefix binding; use warp_command=auto"
+		return report
 	}
 	wgcf, err := resolveWarpCommand(cfg.WarpCommand)
 	if err != nil {
