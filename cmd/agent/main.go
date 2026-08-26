@@ -136,7 +136,7 @@ func isManagementCommand(args []string) bool {
 		return false
 	}
 	switch strings.ToLower(strings.TrimSpace(args[0])) {
-	case "status", "start", "stop", "restart", "logs", "log", "check", "connection", "controller", "help":
+	case "status", "start", "stop", "restart", "logs", "log", "check", "connection", "controller", "help", "remote-access":
 		return true
 	default:
 		return false

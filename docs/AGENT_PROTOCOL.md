@@ -1574,3 +1574,52 @@ The script can delay restarting `oboard-agent` so the current HTTP task result c
 - Missing OS helper commands must be returned as diagnostic/log method errors, not panic or task crashes.
 - `payload_json` and `result_json` are JSON object strings stored in SQLite.
 - Sensitive values in diagnostics/log output must be redacted: token, password, private key, secret and related fields.
+
+## Remote Access
+
+Remote Terminal is an Agent PTY relay for human operators. It is not SSH, does
+not use TCP/22, and does not occupy the single Agent task slot.
+
+Control-channel messages (signed HMAC, 60s prepare TTL):
+
+- `interactive_prepare` — Agent validates signature, server_id, nonce, TTL, and
+  the local security gate, then dials `/api/v1/agent/interactive/{session_id}`
+  with `X-OBoard-Interactive-Proof` and starts a PTY (`/bin/bash` then `/bin/sh`).
+- `interactive_close` — Agent closes the PTY, signals the process group, and
+  waits then SIGKILLs leftovers.
+- `remote_exec_cancel` — best-effort cancel of an in-flight `remote_exec` by
+  `request_id`.
+
+The Agent WebSocket reader is decoupled from the single-slot task worker so
+prepare/close/cancel/heartbeat continue while a deployment is running.
+
+`remote_exec` and `remote_operation` are ordinary signed Agent tasks. Structured
+exec uses `exec.CommandContext` with argv (no shell). Raw shell uses
+`/bin/sh -c`. Agent keeps an at-most-once journal under `{state_dir}/remote-exec/`
+keyed by `request_id` and payload SHA-256. stdout/stderr are returned on the task
+callback and must not be persisted in Controller task history.
+
+Hello/health advertise:
+
+```json
+{
+  "remote_access": {
+    "capabilities": ["remote_terminal_v1", "remote_exec_v1", "remote_access_local_gate_v1"],
+    "local_mode": "standard",
+    "local_allow": {
+      "remote_terminal": false,
+      "mcp_remote_operations": false,
+      "mcp_structured_exec": false,
+      "mcp_raw_shell": false
+    }
+  }
+}
+```
+
+Local hard gate is `/etc/oboard-agent/local-security.json` (mode `0600`).
+`update_agent_config` cannot modify it. Hardened mode requires the matching local
+allow bit; Controller cannot remotely raise a deny to allow or switch Hardened
+back to Standard. Use `obag remote-access` on the host as root.
+
+Controller must not enqueue `remote_exec` / `interactive_prepare` to Agents that
+do not advertise the matching capability.

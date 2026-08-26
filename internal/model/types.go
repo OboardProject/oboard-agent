@@ -745,6 +745,8 @@ const (
 	AgentTaskTypeManageLogs            = "manage_logs"
 	AgentTaskTypeCheckTime             = "check_time"
 	AgentTaskTypeIssueCertificateHTTP  = "issue_certificate_http01"
+	AgentTaskTypeRemoteExec            = "remote_exec"
+	AgentTaskTypeRemoteOperation       = "remote_operation"
 )
 
 type NetworkInterfaceInfo struct {
@@ -1232,8 +1234,9 @@ type HealthReport struct {
 	ConnectivityCheckedAt     time.Time    `json:"-"`
 	ConnectivityError         string       `json:"-"`
 	Timestamp                 time.Time    `json:"timestamp"`
-	AppliedConfigVersion      int64        `json:"applied_config_version,omitempty"`
-	AppliedConfigDigest       string       `json:"applied_config_digest,omitempty"`
+	AppliedConfigVersion      int64              `json:"applied_config_version,omitempty"`
+	AppliedConfigDigest       string             `json:"applied_config_digest,omitempty"`
+	RemoteAccess              RemoteAccessReport `json:"remote_access,omitempty"`
 }
 
 type MetricReport struct {

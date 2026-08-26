@@ -1,0 +1,45 @@
+package agent
+
+import (
+	"github.com/OboardProject/oboard-agent/internal/agentsecurity"
+	"github.com/OboardProject/oboard-agent/internal/model"
+)
+
+func (r *Runner) localSecurityStore() *agentsecurity.Store {
+	return agentsecurity.NewStore(agentsecurity.PathForConfig(r.Config().ConfigPath))
+}
+
+func (r *Runner) localSecurityPolicy() agentsecurity.Policy {
+	policy, err := r.localSecurityStore().Load()
+	if err != nil {
+		return agentsecurity.DefaultPolicy()
+	}
+	return policy
+}
+
+func (r *Runner) remoteAccessReport() model.RemoteAccessReport {
+	policy := r.localSecurityPolicy()
+	return model.RemoteAccessReport{
+		Capabilities: []string{
+			model.RemoteAccessCapabilityTerminal,
+			model.RemoteAccessCapabilityExec,
+			model.RemoteAccessCapabilityLocalGate,
+		},
+		LocalMode:  policy.Mode,
+		LocalAllow: policy.Allow,
+	}
+}
+
+func (r *Runner) localGateAllows(feature string) bool {
+	return r.localSecurityPolicy().Allows(feature)
+}
+
+func localGateFeatureForExec(origin, mode string) string {
+	if origin != model.RemoteExecOriginMCP {
+		return "mcp_structured_exec"
+	}
+	if mode == model.RemoteExecModeShell {
+		return "mcp_raw_shell"
+	}
+	return "mcp_structured_exec"
+}

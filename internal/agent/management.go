@@ -13,6 +13,9 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/OboardProject/oboard-agent/internal/agentsecurity"
+	"github.com/OboardProject/oboard-agent/internal/model"
 )
 
 const (
@@ -103,6 +106,8 @@ func (c *managementConsole) runCommand(args []string) int {
 		c.printLogs(service)
 	case "check", "connection", "controller":
 		c.printControllerCheck()
+	case "remote-access":
+		return c.runRemoteAccess(args[1:])
 	case "help", "-h", "--help":
 		c.printHelp()
 	default:
@@ -138,6 +143,9 @@ func (c *managementConsole) printHelp() {
 	fmt.Fprintln(c.out, "  obag logs agent      查看 Agent 日志")
 	fmt.Fprintln(c.out, "  obag logs core       查看 oboard-sb 日志")
 	fmt.Fprintln(c.out, "  obag check           检查与主控的连接")
+	fmt.Fprintln(c.out, "  obag remote-access status")
+	fmt.Fprintln(c.out, "  obag remote-access harden|standard")
+	fmt.Fprintln(c.out, "  obag remote-access allow|deny terminal|mcp-operations|mcp-exec|mcp-shell")
 }
 
 func (c *managementConsole) printStatus() {
@@ -261,6 +269,57 @@ func (c *managementConsole) printControllerCheck() {
 	} else {
 		fmt.Fprintln(c.out, "\n连接检查未全部通过，请根据上面的失败项目检查网络、域名或主控服务。")
 	}
+}
+
+func (c *managementConsole) runRemoteAccess(args []string) int {
+	store := agentsecurity.NewStore(agentsecurity.PathForConfig(c.configPath))
+	if len(args) == 0 || strings.EqualFold(args[0], "status") {
+		policy, err := store.Load()
+		if err != nil {
+			fmt.Fprintf(c.errOut, "读取本地安全策略失败：%v\n", err)
+			return 1
+		}
+		fmt.Fprintf(c.out, "本地安全文件：%s\n", store.Path())
+		fmt.Fprintf(c.out, "模式：%s\n", policy.Mode)
+		fmt.Fprintf(c.out, "允许远程终端：%v\n", policy.Allow.RemoteTerminal)
+		fmt.Fprintf(c.out, "允许 MCP 远程运维：%v\n", policy.Allow.MCPRemoteOperations)
+		fmt.Fprintf(c.out, "允许 Structured Exec：%v\n", policy.Allow.MCPStructuredExec)
+		fmt.Fprintf(c.out, "允许 Raw Shell：%v\n", policy.Allow.MCPRawShell)
+		return 0
+	}
+	if os.Geteuid() != 0 {
+		fmt.Fprintln(c.out, "该操作需要 root 权限，请使用 sudo obag remote-access 或切换到 root 后重试。")
+		return 1
+	}
+	switch strings.ToLower(args[0]) {
+	case "harden":
+		if err := store.SetMode(model.RemoteAccessModeHardened); err != nil {
+			fmt.Fprintf(c.errOut, "切换 Hardened 失败：%v\n", err)
+			return 1
+		}
+		fmt.Fprintln(c.out, "已切换为 Hardened。Controller 不能远程放宽本地拒绝策略。")
+	case "standard":
+		if err := store.SetMode(model.RemoteAccessModeStandard); err != nil {
+			fmt.Fprintf(c.errOut, "切换 Standard 失败：%v\n", err)
+			return 1
+		}
+		fmt.Fprintln(c.out, "已切换为 Standard。远程访问仍受 Controller 全局/服务器开关约束。")
+	case "allow", "deny":
+		if len(args) < 2 {
+			fmt.Fprintln(c.errOut, "请指定 terminal、mcp-operations、mcp-exec 或 mcp-shell。")
+			return 2
+		}
+		if err := store.SetAllow(args[1], strings.EqualFold(args[0], "allow")); err != nil {
+			fmt.Fprintf(c.errOut, "更新本地允许项失败：%v\n", err)
+			return 1
+		}
+		fmt.Fprintf(c.out, "已%s %s\n", args[0], args[1])
+	default:
+		fmt.Fprintf(c.errOut, "未知 remote-access 命令：%s\n", args[0])
+		c.printHelp()
+		return 2
+	}
+	return 0
 }
 
 type managementCheckItem struct {

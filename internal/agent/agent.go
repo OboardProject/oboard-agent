@@ -125,6 +125,12 @@ type Runner struct {
 	forwardDesiredState        string
 	tunnelDesiredState         string
 	sshInboundDesiredState     string
+	remoteExecMu               sync.Mutex
+	remoteExecRuns             map[string]*remoteExecRun
+	remoteExecLog              *remoteExecJournal
+	interactiveMu              sync.Mutex
+	terminalSessions           map[string]*terminalSession
+	interactiveNonces          map[string]time.Time
 }
 
 const (
@@ -529,6 +535,7 @@ func (r *Runner) connect(ctx context.Context) error {
 		}
 	}()
 	conn.SetReadLimit(1 << 20)
+	defer r.closeAllTerminalSessions("controller_disconnect")
 	type websocketWriteRequest struct {
 		payload any
 		done    chan error
@@ -668,8 +675,52 @@ func (r *Runner) connect(ctx context.Context) error {
 			}
 		}
 	}()
+	type pendingControlTask struct {
+		task model.AgentTask
+	}
+	taskCh := make(chan pendingControlTask, 1)
+	go func() {
+		for {
+			select {
+			case <-connectionCtx.Done():
+				return
+			case item, ok := <-taskCh:
+				if !ok {
+					return
+				}
+				status, result := r.ExecuteAgentTask(item.task)
+				health := r.Probe(false)
+				if err := r.ReportTaskResult(ctx, item.task.ID, status, result, &health); err != nil {
+					log.Printf("report task %d result: %v", item.task.ID, err)
+					cancelConnection()
+					return
+				}
+				if err := writeMessage(map[string]any{"type": "task_ack", "task_id": item.task.ID}, true); err != nil {
+					log.Printf("acknowledge task %d: %v", item.task.ID, err)
+					cancelConnection()
+					return
+				}
+				if item.task.Type == "update_agent" && status == "succeeded" {
+					if err := r.scheduleAgentRestart(); err != nil {
+						log.Printf("schedule agent restart after update: %v", err)
+						cancelConnection()
+						return
+					}
+				}
+				if item.task.Type == model.AgentTaskTypeUninstallAgent && status == "succeeded" {
+					if err := r.finalizeAgentUninstall(); err != nil {
+						log.Printf("schedule agent uninstall finalizer: %v", err)
+					}
+				}
+			}
+		}
+	}()
 	for {
-		var msg struct {
+		_, data, err := conn.ReadMessage()
+		if err != nil {
+			return err
+		}
+		var typed struct {
 			Type                   string                         `json:"type"`
 			Task                   *model.AgentTask               `json:"task"`
 			Signature              string                         `json:"signature"`
@@ -678,80 +729,86 @@ func (r *Runner) connect(ctx context.Context) error {
 			MonitoringMode         string                         `json:"monitoring_mode"`
 			LatencyProbePlan       *model.LatencyProbeTargetsPlan `json:"latency_probe_plan"`
 			ReportID               string                         `json:"report_id"`
+			RequestID              string                         `json:"request_id"`
+			SessionID              string                         `json:"session_id"`
 			ConnectionAuditEnabled bool                           `json:"connection_audit_enabled"`
 			ControllerTime         time.Time                      `json:"ts"`
 		}
-		if err := conn.ReadJSON(&msg); err != nil {
+		if err := json.Unmarshal(data, &typed); err != nil {
 			return err
 		}
-		if !msg.ControllerTime.IsZero() {
-			r.setControllerReference(msg.ControllerTime)
+		if !typed.ControllerTime.IsZero() {
+			r.setControllerReference(typed.ControllerTime)
 		}
-		switch msg.Type {
+		switch typed.Type {
 		case "hello":
-			if err := r.bindServerIdentity(msg.ServerID); err != nil {
+			if err := r.bindServerIdentity(typed.ServerID); err != nil {
 				return err
 			}
-			r.setMonitoringPolicy(msg.MonitoringMode)
-			if msg.LatencyProbePlan != nil {
-				if err := r.setLatencyProbePlan(*msg.LatencyProbePlan); err != nil {
+			r.setMonitoringPolicy(typed.MonitoringMode)
+			if typed.LatencyProbePlan != nil {
+				if err := r.setLatencyProbePlan(*typed.LatencyProbePlan); err != nil {
 					return err
 				}
 			}
-			r.setConnectionAuditPolicy(msg.ConnectionAuditEnabled)
+			r.setConnectionAuditPolicy(typed.ConnectionAuditEnabled)
 		case "task_request":
-			if msg.Task != nil {
-				if msg.SignatureVersion != 2 {
-					return fmt.Errorf("controller task signature version %d is not supported", msg.SignatureVersion)
-				}
-				if !r.verifyTaskSignature(*msg.Task, msg.Signature) {
-					return fmt.Errorf("controller task signature verification failed for task %d", msg.Task.ID)
-				}
-				if err := r.validateTaskServerID(*msg.Task); err != nil {
-					return err
-				}
-				status, result := r.ExecuteAgentTask(*msg.Task)
-				health := r.Probe(false)
-				if err := r.ReportTaskResult(ctx, msg.Task.ID, status, result, &health); err != nil {
-					return fmt.Errorf("report task %d result: %w", msg.Task.ID, err)
-				}
-				// The result travels over authenticated HTTP so it can include the
-				// health snapshot in one callback. A tiny WebSocket acknowledgement
-				// releases the Controller's in-flight slot for the next task.
-				if err := writeMessage(map[string]any{"type": "task_ack", "task_id": msg.Task.ID}, true); err != nil {
-					return fmt.Errorf("acknowledge task %d: %w", msg.Task.ID, err)
-				}
-				if msg.Task.Type == "update_agent" && status == "succeeded" {
-					if err := r.scheduleAgentRestart(); err != nil {
-						return fmt.Errorf("schedule agent restart after update: %w", err)
-					}
-				}
-				if msg.Task.Type == model.AgentTaskTypeUninstallAgent && status == "succeeded" {
-					if err := r.finalizeAgentUninstall(); err != nil {
-						log.Printf("schedule agent uninstall finalizer: %v", err)
-					}
-				}
+			if typed.Task == nil {
+				continue
+			}
+			if typed.SignatureVersion != 2 {
+				return fmt.Errorf("controller task signature version %d is not supported", typed.SignatureVersion)
+			}
+			if !r.verifyTaskSignature(*typed.Task, typed.Signature) {
+				return fmt.Errorf("controller task signature verification failed for task %d", typed.Task.ID)
+			}
+			if err := r.validateTaskServerID(*typed.Task); err != nil {
+				return err
+			}
+			select {
+			case taskCh <- pendingControlTask{task: *typed.Task}:
+			case <-connectionCtx.Done():
+				return connectionCtx.Err()
+			default:
+				log.Printf("ignoring task %d because the single task worker is busy", typed.Task.ID)
 			}
 		case "heartbeat":
-			r.setMonitoringPolicy(msg.MonitoringMode)
-			if msg.LatencyProbePlan != nil {
-				if err := r.setLatencyProbePlan(*msg.LatencyProbePlan); err != nil {
+			r.setMonitoringPolicy(typed.MonitoringMode)
+			if typed.LatencyProbePlan != nil {
+				if err := r.setLatencyProbePlan(*typed.LatencyProbePlan); err != nil {
 					return err
 				}
 			}
-			r.setConnectionAuditPolicy(msg.ConnectionAuditEnabled)
+			r.setConnectionAuditPolicy(typed.ConnectionAuditEnabled)
 			_ = r.maybeRunPeriodicDNSBenchmark(ctx)
 			_ = r.maybeRunPeriodicForwardProbes(ctx)
 			_ = writeMessage(map[string]any{"type": "health_report", "health_report": r.Probe(false)}, false)
+		case "interactive_prepare":
+			var env model.InteractivePrepareEnvelope
+			if err := json.Unmarshal(data, &env); err != nil {
+				log.Printf("interactive_prepare decode failed: %v", err)
+				continue
+			}
+			if err := r.handleInteractivePrepare(env); err != nil {
+				log.Printf("interactive_prepare rejected: %v", err)
+			}
+		case "interactive_close":
+			if typed.SessionID != "" {
+				r.closeTerminalSession(typed.SessionID, "controller_close")
+			}
+		case "remote_exec_cancel":
+			if typed.RequestID != "" {
+				_ = r.cancelRemoteExec(typed.RequestID)
+			}
 		case "latency_probe_ack":
-			if msg.ReportID != "" {
-				if err := r.ackLatencyProbeReport(msg.ReportID); err != nil {
+			if typed.ReportID != "" {
+				if err := r.ackLatencyProbeReport(typed.ReportID); err != nil {
 					return err
 				}
 			}
 		case "metric_report_ack":
-			if msg.ReportID != "" {
-				if err := r.ackMetricReport(msg.ReportID); err != nil {
+			if typed.ReportID != "" {
+				if err := r.ackMetricReport(typed.ReportID); err != nil {
 					return err
 				}
 			}
@@ -981,6 +1038,10 @@ func (r *Runner) executeAgentTask(task model.AgentTask) (string, string) {
 			return "failed", jsonMap(map[string]any{"message": "HTTP-01 certificate issuance failed", "error": err.Error(), "certificate_id": payload.CertificateID})
 		}
 		return "succeeded", jsonMap(result)
+	case model.AgentTaskTypeRemoteExec:
+		return r.executeRemoteExecTask(task)
+	case model.AgentTaskTypeRemoteOperation:
+		return r.executeRemoteOperationTask(task)
 	default:
 		return "failed", jsonResult("unknown task type")
 	}
@@ -1089,6 +1150,12 @@ func updateRepoAllowed(repo string) bool {
 }
 
 func (r *Runner) updateAgentConfig(patch Config, fields map[string]json.RawMessage) (map[string]any, error) {
+	for key := range fields {
+		lower := strings.ToLower(strings.TrimSpace(key))
+		if strings.Contains(lower, "local_security") || strings.Contains(lower, "local-security") {
+			return map[string]any{"message": "agent config update rejected"}, errors.New("update_agent_config cannot modify local-security.json")
+		}
+	}
 	current := r.Config()
 	oldController := current.ControllerURL
 	oldStateDir := current.StateDir
@@ -2350,6 +2417,7 @@ func (r *Runner) Probe(force bool) model.HealthReport {
 	health.NetworkTotalUploadBytes = probe.NetworkTotalUploadBytes
 	health.NetworkTotalDownloadBytes = probe.NetworkTotalDownloadBytes
 	health.Timestamp = now
+	health.RemoteAccess = r.remoteAccessReport()
 	if applied, appliedErr := r.loadAppliedVersion(); appliedErr == nil {
 		health.AppliedConfigVersion = applied.Version
 		health.AppliedConfigDigest = applied.PayloadID
