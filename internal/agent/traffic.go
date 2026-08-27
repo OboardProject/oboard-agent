@@ -3,6 +3,9 @@ package agent
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,30 +19,94 @@ import (
 	"github.com/OboardProject/oboard-agent/internal/model"
 )
 
-const coreAPISocket = "/run/oboard-sb.sock"
-
-const trafficReportBatchSize = 200
+const (
+	coreAPISocket                = "/run/oboard-sb.sock"
+	trafficReportBatchSize       = 200
+	trafficStateSchemaV2         = 2
+	trafficLedgerProtocolV2      = 2
+	trafficLedgerCapability      = "traffic_ledger_v2"
+	trafficSourceCore            = "core"
+	trafficSourceSSH             = "ssh"
+	trafficStatusHealthy         = "healthy"
+	trafficStatusRecovering      = "recovering"
+	trafficStatusStale           = "stale"
+	trafficStatusStateCorrupt    = "state_corrupt"
+	trafficStatusCounterRegression = "counter_regression"
+	trafficStatusCheckpointGap   = "checkpoint_gap"
+	trafficStatusCheckpointOverlap = "checkpoint_overlap"
+	trafficStatusEpochConflict   = "epoch_conflict"
+	trafficLeaseStaleAfter       = 24 * time.Hour
+)
 
 type trafficSnapshotItem struct {
-	Key       string `json:"key"`
-	UserID    int64  `json:"user_id"`
-	InboundID int64  `json:"inbound_id"`
-	PathID    int64  `json:"path_id"`
-	PeriodKey string `json:"period_key"`
-	Upload    int64  `json:"upload_bytes"`
-	Download  int64  `json:"download_bytes"`
+	Key          string `json:"key"`
+	CounterEpoch string `json:"counter_epoch,omitempty"`
+	Source       string `json:"source,omitempty"`
+	UserID       int64  `json:"user_id"`
+	InboundID    int64  `json:"inbound_id"`
+	PathID       int64  `json:"path_id"`
+	PeriodKey    string `json:"period_key"`
+	Upload       int64  `json:"upload_bytes"`
+	Download     int64  `json:"download_bytes"`
 }
 
 type trafficLocalState struct {
-	Last         map[string]trafficSnapshotItem      `json:"last"`
-	Pending      []trafficPendingReport              `json:"pending"`
-	Acknowledged map[string]trafficCounterCheckpoint `json:"acknowledged,omitempty"`
+	SchemaVersion    int                              `json:"schema_version"`
+	AgentInstanceID  string                           `json:"agent_instance_id,omitempty"`
+	Last             map[string]trafficSnapshotItem   `json:"last,omitempty"`
+	Pending          []trafficPendingReport           `json:"pending,omitempty"`
+	Acknowledged     map[string]trafficCounterCheckpoint `json:"acknowledged,omitempty"`
+	Streams          map[string]*trafficStreamState   `json:"streams,omitempty"`
+	PendingReports   map[string]*trafficPendingRange  `json:"pending_reports,omitempty"`
+	Sync             trafficSyncState                 `json:"sync"`
+	RecoveryRequired bool                             `json:"recovery_required,omitempty"`
+}
+
+type trafficStreamState struct {
+	Source            string `json:"source"`
+	SnapshotKey       string `json:"snapshot_key,omitempty"`
+	CounterEpoch      string `json:"counter_epoch"`
+	PeriodKey         string `json:"period_key"`
+	UserID            int64  `json:"user_id"`
+	InboundID         int64  `json:"inbound_id,omitempty"`
+	PathID            int64  `json:"path_id,omitempty"`
+	ObservedUpload    int64  `json:"observed_upload"`
+	ObservedDownload  int64  `json:"observed_download"`
+	AcceptedUpload    int64  `json:"accepted_upload"`
+	AcceptedDownload  int64  `json:"accepted_download"`
+	Status            string `json:"status"`
+	LastError         string `json:"last_error,omitempty"`
+}
+
+type trafficPendingRange struct {
+	ReportID      string `json:"report_id"`
+	Source        string `json:"source"`
+	StreamID      string `json:"stream_id"`
+	CounterEpoch  string `json:"counter_epoch"`
+	PeriodKey     string `json:"period_key"`
+	UserID        int64  `json:"user_id"`
+	InboundID     *int64 `json:"inbound_id,omitempty"`
+	PathID        *int64 `json:"path_id,omitempty"`
+	FromUpload    int64  `json:"from_upload_bytes"`
+	ToUpload      int64  `json:"to_upload_bytes"`
+	FromDownload  int64  `json:"from_download_bytes"`
+	ToDownload    int64  `json:"to_download_bytes"`
+	StartedAt     string `json:"started_at"`
+	EndedAt       string `json:"ended_at"`
+	SnapshotKey   string `json:"snapshot_key,omitempty"`
+}
+
+type trafficSyncState struct {
+	Status      string `json:"status,omitempty"`
+	LastSuccess string `json:"last_success,omitempty"`
+	LastError   string `json:"last_error,omitempty"`
 }
 
 type trafficCounterCheckpoint struct {
-	PeriodKey string `json:"period_key"`
-	Upload    int64  `json:"upload_bytes"`
-	Download  int64  `json:"download_bytes"`
+	CounterEpoch string `json:"counter_epoch,omitempty"`
+	PeriodKey    string `json:"period_key"`
+	Upload       int64  `json:"upload_bytes"`
+	Download     int64  `json:"download_bytes"`
 }
 
 type trafficPendingReport struct {
@@ -69,9 +136,62 @@ type trafficReportItem struct {
 	EndedAt   string `json:"ended_at"`
 }
 
+type trafficLedgerReportItem struct {
+	ReportID     string `json:"report_id"`
+	Source       string `json:"source"`
+	StreamID     string `json:"stream_id"`
+	CounterEpoch string `json:"counter_epoch"`
+	PeriodKey    string `json:"period_key"`
+	UserID       int64  `json:"user_id"`
+	InboundID    *int64 `json:"inbound_id,omitempty"`
+	PathID       *int64 `json:"path_id,omitempty"`
+	FromUpload   int64  `json:"from_upload_bytes"`
+	ToUpload     int64  `json:"to_upload_bytes"`
+	FromDownload int64  `json:"from_download_bytes"`
+	ToDownload   int64  `json:"to_download_bytes"`
+	StartedAt    string `json:"started_at"`
+	EndedAt      string `json:"ended_at"`
+}
+
+type trafficStreamWire struct {
+	Source         string `json:"source"`
+	StreamID       string `json:"stream_id"`
+	CounterEpoch   string `json:"counter_epoch"`
+	PeriodKey      string `json:"period_key"`
+	UserID         int64  `json:"user_id"`
+	InboundID      int64  `json:"inbound_id,omitempty"`
+	PathID         int64  `json:"path_id,omitempty"`
+	CurrentUpload  int64  `json:"current_upload_bytes"`
+	CurrentDownload int64 `json:"current_download_bytes"`
+	Status         string `json:"status,omitempty"`
+}
+
+type trafficAcceptedReport struct {
+	ReportID           string `json:"report_id"`
+	Status             string `json:"status"`
+	StreamID           string `json:"stream_id,omitempty"`
+	CounterEpoch       string `json:"counter_epoch,omitempty"`
+	PeriodKey          string `json:"period_key,omitempty"`
+	AcceptedUpload     int64  `json:"accepted_upload_bytes"`
+	AcceptedDownload   int64  `json:"accepted_download_bytes"`
+}
+
+type trafficStreamCheckpoint struct {
+	Source           string `json:"source"`
+	StreamID         string `json:"stream_id"`
+	CounterEpoch     string `json:"counter_epoch"`
+	PeriodKey        string `json:"period_key"`
+	AcceptedUpload   int64  `json:"accepted_upload_bytes"`
+	AcceptedDownload int64  `json:"accepted_download_bytes"`
+	Status           string `json:"status"`
+}
+
 type trafficReportResponse struct {
-	Accepted []string               `json:"accepted_report_ids"`
-	Policies map[string]interface{} `json:"policies"`
+	ProtocolVersion   int                       `json:"protocol_version"`
+	Accepted          []string                  `json:"accepted_report_ids"`
+	AcceptedReports   []trafficAcceptedReport   `json:"accepted_reports"`
+	StreamCheckpoints []trafficStreamCheckpoint `json:"stream_checkpoints"`
+	Policies          map[string]interface{}    `json:"policies"`
 }
 
 func (r *Runner) startTrafficLoop(ctx context.Context) {
@@ -87,6 +207,7 @@ func (r *Runner) startTrafficLoop(ctx context.Context) {
 			select {
 			case <-loopCtx.Done():
 				flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				_ = r.persistTrafficCheckpointBeforeRuntimeTransition(flushCtx)
 				_ = r.collectAndReportTraffic(flushCtx)
 				if r.Config().ConnectionAuditEnabled {
 					_ = r.collectAndReportConnectionAudits(flushCtx)
@@ -103,60 +224,222 @@ func (r *Runner) collectAndReportTraffic(ctx context.Context) error {
 	r.trafficMu.Lock()
 	defer r.trafficMu.Unlock()
 	state := r.trafficStateLocked()
-	// Keep an uncertain delivery batch stable until the controller acknowledges it.
-	// This avoids appending a new report every interval while the controller is down.
 	if len(state.Pending) > 0 {
 		return r.reportPendingTraffic(ctx, state)
 	}
-
-	items, coreErr := r.coreTrafficSnapshot(ctx)
-	sshItems := r.sshInboundTrafficSnapshot()
-	if coreErr != nil && len(sshItems) == 0 {
-		return coreErr
+	if len(state.PendingReports) > 0 && !state.RecoveryRequired {
+		return r.reportTrafficLedger(ctx, state, nil)
 	}
-	items = append(items, sshItems...)
-	if len(items) == 0 {
+	items, err := r.snapshotTrafficItems(ctx)
+	if err != nil && len(items) == 0 {
+		if state.RecoveryRequired {
+			return r.reportTrafficLedger(ctx, state, nil)
+		}
 		return r.syncTrafficPolicies(ctx, state)
 	}
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	nowID := time.Now().UnixNano()
-	changed := false
-	for index, item := range items {
-		if item.Key == "" || item.UserID <= 0 {
-			continue
+	if state.RecoveryRequired || state.Sync.Status == trafficStatusStateCorrupt {
+		r.observeTrafficSnapshotLocked(state, items, true)
+		if err := r.saveTrafficState(*state); err != nil {
+			return err
 		}
-		last := state.Last[item.Key]
-		du, dd := trafficDelta(item, last)
-		if last != item {
-			state.Last[item.Key] = item
-			changed = true
+		if err := r.reportTrafficLedger(ctx, state, items); err != nil {
+			return err
 		}
-		if du == 0 && dd == 0 {
-			continue
+		if !state.RecoveryRequired {
+			r.observeTrafficSnapshotLocked(state, items, false)
+			if err := r.saveTrafficState(*state); err != nil {
+				return err
+			}
+			if len(state.PendingReports) > 0 {
+				return r.reportTrafficLedger(ctx, state, items)
+			}
 		}
-		period := item.PeriodKey
-		if period == "" {
-			period = time.Now().UTC().Format("2006-01")
-		}
-		report := trafficPendingReport{ReportID: fmt.Sprintf("%s-%s-%d-%d", r.Config().AgentID, sanitizeTrafficKey(item.Key), nowID, index), UserID: item.UserID, PeriodKey: period, Upload: du, Download: dd, StartedAt: now, EndedAt: now, SnapshotKey: item.Key, CumulativeUpload: item.Upload, CumulativeDownload: item.Download}
-		if item.InboundID > 0 {
-			report.InboundID = &item.InboundID
-		}
-		if item.PathID > 0 {
-			report.PathID = &item.PathID
-		}
-		state.Pending = append(state.Pending, report)
-		changed = true
+		return nil
 	}
+	changed := r.observeTrafficSnapshotLocked(state, items, false)
 	if changed {
 		if err := r.saveTrafficState(*state); err != nil {
 			return err
 		}
 	}
-	if len(state.Pending) == 0 {
+	if len(state.Pending) > 0 {
+		return r.reportPendingTraffic(ctx, state)
+	}
+	if len(state.PendingReports) > 0 || r.trafficLedgerEnabled() {
+		return r.reportTrafficLedger(ctx, state, items)
+	}
+	if len(items) == 0 {
 		return r.syncTrafficPolicies(ctx, state)
 	}
-	return r.reportPendingTraffic(ctx, state)
+	return r.syncTrafficPolicies(ctx, state)
+}
+
+func (r *Runner) snapshotTrafficItems(ctx context.Context) ([]trafficSnapshotItem, error) {
+	items, coreErr := r.coreTrafficSnapshot(ctx)
+	for i := range items {
+		if items[i].Source == "" {
+			items[i].Source = trafficSourceCore
+		}
+	}
+	sshItems := r.sshInboundTrafficSnapshot()
+	items = append(items, sshItems...)
+	if coreErr != nil && len(sshItems) == 0 {
+		return items, coreErr
+	}
+	return items, nil
+}
+
+func (r *Runner) persistTrafficCheckpointBeforeRuntimeTransition(ctx context.Context) error {
+	if strings.TrimSpace(r.Config().StateDir) == "" {
+		return nil
+	}
+	r.trafficMu.Lock()
+	defer r.trafficMu.Unlock()
+	state := r.trafficStateLocked()
+	items, err := r.snapshotTrafficItems(ctx)
+	if err == nil {
+		r.observeTrafficSnapshotLocked(state, items, false)
+	}
+	return r.saveTrafficState(*state)
+}
+
+func (r *Runner) observeTrafficSnapshotLocked(state *trafficLocalState, items []trafficSnapshotItem, recovering bool) bool {
+	if state.Streams == nil {
+		state.Streams = map[string]*trafficStreamState{}
+	}
+	if state.PendingReports == nil {
+		state.PendingReports = map[string]*trafficPendingRange{}
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	nowID := time.Now().UnixNano()
+	changed := false
+	legacyKernel := false
+	for index, item := range items {
+		if item.Key == "" || item.UserID <= 0 {
+			continue
+		}
+		source := strings.TrimSpace(item.Source)
+		if source == "" {
+			source = trafficSourceCore
+		}
+		if item.CounterEpoch == "" {
+			legacyKernel = true
+			last := state.Last[item.Key]
+			du, dd := trafficDelta(item, last)
+			if last != item {
+				state.Last[item.Key] = item
+				changed = true
+			}
+			if du == 0 && dd == 0 {
+				continue
+			}
+			period := item.PeriodKey
+			if period == "" {
+				period = time.Now().UTC().Format("2006-01")
+			}
+			report := trafficPendingReport{ReportID: fmt.Sprintf("%s-%s-%d-%d", r.Config().AgentID, sanitizeTrafficKey(item.Key), nowID, index), UserID: item.UserID, PeriodKey: period, Upload: du, Download: dd, StartedAt: now, EndedAt: now, SnapshotKey: item.Key, CumulativeUpload: item.Upload, CumulativeDownload: item.Download}
+			if item.InboundID > 0 {
+				report.InboundID = &item.InboundID
+			}
+			if item.PathID > 0 {
+				report.PathID = &item.PathID
+			}
+			state.Pending = append(state.Pending, report)
+			changed = true
+			continue
+		}
+		streamID := trafficStreamID(source, item.Key)
+		stream := state.Streams[streamID]
+		if stream == nil {
+			stream = &trafficStreamState{Source: source, SnapshotKey: item.Key, UserID: item.UserID, Status: trafficStatusRecovering}
+			state.Streams[streamID] = stream
+			changed = true
+		}
+		stream.Source = source
+		stream.SnapshotKey = item.Key
+		stream.UserID = item.UserID
+		stream.InboundID = item.InboundID
+		stream.PathID = item.PathID
+		period := strings.TrimSpace(item.PeriodKey)
+		epochChanged := stream.CounterEpoch != "" && stream.CounterEpoch != item.CounterEpoch
+		if epochChanged {
+			stream.AcceptedUpload = 0
+			stream.AcceptedDownload = 0
+			if stream.Status == trafficStatusCounterRegression {
+				stream.Status = trafficStatusHealthy
+				stream.LastError = ""
+			}
+		}
+		if stream.CounterEpoch == item.CounterEpoch && stream.PeriodKey == period && (item.Upload < stream.ObservedUpload || item.Download < stream.ObservedDownload) {
+			stream.Status = trafficStatusCounterRegression
+			stream.LastError = "counter regression in the same epoch"
+			stream.ObservedUpload = item.Upload
+			stream.ObservedDownload = item.Download
+			changed = true
+			continue
+		}
+		stream.CounterEpoch = item.CounterEpoch
+		stream.PeriodKey = period
+		stream.ObservedUpload = item.Upload
+		stream.ObservedDownload = item.Download
+		if recovering || state.RecoveryRequired {
+			if stream.Status == "" || stream.Status == trafficStatusHealthy {
+				stream.Status = trafficStatusRecovering
+			}
+			changed = true
+			continue
+		}
+		if stream.Status == trafficStatusCounterRegression || stream.Status == trafficStatusCheckpointGap || stream.Status == trafficStatusCheckpointOverlap || stream.Status == trafficStatusEpochConflict {
+			changed = true
+			continue
+		}
+		if item.Upload < stream.AcceptedUpload || item.Download < stream.AcceptedDownload {
+			stream.Status = trafficStatusCounterRegression
+			stream.LastError = "observed counters are below the accepted checkpoint"
+			changed = true
+			continue
+		}
+		if item.Upload == stream.AcceptedUpload && item.Download == stream.AcceptedDownload {
+			if stream.Status != trafficStatusHealthy {
+				stream.Status = trafficStatusHealthy
+				changed = true
+			}
+			continue
+		}
+		pendingExists := false
+		for _, pending := range state.PendingReports {
+			if pending != nil && pending.StreamID == streamID {
+				pendingExists = true
+				break
+			}
+		}
+		if pendingExists {
+			continue
+		}
+		report := &trafficPendingRange{
+			Source: source, StreamID: streamID, CounterEpoch: item.CounterEpoch, PeriodKey: period,
+			UserID: item.UserID, FromUpload: stream.AcceptedUpload, ToUpload: item.Upload,
+			FromDownload: stream.AcceptedDownload, ToDownload: item.Download,
+			StartedAt: now, EndedAt: now, SnapshotKey: item.Key,
+		}
+		if item.InboundID > 0 {
+			inboundID := item.InboundID
+			report.InboundID = &inboundID
+		}
+		if item.PathID > 0 {
+			pathID := item.PathID
+			report.PathID = &pathID
+		}
+		report.ReportID = trafficRangeReportID(r.Config().AgentID, report)
+		state.PendingReports[report.ReportID] = report
+		stream.Status = trafficStatusHealthy
+		changed = true
+	}
+	if legacyKernel && state.SchemaVersion < trafficStateSchemaV2 {
+		state.SchemaVersion = 0
+	}
+	_ = recovering
+	return changed
 }
 
 func trafficDelta(current, previous trafficSnapshotItem) (int64, int64) {
@@ -182,6 +465,9 @@ func (r *Runner) reportPendingTraffic(ctx context.Context, state *trafficLocalSt
 	}
 	acknowledgeAcceptedTrafficReports(state, resp.Accepted)
 	state.Pending = removeAcceptedTrafficReports(state.Pending, resp.Accepted)
+	if len(state.Pending) == 0 && r.trafficLedgerEnabled() {
+		r.finishLegacyTrafficBridgeLocked(state)
+	}
 	if err := r.saveTrafficState(*state); err != nil {
 		return err
 	}
@@ -191,7 +477,115 @@ func (r *Runner) reportPendingTraffic(ctx context.Context, state *trafficLocalSt
 	return nil
 }
 
+func (r *Runner) reportTrafficLedger(ctx context.Context, state *trafficLocalState, items []trafficSnapshotItem) error {
+	if state == nil {
+		return nil
+	}
+	useV2 := r.trafficControllerSupportsV2()
+	if useV2 {
+		req := map[string]any{
+			"protocol_version":   trafficLedgerProtocolV2,
+			"agent_instance_id":  state.AgentInstanceID,
+			"streams":            trafficStreamWireBatch(state, items),
+			"reports":            trafficLedgerReportBatch(state.PendingReports),
+		}
+		var resp trafficReportResponse
+		if err := r.postControllerJSON(ctx, "/api/v1/agent/traffic-reports", req, &resp, true); err != nil {
+			return err
+		}
+		if resp.ProtocolVersion == trafficLedgerProtocolV2 {
+			r.setTrafficControllerProtocol(trafficLedgerProtocolV2)
+			applyTrafficLedgerResponse(state, resp)
+			if err := r.saveTrafficState(*state); err != nil {
+				return err
+			}
+			return r.pushTrafficPolicies(ctx, applyConservativeTrafficPolicies(resp.Policies, state), state.Acknowledged)
+		}
+		r.setTrafficControllerProtocol(1)
+	}
+	return r.reportTrafficLedgerAsV1(ctx, state)
+}
+
+func (r *Runner) reportTrafficLedgerAsV1(ctx context.Context, state *trafficLocalState) error {
+	pending := make([]trafficPendingReport, 0, len(state.PendingReports))
+	for _, report := range state.PendingReports {
+		if report == nil {
+			continue
+		}
+		item := trafficPendingReport{
+			ReportID: report.ReportID, UserID: report.UserID, InboundID: report.InboundID, PathID: report.PathID,
+			PeriodKey: report.PeriodKey, Upload: report.ToUpload - report.FromUpload, Download: report.ToDownload - report.FromDownload,
+			StartedAt: report.StartedAt, EndedAt: report.EndedAt, SnapshotKey: report.SnapshotKey,
+			CumulativeUpload: report.ToUpload, CumulativeDownload: report.ToDownload,
+		}
+		if item.Upload < 0 {
+			item.Upload = 0
+		}
+		if item.Download < 0 {
+			item.Download = 0
+		}
+		pending = append(pending, item)
+	}
+	if len(pending) == 0 && !state.RecoveryRequired {
+		return r.syncTrafficPolicies(ctx, state)
+	}
+	var resp trafficReportResponse
+	if err := r.postControllerJSON(ctx, "/api/v1/agent/traffic-reports", map[string]any{"items": trafficReportBatch(pending)}, &resp, true); err != nil {
+		return err
+	}
+	acknowledgeAcceptedTrafficReports(state, resp.Accepted)
+	accepted := map[string]struct{}{}
+	for _, id := range resp.Accepted {
+		accepted[id] = struct{}{}
+	}
+	for id := range accepted {
+		delete(state.PendingReports, id)
+	}
+	if state.RecoveryRequired {
+		r.bindRecoveredTrafficToObservedLocked(state)
+	}
+	state.Sync.Status = trafficStatusHealthy
+	state.Sync.LastSuccess = time.Now().UTC().Format(time.RFC3339Nano)
+	state.Sync.LastError = ""
+	if err := r.saveTrafficState(*state); err != nil {
+		return err
+	}
+	return r.pushTrafficPolicies(ctx, applyConservativeTrafficPolicies(resp.Policies, state), state.Acknowledged)
+}
+
+func (r *Runner) bindRecoveredTrafficToObservedLocked(state *trafficLocalState) {
+	if state == nil {
+		return
+	}
+	if state.Last == nil {
+		state.Last = map[string]trafficSnapshotItem{}
+	}
+	if state.Acknowledged == nil {
+		state.Acknowledged = map[string]trafficCounterCheckpoint{}
+	}
+	for _, stream := range state.Streams {
+		if stream == nil || stream.SnapshotKey == "" {
+			continue
+		}
+		stream.AcceptedUpload = stream.ObservedUpload
+		stream.AcceptedDownload = stream.ObservedDownload
+		if stream.Status == trafficStatusRecovering || stream.Status == trafficStatusStateCorrupt {
+			stream.Status = trafficStatusHealthy
+		}
+		state.Last[stream.SnapshotKey] = trafficSnapshotItem{
+			Key: stream.SnapshotKey, Source: stream.Source, CounterEpoch: stream.CounterEpoch, UserID: stream.UserID,
+			InboundID: stream.InboundID, PathID: stream.PathID, PeriodKey: stream.PeriodKey,
+			Upload: stream.ObservedUpload, Download: stream.ObservedDownload,
+		}
+		state.Acknowledged[stream.SnapshotKey] = trafficCounterCheckpoint{CounterEpoch: stream.CounterEpoch, PeriodKey: stream.PeriodKey, Upload: stream.ObservedUpload, Download: stream.ObservedDownload}
+	}
+	state.RecoveryRequired = false
+}
+
 func (r *Runner) syncTrafficPolicies(ctx context.Context, state *trafficLocalState) error {
+	if r.trafficLedgerEnabled() {
+		return r.reportTrafficLedger(ctx, state, nil)
+	}
 	var resp trafficReportResponse
 	if err := r.postControllerJSON(ctx, "/api/v1/agent/traffic-reports", map[string]any{"items": []trafficPendingReport{}}, &resp, true); err != nil {
 		return err
@@ -203,7 +597,7 @@ func (r *Runner) syncTrafficPolicies(ctx context.Context, state *trafficLocalSta
 	if len(resp.Policies) == 0 && len(acknowledged) == 0 {
 		return nil
 	}
-	return r.pushTrafficPolicies(ctx, resp.Policies, acknowledged)
+	return r.pushTrafficPolicies(ctx, applyStaleLeasePolicies(resp.Policies, state), acknowledged)
 }
 
 func (r *Runner) sshInboundTrafficSnapshot() []trafficSnapshotItem {
@@ -219,8 +613,6 @@ func (r *Runner) pushTrafficPolicies(ctx context.Context, policies map[string]in
 	r.mu.Unlock()
 	coreUsers, err := r.currentCoreTrafficPolicyUsers()
 	if err != nil {
-		// A malformed local config is handled by the normal config apply path.
-		// Keep policy enforcement conservative until that repair completes.
 		if err := r.pushCoreTrafficPolicy(ctx, policies, acknowledged); err != nil {
 			return err
 		}
@@ -323,8 +715,6 @@ func partitionRuntimePolicyLeases(policies map[string]interface{}, coreUsers, ss
 		hasCore := coreUsers[policy.UserID]
 		hasSSH := sshUsers[policy.UserID]
 		if !hasCore && !hasSSH {
-			// Unknown destination during a transient config handoff: do not drop
-			// enforcement from either runtime.
 			hasCore, hasSSH = true, true
 		}
 		corePolicy, sshPolicy := policy, policy
@@ -367,6 +757,62 @@ func trafficReportBatch(pending []trafficPendingReport) []trafficReportItem {
 	return out
 }
 
+func trafficLedgerReportBatch(pending map[string]*trafficPendingRange) []trafficLedgerReportItem {
+	out := make([]trafficLedgerReportItem, 0, len(pending))
+	for _, report := range pending {
+		if report == nil {
+			continue
+		}
+		out = append(out, trafficLedgerReportItem{
+			ReportID: report.ReportID, Source: report.Source, StreamID: report.StreamID, CounterEpoch: report.CounterEpoch,
+			PeriodKey: report.PeriodKey, UserID: report.UserID, InboundID: report.InboundID, PathID: report.PathID,
+			FromUpload: report.FromUpload, ToUpload: report.ToUpload, FromDownload: report.FromDownload, ToDownload: report.ToDownload,
+			StartedAt: report.StartedAt, EndedAt: report.EndedAt,
+		})
+		if len(out) >= trafficReportBatchSize {
+			break
+		}
+	}
+	return out
+}
+
+func trafficStreamWireBatch(state *trafficLocalState, items []trafficSnapshotItem) []trafficStreamWire {
+	out := make([]trafficStreamWire, 0)
+	seen := map[string]bool{}
+	add := func(source, key, epoch, period string, userID, inboundID, pathID, upload, download int64, status string) {
+		if source == "" {
+			source = trafficSourceCore
+		}
+		if key == "" || epoch == "" {
+			return
+		}
+		streamID := trafficStreamID(source, key)
+		if seen[streamID] {
+			return
+		}
+		seen[streamID] = true
+		out = append(out, trafficStreamWire{
+			Source: source, StreamID: streamID, CounterEpoch: epoch, PeriodKey: period, UserID: userID,
+			InboundID: inboundID, PathID: pathID, CurrentUpload: upload, CurrentDownload: download, Status: status,
+		})
+	}
+	for _, item := range items {
+		add(item.Source, item.Key, item.CounterEpoch, item.PeriodKey, item.UserID, item.InboundID, item.PathID, item.Upload, item.Download, "")
+	}
+	if state != nil {
+		for _, stream := range state.Streams {
+			if stream == nil {
+				continue
+			}
+			add(stream.Source, stream.SnapshotKey, stream.CounterEpoch, stream.PeriodKey, stream.UserID, stream.InboundID, stream.PathID, stream.ObservedUpload, stream.ObservedDownload, stream.Status)
+		}
+	}
+	if len(out) > 1000 {
+		out = out[:1000]
+	}
+	return out
+}
+
 func acknowledgeAcceptedTrafficReports(state *trafficLocalState, acceptedIDs []string) {
 	if state == nil || len(acceptedIDs) == 0 {
 		return
@@ -383,6 +829,111 @@ func acknowledgeAcceptedTrafficReports(state *trafficLocalState, acceptedIDs []s
 			continue
 		}
 		state.Acknowledged[report.SnapshotKey] = trafficCounterCheckpoint{PeriodKey: report.PeriodKey, Upload: report.CumulativeUpload, Download: report.CumulativeDownload}
+	}
+	for id, report := range state.PendingReports {
+		if _, ok := accepted[id]; !ok || report == nil || report.SnapshotKey == "" {
+			continue
+		}
+		state.Acknowledged[report.SnapshotKey] = trafficCounterCheckpoint{CounterEpoch: report.CounterEpoch, PeriodKey: report.PeriodKey, Upload: report.ToUpload, Download: report.ToDownload}
+		if stream := state.Streams[report.StreamID]; stream != nil {
+			stream.AcceptedUpload = report.ToUpload
+			stream.AcceptedDownload = report.ToDownload
+			stream.Status = trafficStatusHealthy
+		}
+	}
+}
+
+func applyTrafficLedgerResponse(state *trafficLocalState, resp trafficReportResponse) {
+	if state.Acknowledged == nil {
+		state.Acknowledged = map[string]trafficCounterCheckpoint{}
+	}
+	if state.Streams == nil {
+		state.Streams = map[string]*trafficStreamState{}
+	}
+	for _, checkpoint := range resp.StreamCheckpoints {
+		stream := state.Streams[checkpoint.StreamID]
+		if stream == nil {
+			stream = &trafficStreamState{Source: checkpoint.Source}
+			state.Streams[checkpoint.StreamID] = stream
+		}
+		if checkpoint.CounterEpoch != "" && stream.CounterEpoch != "" && checkpoint.CounterEpoch != stream.CounterEpoch {
+			stream.Status = trafficStatusEpochConflict
+			stream.LastError = "controller epoch does not match local counters"
+			continue
+		}
+		if checkpoint.CounterEpoch != "" {
+			stream.CounterEpoch = checkpoint.CounterEpoch
+		}
+		if checkpoint.PeriodKey != "" {
+			stream.PeriodKey = checkpoint.PeriodKey
+		}
+		stream.AcceptedUpload = checkpoint.AcceptedUpload
+		stream.AcceptedDownload = checkpoint.AcceptedDownload
+		if checkpoint.Status != "" {
+			stream.Status = checkpoint.Status
+		} else if stream.Status == trafficStatusRecovering || stream.Status == trafficStatusStateCorrupt {
+			stream.Status = trafficStatusHealthy
+		}
+		if stream.SnapshotKey != "" {
+			state.Acknowledged[stream.SnapshotKey] = trafficCounterCheckpoint{CounterEpoch: stream.CounterEpoch, PeriodKey: stream.PeriodKey, Upload: stream.AcceptedUpload, Download: stream.AcceptedDownload}
+		}
+	}
+	for _, accepted := range resp.AcceptedReports {
+		report := state.PendingReports[accepted.ReportID]
+		switch accepted.Status {
+		case "", "accepted", "duplicate", "covered":
+			if report != nil {
+				if stream := state.Streams[report.StreamID]; stream != nil {
+					stream.AcceptedUpload = accepted.AcceptedUpload
+					stream.AcceptedDownload = accepted.AcceptedDownload
+					if stream.AcceptedUpload == 0 && stream.AcceptedDownload == 0 {
+						stream.AcceptedUpload = report.ToUpload
+						stream.AcceptedDownload = report.ToDownload
+					}
+					stream.Status = trafficStatusHealthy
+					stream.LastError = ""
+					if report.SnapshotKey != "" {
+						state.Acknowledged[report.SnapshotKey] = trafficCounterCheckpoint{CounterEpoch: report.CounterEpoch, PeriodKey: report.PeriodKey, Upload: stream.AcceptedUpload, Download: stream.AcceptedDownload}
+					}
+				}
+				delete(state.PendingReports, accepted.ReportID)
+			}
+		case trafficStatusCheckpointGap, trafficStatusCheckpointOverlap, trafficStatusEpochConflict, "rejected":
+			if report != nil {
+				if stream := state.Streams[report.StreamID]; stream != nil {
+					stream.Status = accepted.Status
+					stream.LastError = accepted.Status
+					if accepted.Status != "rejected" {
+						stream.AcceptedUpload = accepted.AcceptedUpload
+						stream.AcceptedDownload = accepted.AcceptedDownload
+					}
+				}
+				delete(state.PendingReports, accepted.ReportID)
+			}
+			state.RecoveryRequired = true
+		}
+	}
+	if len(resp.StreamCheckpoints) > 0 {
+		state.RecoveryRequired = false
+		if state.Sync.Status == trafficStatusStateCorrupt {
+			state.Sync.Status = trafficStatusRecovering
+		}
+	}
+	if !state.RecoveryRequired && state.Sync.Status != trafficStatusCounterRegression && state.Sync.Status != trafficStatusStateCorrupt {
+		state.Sync.Status = trafficStatusHealthy
+	}
+	state.Sync.LastSuccess = time.Now().UTC().Format(time.RFC3339Nano)
+	state.Sync.LastError = ""
+	for _, stream := range state.Streams {
+		if stream == nil {
+			continue
+		}
+		switch stream.Status {
+		case trafficStatusCounterRegression, trafficStatusCheckpointGap, trafficStatusCheckpointOverlap, trafficStatusEpochConflict, trafficStatusStateCorrupt:
+			state.Sync.Status = stream.Status
+			state.Sync.LastError = stream.LastError
+			state.RecoveryRequired = true
+		}
 	}
 }
 
@@ -401,6 +952,48 @@ func removeAcceptedTrafficReports(pending []trafficPendingReport, acceptedIDs []
 		}
 	}
 	return remaining
+}
+
+func (r *Runner) finishLegacyTrafficBridgeLocked(state *trafficLocalState) {
+	if state == nil || len(state.Pending) > 0 {
+		return
+	}
+	state.SchemaVersion = trafficStateSchemaV2
+	if state.Streams == nil {
+		state.Streams = map[string]*trafficStreamState{}
+	}
+	for key, last := range state.Last {
+		source := last.Source
+		if source == "" {
+			source = trafficSourceCore
+		}
+		if last.CounterEpoch == "" {
+			continue
+		}
+		streamID := trafficStreamID(source, key)
+		stream := state.Streams[streamID]
+		if stream == nil {
+			stream = &trafficStreamState{}
+			state.Streams[streamID] = stream
+		}
+		stream.Source = source
+		stream.SnapshotKey = key
+		stream.CounterEpoch = last.CounterEpoch
+		stream.PeriodKey = last.PeriodKey
+		stream.UserID = last.UserID
+		stream.InboundID = last.InboundID
+		stream.PathID = last.PathID
+		stream.ObservedUpload = last.Upload
+		stream.ObservedDownload = last.Download
+		if ack, ok := state.Acknowledged[key]; ok {
+			stream.AcceptedUpload = ack.Upload
+			stream.AcceptedDownload = ack.Download
+		} else {
+			stream.AcceptedUpload = last.Upload
+			stream.AcceptedDownload = last.Download
+		}
+		stream.Status = trafficStatusHealthy
+	}
 }
 
 func (r *Runner) coreTrafficSnapshot(ctx context.Context) ([]trafficSnapshotItem, error) {
@@ -524,6 +1117,15 @@ func (r *Runner) trafficStateLocked() *trafficLocalState {
 	if r.trafficState.Acknowledged == nil {
 		r.trafficState.Acknowledged = map[string]trafficCounterCheckpoint{}
 	}
+	if r.trafficState.Streams == nil {
+		r.trafficState.Streams = map[string]*trafficStreamState{}
+	}
+	if r.trafficState.PendingReports == nil {
+		r.trafficState.PendingReports = map[string]*trafficPendingRange{}
+	}
+	if r.trafficState.AgentInstanceID == "" {
+		r.trafficState.AgentInstanceID = newTrafficCounterEpoch()
+	}
 	return &r.trafficState
 }
 
@@ -531,31 +1133,155 @@ func (r *Runner) trafficStatePath() string {
 	return filepath.Join(r.stateDir(), "traffic-state.json")
 }
 
+func (r *Runner) trafficStateBackupPath() string {
+	return r.trafficStatePath() + ".bak"
+}
+
 func (r *Runner) loadTrafficState() trafficLocalState {
-	state := trafficLocalState{Last: map[string]trafficSnapshotItem{}, Acknowledged: map[string]trafficCounterCheckpoint{}}
-	b, err := os.ReadFile(r.trafficStatePath())
-	if err != nil {
-		return state
+	state, err := readTrafficStateFile(r.trafficStatePath())
+	if err == nil {
+		return migrateLoadedTrafficState(state, false)
 	}
-	_ = json.Unmarshal(b, &state)
+	if !errors.Is(err, os.ErrNotExist) {
+		if backup, backupErr := readTrafficStateFile(r.trafficStateBackupPath()); backupErr == nil {
+			migrated := migrateLoadedTrafficState(backup, false)
+			migrated.Sync.Status = trafficStatusRecovering
+			migrated.Sync.LastError = "primary traffic-state.json was unreadable"
+			migrated.RecoveryRequired = true
+			return migrated
+		}
+		return corruptTrafficState("traffic-state.json is corrupt")
+	}
+	if backup, backupErr := readTrafficStateFile(r.trafficStateBackupPath()); backupErr == nil {
+		migrated := migrateLoadedTrafficState(backup, false)
+		migrated.RecoveryRequired = true
+		migrated.Sync.Status = trafficStatusRecovering
+		return migrated
+	}
+	empty := migrateLoadedTrafficState(trafficLocalState{}, true)
+	empty.RecoveryRequired = true
+	empty.Sync.Status = trafficStatusRecovering
+	return empty
+}
+
+func readTrafficStateFile(path string) (trafficLocalState, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return trafficLocalState{}, err
+	}
+	if len(bytes.TrimSpace(b)) == 0 {
+		return trafficLocalState{}, errors.New("traffic state is empty")
+	}
+	var state trafficLocalState
+	if err := json.Unmarshal(b, &state); err != nil {
+		return trafficLocalState{}, err
+	}
+	if err := validateTrafficState(state); err != nil {
+		return trafficLocalState{}, err
+	}
+	return state, nil
+}
+
+func migrateLoadedTrafficState(state trafficLocalState, missing bool) trafficLocalState {
 	if state.Last == nil {
 		state.Last = map[string]trafficSnapshotItem{}
 	}
 	if state.Acknowledged == nil {
 		state.Acknowledged = map[string]trafficCounterCheckpoint{}
 	}
+	if state.Streams == nil {
+		state.Streams = map[string]*trafficStreamState{}
+	}
+	if state.PendingReports == nil {
+		state.PendingReports = map[string]*trafficPendingRange{}
+	}
+	if state.AgentInstanceID == "" {
+		state.AgentInstanceID = newTrafficCounterEpoch()
+	}
+	if state.SchemaVersion >= trafficStateSchemaV2 {
+		return state
+	}
+	if missing && len(state.Last) == 0 && len(state.Pending) == 0 && len(state.PendingReports) == 0 {
+		state.SchemaVersion = trafficStateSchemaV2
+		return state
+	}
 	return state
+}
+
+func corruptTrafficState(reason string) trafficLocalState {
+	return trafficLocalState{
+		SchemaVersion:    trafficStateSchemaV2,
+		AgentInstanceID:  newTrafficCounterEpoch(),
+		Last:             map[string]trafficSnapshotItem{},
+		Acknowledged:     map[string]trafficCounterCheckpoint{},
+		Streams:          map[string]*trafficStreamState{},
+		PendingReports:   map[string]*trafficPendingRange{},
+		RecoveryRequired: true,
+		Sync:             trafficSyncState{Status: trafficStatusStateCorrupt, LastError: reason},
+	}
+}
+
+func validateTrafficState(state trafficLocalState) error {
+	if state.SchemaVersion < 0 || state.SchemaVersion > trafficStateSchemaV2 {
+		return fmt.Errorf("unsupported traffic state schema_version %d", state.SchemaVersion)
+	}
+	for id, report := range state.PendingReports {
+		if report == nil || strings.TrimSpace(report.ReportID) == "" || report.ReportID != id {
+			return errors.New("pending traffic report identity is invalid")
+		}
+		if report.ToUpload < report.FromUpload || report.ToDownload < report.FromDownload {
+			return errors.New("pending traffic report range is invalid")
+		}
+	}
+	return nil
 }
 
 func (r *Runner) saveTrafficState(state trafficLocalState) error {
 	if err := os.MkdirAll(r.stateDir(), 0o700); err != nil {
 		return err
 	}
+	if state.SchemaVersion == 0 && len(state.Pending) == 0 && r.trafficLedgerEnabled() {
+		state.SchemaVersion = trafficStateSchemaV2
+	}
+	if err := validateTrafficState(state); err != nil {
+		return err
+	}
 	b, err := json.Marshal(state)
 	if err != nil {
 		return err
 	}
-	return atomicWriteFile(r.trafficStatePath(), b, 0o600)
+	path := r.trafficStatePath()
+	if current, err := os.ReadFile(path); err == nil && len(current) > 0 {
+		if err := atomicWriteFileWithSync(r.trafficStateBackupPath(), current, 0o600); err != nil {
+			return err
+		}
+	}
+	return atomicWriteFileWithSync(path, b, 0o600)
+}
+
+func atomicWriteFileWithSync(path string, data []byte, perm os.FileMode) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(perm); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
 }
 
 func sanitizeTrafficKey(key string) string {
@@ -566,4 +1292,115 @@ func sanitizeTrafficKey(key string) string {
 		return '-'
 	}, key)
 	return strings.Trim(key, "-")
+}
+
+func newTrafficCounterEpoch() string {
+	var raw [16]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "ce_invalid"
+	}
+	return "ce_" + base64.RawURLEncoding.EncodeToString(raw[:])
+}
+
+func trafficStreamID(source, snapshotKey string) string {
+	sum := sha256.Sum256([]byte(source + "\x00" + snapshotKey))
+	return "ts_" + base64.RawURLEncoding.EncodeToString(sum[:])
+}
+
+func trafficRangeReportID(agentID string, report *trafficPendingRange) string {
+	if report == nil {
+		return ""
+	}
+	payload := fmt.Sprintf("v2\x00%s\x00%s\x00%s\x00%s\x00%d\x00%d\x00%d\x00%d", agentID, report.StreamID, report.CounterEpoch, report.PeriodKey, report.FromUpload, report.ToUpload, report.FromDownload, report.ToDownload)
+	sum := sha256.Sum256([]byte(payload))
+	return "tr2_" + base64.RawURLEncoding.EncodeToString(sum[:])
+}
+
+func (r *Runner) trafficLedgerEnabled() bool {
+	for _, capability := range r.lastKernelCapabilities {
+		if capability == trafficLedgerCapability {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *Runner) trafficControllerSupportsV2() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.trafficControllerProtocol == 1 {
+		return false
+	}
+	return r.trafficLedgerEnabled() || r.trafficControllerProtocol == trafficLedgerProtocolV2
+}
+
+func (r *Runner) setTrafficControllerProtocol(version int) {
+	r.mu.Lock()
+	r.trafficControllerProtocol = version
+	r.mu.Unlock()
+}
+
+func applyConservativeTrafficPolicies(policies map[string]interface{}, state *trafficLocalState) map[string]interface{} {
+	policies = applyStaleLeasePolicies(policies, state)
+	if state == nil || len(policies) == 0 {
+		return policies
+	}
+	blocked := map[int64]bool{}
+	for _, stream := range state.Streams {
+		if stream == nil {
+			continue
+		}
+		switch stream.Status {
+		case trafficStatusCounterRegression, trafficStatusCheckpointGap, trafficStatusCheckpointOverlap, trafficStatusEpochConflict, trafficStatusStateCorrupt:
+			blocked[stream.UserID] = true
+		}
+	}
+	if len(blocked) == 0 {
+		return policies
+	}
+	out := map[string]interface{}{}
+	for key, raw := range policies {
+		encoded, err := json.Marshal(raw)
+		if err != nil {
+			out[key] = raw
+			continue
+		}
+		var policy model.TrafficRuntimePolicy
+		if json.Unmarshal(encoded, &policy) != nil || !blocked[policy.UserID] || policy.TrafficLimitBytes <= 0 {
+			out[key] = raw
+			continue
+		}
+		policy.EnforcementMode = "reject_new"
+		out[key] = policy
+	}
+	return out
+}
+
+func applyStaleLeasePolicies(policies map[string]interface{}, state *trafficLocalState) map[string]interface{} {
+	if state == nil || len(policies) == 0 || state.Sync.LastSuccess == "" {
+		return policies
+	}
+	lastSuccess, err := time.Parse(time.RFC3339Nano, state.Sync.LastSuccess)
+	if err != nil || time.Since(lastSuccess) < trafficLeaseStaleAfter {
+		return policies
+	}
+	out := map[string]interface{}{}
+	for key, raw := range policies {
+		encoded, err := json.Marshal(raw)
+		if err != nil {
+			out[key] = raw
+			continue
+		}
+		var policy model.TrafficRuntimePolicy
+		if json.Unmarshal(encoded, &policy) != nil || !policy.LeaseEnforced {
+			out[key] = raw
+			continue
+		}
+		policy.LeaseBytes = 0
+		out[key] = policy
+	}
+	if state.Sync.Status == "" || state.Sync.Status == trafficStatusHealthy {
+		state.Sync.Status = trafficStatusStale
+	}
+	return out
 }

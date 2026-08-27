@@ -249,11 +249,11 @@ func TestSSHInboundAcknowledgementPreventsBaselineDoubleCount(t *testing.T) {
 	}
 }
 
-func TestSSHInboundZeroLeaseKeepsActiveQuota(t *testing.T) {
+func TestSSHInboundZeroLeaseRejectsNewBillableTraffic(t *testing.T) {
 	counter := &sshInboundCounter{}
-	counter.setPolicy(model.TrafficRuntimePolicy{UserID: 7, Billable: true, TrafficLimitBytes: 100, UsedBaselineBytes: 4, LeaseEnforced: true, QuotaState: "active"})
-	if counter.quotaExceeded() {
-		t.Fatal("active SSH quota with an empty remaining lease must not reject transfers")
+	counter.setPolicy(model.TrafficRuntimePolicy{UserID: 7, Billable: true, TrafficLimitBytes: 100, UsedBaselineBytes: 50, LeaseBytes: 0, LeaseEnforced: true, QuotaState: "active"})
+	if !counter.quotaExceeded() {
+		t.Fatal("limited SSH user with lease=0 must reject new billable traffic")
 	}
 	counter.setPolicy(model.TrafficRuntimePolicy{UserID: 7, Billable: true, TrafficLimitBytes: 10, UsedBaselineBytes: 10, LeaseEnforced: true, QuotaState: "active"})
 	if !counter.quotaExceeded() {
@@ -323,6 +323,9 @@ func TestEmptySSHInboundPlanRestoresFullCoreLease(t *testing.T) {
 	var received model.TrafficRuntimePolicy
 	runner := newTestSSHRunner(t, Config{StateDir: dir})
 	runner.coreClient = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.Method == http.MethodGet && request.URL.Path == "/traffic/snapshot" {
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"items":[]}`)), Header: make(http.Header)}, nil
+		}
 		if request.Method != http.MethodPost || request.URL.Path != "/traffic/policy" {
 			t.Fatalf("unexpected core policy request: %s %s", request.Method, request.URL.Path)
 		}

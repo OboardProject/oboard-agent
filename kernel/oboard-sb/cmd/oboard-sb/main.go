@@ -21,7 +21,7 @@ import (
 	C "github.com/sagernet/sing-box/constant"
 )
 
-var kernelCapabilities = []string{"trusted_forward_v1", "outbound_egress_probe_v1", "outbound_relay_v1", "route_relay_v1", "runtime_clock_v1", "connection_presence_v1", "family_selector_v1"}
+var kernelCapabilities = []string{"trusted_forward_v1", "outbound_egress_probe_v1", "outbound_relay_v1", "route_relay_v1", "runtime_clock_v1", "connection_presence_v1", "family_selector_v1", "traffic_ledger_v2"}
 
 func main() {
 	config := flag.String("config", "config.json", "sing-box config path")

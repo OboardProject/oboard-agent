@@ -88,6 +88,7 @@ type sshInboundCredential struct {
 
 type sshInboundCounter struct {
 	mu                   sync.RWMutex
+	epoch                string
 	policy               model.TrafficRuntimePolicy
 	upload               atomic.Int64
 	download             atomic.Int64
@@ -383,6 +384,12 @@ func restoreSSHInboundPlanFile(path string, plan []byte) error {
 }
 
 func (r *Runner) swapSSHInboundManager(next *sshInboundManager) *sshInboundManager {
+	r.mu.Lock()
+	current := r.sshInboundManager
+	r.mu.Unlock()
+	if current != nil {
+		_ = r.persistTrafficCheckpointBeforeRuntimeTransition(context.Background())
+	}
 	r.mu.Lock()
 	old := r.sshInboundManager
 	r.sshInboundManager = next
@@ -694,7 +701,7 @@ func newManagedSSHInbound(plan model.SSHInbound, usageByUser map[int64]*sshInbou
 			usage = &sshInboundUserUsage{periods: map[string]*sshInboundUsagePeriod{}}
 			usageByUser[user.UserID] = usage
 		}
-		counter := &sshInboundCounter{usage: usage}
+		counter := &sshInboundCounter{epoch: newTrafficCounterEpoch(), usage: usage}
 		if policy, ok := sshInboundPolicyForUser(plan.Policies, user.UserID); ok {
 			counter.setPolicy(policy)
 		}
@@ -1085,13 +1092,18 @@ func (c *sshInboundCounter) setPolicy(policy model.TrafficRuntimePolicy) {
 	previous := c.policy
 	periodChanged := previous.PeriodKey != "" && policy.PeriodKey != "" && previous.PeriodKey != policy.PeriodKey
 	if periodChanged && (policy.PreviousPeriodKey == "" || policy.PreviousPeriodKey != previous.PeriodKey) {
-		c.upload.Store(0)
-		c.download.Store(0)
-		c.acknowledgedUpload.Store(0)
-		c.acknowledgedDownload.Store(0)
+		c.resetCountersLocked()
 	}
 	c.policy = policy
 	c.mu.Unlock()
+}
+
+func (c *sshInboundCounter) resetCountersLocked() {
+	c.epoch = newTrafficCounterEpoch()
+	c.upload.Store(0)
+	c.download.Store(0)
+	c.acknowledgedUpload.Store(0)
+	c.acknowledgedDownload.Store(0)
 }
 
 func (c *sshInboundCounter) currentPolicy() model.TrafficRuntimePolicy {
@@ -1121,10 +1133,7 @@ func (c *sshInboundCounter) currentPolicy() model.TrafficRuntimePolicy {
 	periodKey, start, end := agentTrafficWindow(time.Now(), policy.ResetMode, policy.ResetDay, anchor, loc)
 	resetCounters := policy.PeriodKey != periodKey && (policy.PreviousPeriodKey == "" || policy.PreviousPeriodKey != previousPeriod)
 	if resetCounters {
-		c.upload.Store(0)
-		c.download.Store(0)
-		c.acknowledgedUpload.Store(0)
-		c.acknowledgedDownload.Store(0)
+		c.resetCountersLocked()
 	}
 	policy.PeriodKey = periodKey
 	policy.PeriodStart = start.UTC().Format(time.RFC3339Nano)
@@ -1231,8 +1240,15 @@ func (c *sshInboundCounter) quotaExceeded() bool {
 		return false
 	}
 	capBytes := policy.TrafficLimitBytes
-	if policy.LeaseEnforced && policy.LeaseBytes > 0 && policy.UsedBaselineBytes+policy.LeaseBytes < capBytes {
-		capBytes = policy.UsedBaselineBytes + policy.LeaseBytes
+	if policy.LeaseEnforced {
+		leaseBytes := policy.LeaseBytes
+		if leaseBytes < 0 {
+			leaseBytes = 0
+		}
+		leaseCap := policy.UsedBaselineBytes + leaseBytes
+		if leaseCap < capBytes {
+			capBytes = leaseCap
+		}
 	}
 	return policy.UsedBaselineBytes+c.unacknowledged(policy.PeriodKey) >= capBytes
 }
@@ -1264,6 +1280,9 @@ func (c *sshInboundCounter) acknowledge(checkpoint trafficCounterCheckpoint) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.policy.PeriodKey != checkpoint.PeriodKey {
+		return
+	}
+	if checkpoint.CounterEpoch != "" && checkpoint.CounterEpoch != c.epoch {
 		return
 	}
 	upload := minInt64(checkpoint.Upload, c.upload.Load())
@@ -1349,7 +1368,7 @@ func (m *sshInboundManager) snapshot() []trafficSnapshotItem {
 				continue
 			}
 			periodKey := policy.PeriodKey
-			items = append(items, trafficSnapshotItem{Key: fmt.Sprintf("ssh-inbound:%d:user:%d", inbound.plan.InboundID, userID), UserID: userID, InboundID: inbound.plan.InboundID, PeriodKey: periodKey, Upload: upload, Download: download})
+			items = append(items, trafficSnapshotItem{Key: fmt.Sprintf("ssh-inbound:%d:user:%d", inbound.plan.InboundID, userID), Source: trafficSourceSSH, CounterEpoch: counter.epoch, UserID: userID, InboundID: inbound.plan.InboundID, PeriodKey: periodKey, Upload: upload, Download: download})
 		}
 	}
 	return items

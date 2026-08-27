@@ -81,6 +81,7 @@ type Runner struct {
 	logMaintenanceEvery        time.Duration
 	trafficState               trafficLocalState
 	trafficStateLoaded         bool
+	trafficControllerProtocol  int
 	connectionAuditState       connectionAuditLocalState
 	connectionAuditStateLoaded bool
 	latencyProbeState          latencyProbeLocalState
@@ -2229,6 +2230,9 @@ func (r *Runner) coreService() string {
 }
 
 func (r *Runner) restartCore() error {
+	if err := r.persistTrafficCheckpointBeforeRuntimeTransition(context.Background()); err != nil {
+		return err
+	}
 	restartCommand := strings.TrimSpace(r.Config().RestartCommand)
 	switch restartCommand {
 	case "", "auto":
@@ -2252,6 +2256,9 @@ func (r *Runner) restartCore() error {
 }
 
 func (r *Runner) reloadCore() error {
+	if err := r.persistTrafficCheckpointBeforeRuntimeTransition(context.Background()); err != nil {
+		return err
+	}
 	reloadCommand := strings.TrimSpace(r.Config().ReloadCommand)
 	switch reloadCommand {
 	case "", "auto":

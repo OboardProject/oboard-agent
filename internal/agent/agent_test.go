@@ -821,14 +821,14 @@ func TestReadMemoryLimit(t *testing.T) {
 }
 
 func TestRestartCommandNoneSkipsProcessManager(t *testing.T) {
-	r := New(Config{RestartCommand: "none", ResourceProfile: "large"})
+	r := New(Config{RestartCommand: "none", ResourceProfile: "large", StateDir: t.TempDir()})
 	if err := r.restartCore(); err != nil {
 		t.Fatal(err)
 	}
 }
 
 func TestReloadCommandNoneSkipsProcessManager(t *testing.T) {
-	r := New(Config{ReloadCommand: "none", ResourceProfile: "large"})
+	r := New(Config{ReloadCommand: "none", ResourceProfile: "large", StateDir: t.TempDir()})
 	if err := r.reloadCore(); err != nil {
 		t.Fatal(err)
 	}
@@ -938,6 +938,10 @@ func TestApplyCoreRuntimeMetadataPartitionsLeaseWithSSH(t *testing.T) {
 	coreServer := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		var body struct {
 			Policies map[string]model.TrafficRuntimePolicy `json:"policies"`
+		}
+		if request.URL.Path == "/traffic/snapshot" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{}})
+			return
 		}
 		if request.URL.Path != "/traffic/policy" || json.NewDecoder(request.Body).Decode(&body) != nil {
 			http.Error(w, "bad request", http.StatusBadRequest)

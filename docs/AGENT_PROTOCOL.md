@@ -1399,10 +1399,58 @@ Request:
 }
 ```
 
+Requests with `protocol_version=2` upload checkpoint ranges instead of client
+deltas. Kernel `GET /traffic/snapshot` and Agent-native SSH snapshots include a
+per-counter `counter_epoch`. Agent derives `stream_id` from `source` plus the
+snapshot key and a deterministic `report_id` from the range. Controller computes
+the billed delta, validates continuity against `traffic_counter_streams`, and
+returns `stream_checkpoints` plus `accepted_reports` (`accepted`, `duplicate`,
+`covered`, `checkpoint_gap`, `checkpoint_overlap`, `epoch_conflict`, `rejected`).
+A lost HTTP ACK retries the same range without double billing. Missing or corrupt
+`traffic-state.json` must reconcile against Controller checkpoints instead of
+billing `0 → current`. Same-epoch counter regression is fail-closed. Kernels
+advertise `traffic_ledger_v2`; Controllers without that response fall back to
+V1 `items`. ACK payloads include `counter_epoch` and are ignored on mismatch.
+
+```json
+{
+  "protocol_version": 2,
+  "agent_instance_id": "ce_...",
+  "streams": [
+    {
+      "source": "core",
+      "stream_id": "ts_...",
+      "counter_epoch": "ce_...",
+      "period_key": "2026-08-01",
+      "user_id": 1,
+      "inbound_id": 1,
+      "current_upload_bytes": 1500,
+      "current_download_bytes": 4800
+    }
+  ],
+  "reports": [
+    {
+      "report_id": "tr2_...",
+      "source": "core",
+      "stream_id": "ts_...",
+      "counter_epoch": "ce_...",
+      "period_key": "2026-08-01",
+      "user_id": 1,
+      "inbound_id": 1,
+      "from_upload_bytes": 1000,
+      "to_upload_bytes": 1500,
+      "from_download_bytes": 4000,
+      "to_download_bytes": 4800
+    }
+  ]
+}
+```
+
 Controller verifies:
 
-- no more than 500 items are included;
-- every report has a stable `report_id` for idempotent accounting;
+- no more than 1000 streams and 500 reports are included on V2, or 500 V1 items;
+- every report has a stable `report_id` for idempotent accounting, and V2 also
+  rejects duplicate checkpoint ranges even when the ID differs;
 - byte counters are non-negative;
 - a normal inbound belongs to the authenticated server, or a transparent-path
   report names the root inbound and a path whose derived processing server is
@@ -1412,8 +1460,9 @@ Controller verifies:
 - user is active;
 - user is allowed on that inbound.
 
-The response returns `accepted_report_ids` plus runtime policies only for users
-whose first authentication/decryption point is that server. Downstream shared
+The response returns `accepted_report_ids` for V1, or `protocol_version=2` with
+`stream_checkpoints` and `accepted_reports` for V2, plus runtime policies only
+for users whose first authentication/decryption point is that server. Downstream shared
 SS/SSH/WireGuard nodes receive no end-user quota lease and do not report the
 same bytes again.
 
@@ -1426,10 +1475,12 @@ counters. Checkpoints are Agent-local state and are not additional fields on
 this Controller request.
 
 Runtime policies carry `lease_bytes`, `reset_lease_bytes`, and
-`lease_enforced`. Controller sets `lease_enforced` only while this server
-still has a positive remaining lease. A zero remaining lease with
-`quota_state=active` keeps the global cap instead of rejecting the relay.
-They also carry `reset_mode`, `reset_day`, `reset_anchor`,
+`lease_enforced`. For a limited user Controller always sets
+`lease_enforced=true`. Effective cap is `used_baseline_bytes + max(lease_bytes, 0)`,
+so a zero remaining lease rejects new billable traffic instead of falling back
+to the global quota. Mixed-version Agents that lack `traffic_ledger_v2` receive
+a per-server `quota_state=quota_exceeded` shim when their lease is 0; the
+global period state is not changed. They also carry `reset_mode`, `reset_day`, `reset_anchor`,
 and `previous_period_key`. `reset_anchor` is an RFC3339Nano timestamp used by
 `anniversary_month` and `never`; `previous_period_key` tells Agent/core that a
 Controller-side reset-policy migration carried the old period into the current

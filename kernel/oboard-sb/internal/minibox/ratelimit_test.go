@@ -280,46 +280,20 @@ func TestExpiredRuntimePolicyResetsCountersOnlyOnce(t *testing.T) {
 	}
 }
 
-func TestZeroOfflineLeaseKeepsActiveQuotaRelay(t *testing.T) {
+func TestZeroOfflineLeaseRejectsNewBillableTraffic(t *testing.T) {
 	tracker := NewRateLimitTracker(RuntimeMetadata{RateLimits: RuntimeRateLimits{Users: map[string]RuntimeUserLimit{
-		"alice": {UserID: 7, Billable: true, TrafficLimitBytes: 100, UsedBaselineBytes: 4, LeaseEnforced: true, QuotaState: "active", EnforcementMode: "disconnect_and_reject"},
+		"alice": {UserID: 7, Billable: true, TrafficLimitBytes: 100, UsedBaselineBytes: 50, LeaseBytes: 0, LeaseEnforced: true, QuotaState: "active", EnforcementMode: "reject_new"},
 	}}})
 	state := tracker.stateForKey("user:alice")
-	if state.denied() {
-		t.Fatal("active quota with an empty remaining lease must not black-hole the relay")
+	if !state.denied() {
+		t.Fatal("limited user with lease=0 must deny new billable traffic")
 	}
 	client, server := net.Pipe()
 	defer client.Close()
 	wrapped := tracker.RoutedConnection(context.Background(), server, adapter.InboundContext{User: "alice"}, nil, nil)
 	tracked := baseTrackedConn(wrapped)
-	if tracked.closed.Load() || tracked.deny() {
-		t.Fatal("matching user connection should stay open while global quota remains")
-	}
-	done := make(chan error, 1)
-	go func() {
-		buf := make([]byte, 4)
-		n, err := wrapped.Read(buf)
-		if err != nil {
-			done <- err
-			return
-		}
-		if n != 4 || string(buf[:n]) != "ping" {
-			done <- errors.New("unexpected payload")
-			return
-		}
-		_, err = wrapped.Write([]byte("pong"))
-		done <- err
-	}()
-	if _, err := client.Write([]byte("ping")); err != nil {
-		t.Fatal(err)
-	}
-	buf := make([]byte, 4)
-	n, err := client.Read(buf)
-	if err != nil || n != 4 || string(buf) != "pong" {
-		t.Fatalf("relay copy failed n=%d err=%v payload=%q", n, err, buf)
-	}
-	if err := <-done; err != nil {
-		t.Fatal(err)
+	if !tracked.closed.Load() || !tracked.deny() {
+		t.Fatal("lease=0 must reject a new connection")
 	}
 }
 
@@ -343,6 +317,63 @@ func TestZeroOfflineLeaseStillHonorsGlobalQuotaAndExceededState(t *testing.T) {
 	state.addTraffic(6, 0)
 	if !state.denied() {
 		t.Fatal("a positive remaining lease must still cap below the global quota")
+	}
+}
+
+func TestZeroLeaseIsEnforcedBelowGlobalQuota(t *testing.T) {
+	tracker := NewRateLimitTracker(RuntimeMetadata{RateLimits: RuntimeRateLimits{Users: map[string]RuntimeUserLimit{
+		"alice": {UserID: 7, Billable: true, TrafficLimitBytes: 100, UsedBaselineBytes: 50, LeaseBytes: 0, LeaseEnforced: true, QuotaState: "active", EnforcementMode: "reject_new"},
+	}}})
+	state := tracker.stateForKey("user:alice")
+	if !state.denied() {
+		t.Fatal("limited user with lease=0 must deny new billable traffic")
+	}
+	if !state.deniedForConnection(false) {
+		t.Fatal("limited user with lease=0 must reject a new connection")
+	}
+	if state.deniedForConnection(true) {
+		t.Fatal("reject_new default must keep an already admitted connection")
+	}
+}
+
+func TestCounterEpochSurvivesPolicyRefreshAndChangesOnReset(t *testing.T) {
+	state := newRuntimeState("user:alice", "alice", "", RuntimeUserLimit{UserID: 7, Billable: true, PeriodKey: "2026-08"})
+	state.addTraffic(8, 2)
+	first, ok := state.snapshot()
+	if !ok || first.CounterEpoch == "" {
+		t.Fatalf("missing counter epoch: %#v", first)
+	}
+	state.updatePolicy(RuntimeUserLimit{UserID: 7, Billable: true, PeriodKey: "2026-08", SpeedLimitMbps: 20, LeaseEnforced: true, LeaseBytes: 12})
+	afterRefresh, ok := state.snapshot()
+	if !ok || afterRefresh.CounterEpoch != first.CounterEpoch || afterRefresh.Upload != 8 || afterRefresh.Download != 2 {
+		t.Fatalf("policy refresh changed epoch or counters: %#v", afterRefresh)
+	}
+	state.updatePolicy(RuntimeUserLimit{UserID: 7, Billable: true, PeriodKey: "2026-09"})
+	afterReset, ok := state.snapshot()
+	if ok {
+		t.Fatalf("reset counters should start empty: %#v", afterReset)
+	}
+	state.addTraffic(1, 0)
+	next, ok := state.snapshot()
+	if !ok || next.CounterEpoch == "" || next.CounterEpoch == first.CounterEpoch || next.Upload != 1 {
+		t.Fatalf("period reset did not mint a new epoch: %#v", next)
+	}
+}
+
+func TestStaleEpochAcknowledgementIsIgnored(t *testing.T) {
+	state := newRuntimeState("user:alice", "alice", "", RuntimeUserLimit{UserID: 7, Billable: true, PeriodKey: "2026-08", TrafficLimitBytes: 10})
+	state.addTraffic(6, 0)
+	first, _ := state.snapshot()
+	state.updatePolicy(RuntimeUserLimit{UserID: 7, Billable: true, PeriodKey: "2026-09", TrafficLimitBytes: 10})
+	state.addTraffic(4, 0)
+	state.acknowledge(TrafficCounterAcknowledgement{CounterEpoch: first.CounterEpoch, PeriodKey: "2026-09", Upload: 4})
+	if state.unacknowledged(state.currentConfig()) != 4 {
+		t.Fatalf("stale epoch ACK advanced the new counter: %d", state.unacknowledged(state.currentConfig()))
+	}
+	next, _ := state.snapshot()
+	state.acknowledge(TrafficCounterAcknowledgement{CounterEpoch: next.CounterEpoch, PeriodKey: "2026-09", Upload: 4})
+	if state.unacknowledged(state.currentConfig()) != 0 {
+		t.Fatal("matching epoch ACK did not advance the checkpoint")
 	}
 }
 

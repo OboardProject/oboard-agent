@@ -1,8 +1,10 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -146,5 +148,155 @@ func TestPostControllerJSONRejectsUnencodablePayload(t *testing.T) {
 	err := r.postControllerJSON(context.Background(), "/unused", map[string]any{"bad": make(chan int)}, nil, false)
 	if err == nil {
 		t.Fatal("expected JSON encoding error")
+	}
+}
+
+func TestCorruptTrafficStateDoesNotBecomeEmptyLedger(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "traffic-state.json")
+	if err := os.WriteFile(path, []byte("{not-json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runner := New(Config{StateDir: dir, AgentID: "agent-1"})
+	state := runner.loadTrafficState()
+	if !state.RecoveryRequired || state.Sync.Status != trafficStatusStateCorrupt {
+		t.Fatalf("corrupt state = %#v", state)
+	}
+	if len(state.PendingReports) != 0 || len(state.Last) != 0 {
+		t.Fatalf("corrupt state was treated as an empty ledger: %#v", state)
+	}
+}
+
+func TestMissingTrafficStateRequiresControllerReconciliation(t *testing.T) {
+	runner := New(Config{StateDir: t.TempDir(), AgentID: "agent-1"})
+	state := runner.loadTrafficState()
+	if !state.RecoveryRequired || state.Sync.Status != trafficStatusRecovering {
+		t.Fatalf("missing state = %#v", state)
+	}
+	changed := runner.observeTrafficSnapshotLocked(&state, []trafficSnapshotItem{{
+		Key: "user:7", Source: "core", CounterEpoch: "ce_1", UserID: 7, InboundID: 1, PeriodKey: "2026-08-01", Upload: 10, Download: 10,
+	}}, true)
+	if !changed {
+		t.Fatal("expected recovering observation to change state")
+	}
+	if len(state.PendingReports) != 0 {
+		t.Fatalf("missing state billed kernel totals: %#v", state.PendingReports)
+	}
+}
+
+func TestSameEpochCounterRegressionDoesNotBill(t *testing.T) {
+	runner := New(Config{StateDir: t.TempDir(), AgentID: "agent-1"})
+	state := runner.trafficStateLocked()
+	item := trafficSnapshotItem{Key: "user:7", Source: "core", CounterEpoch: "ce_1", UserID: 7, InboundID: 1, PeriodKey: "2026-08-01", Upload: 10, Download: 10}
+	runner.observeTrafficSnapshotLocked(state, []trafficSnapshotItem{item}, false)
+	item.Upload = 1
+	item.Download = 1
+	runner.observeTrafficSnapshotLocked(state, []trafficSnapshotItem{item}, false)
+	stream := state.Streams[trafficStreamID("core", "user:7")]
+	if stream == nil || stream.Status != trafficStatusCounterRegression {
+		t.Fatalf("regression stream = %#v", stream)
+	}
+	if len(state.PendingReports) != 0 {
+		t.Fatalf("regression billed traffic: %#v", state.PendingReports)
+	}
+}
+
+func TestTrafficRangeReportIDIsDeterministic(t *testing.T) {
+	report := &trafficPendingRange{StreamID: "ts_a", CounterEpoch: "ce_1", PeriodKey: "2026-08-01", FromUpload: 8, ToUpload: 10, FromDownload: 8, ToDownload: 10}
+	first := trafficRangeReportID("agent-1", report)
+	second := trafficRangeReportID("agent-1", report)
+	if first == "" || first != second || !strings.HasPrefix(first, "tr2_") {
+		t.Fatalf("report ids = %q %q", first, second)
+	}
+}
+
+func TestPersistBeforeReloadWritesPendingRange(t *testing.T) {
+	dir := t.TempDir()
+	runner := New(Config{StateDir: dir, AgentID: "agent-1"})
+	runner.lastKernelCapabilities = []string{trafficLedgerCapability}
+	runner.coreClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Path != "/traffic/snapshot" {
+			return &http.Response{StatusCode: http.StatusNotFound, Body: http.NoBody, Header: make(http.Header)}, nil
+		}
+		body, _ := json.Marshal(map[string]any{"items": []trafficSnapshotItem{{
+			Key: "user:7", CounterEpoch: "ce_1", Source: "core", UserID: 7, InboundID: 12, PeriodKey: "2026-08-01", Upload: 500, Download: 500,
+		}}})
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(body)), Header: make(http.Header)}, nil
+	})}
+	state := runner.trafficStateLocked()
+	state.RecoveryRequired = false
+	state.SchemaVersion = trafficStateSchemaV2
+	if err := runner.persistTrafficCheckpointBeforeRuntimeTransition(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := readTrafficStateFile(runner.trafficStatePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.PendingReports) != 1 {
+		t.Fatalf("pending after persist-before-reload = %#v", loaded.PendingReports)
+	}
+	for _, report := range loaded.PendingReports {
+		if report.FromUpload != 0 || report.ToUpload != 500 || report.FromDownload != 0 || report.ToDownload != 500 {
+			t.Fatalf("pending range = %#v", report)
+		}
+	}
+}
+
+func TestControllerCheckpointRecoveryDoesNotRebillFromZero(t *testing.T) {
+	runner := New(Config{StateDir: t.TempDir(), AgentID: "agent-1"})
+	state := &trafficLocalState{SchemaVersion: 2, Streams: map[string]*trafficStreamState{}, PendingReports: map[string]*trafficPendingRange{}, RecoveryRequired: true}
+	streamID := trafficStreamID("core", "user:7")
+	state.Streams[streamID] = &trafficStreamState{Source: "core", SnapshotKey: "user:7", CounterEpoch: "ce_1", PeriodKey: "2026-08-01", UserID: 7, ObservedUpload: 10, ObservedDownload: 10, Status: trafficStatusRecovering}
+	applyTrafficLedgerResponse(state, trafficReportResponse{
+		ProtocolVersion: 2,
+		StreamCheckpoints: []trafficStreamCheckpoint{{
+			Source: "core", StreamID: streamID, CounterEpoch: "ce_1", PeriodKey: "2026-08-01", AcceptedUpload: 8, AcceptedDownload: 8, Status: trafficStatusHealthy,
+		}},
+	})
+	runner.observeTrafficSnapshotLocked(state, []trafficSnapshotItem{{
+		Key: "user:7", Source: "core", CounterEpoch: "ce_1", UserID: 7, PeriodKey: "2026-08-01", Upload: 10, Download: 10,
+	}}, false)
+	if len(state.PendingReports) != 1 {
+		t.Fatalf("pending = %#v", state.PendingReports)
+	}
+	for _, report := range state.PendingReports {
+		if report.FromUpload != 8 || report.ToUpload != 10 || report.FromDownload != 8 || report.ToDownload != 10 {
+			t.Fatalf("recovered range = %#v", report)
+		}
+	}
+}
+
+func TestSameEpochPeriodMigrationKeepsAcceptedCheckpoint(t *testing.T) {
+	runner := New(Config{StateDir: t.TempDir(), AgentID: "agent-1"})
+	state := runner.trafficStateLocked()
+	state.RecoveryRequired = false
+	state.SchemaVersion = trafficStateSchemaV2
+	item := trafficSnapshotItem{Key: "user:7", Source: "core", CounterEpoch: "ce_1", UserID: 7, InboundID: 1, PeriodKey: "old-cycle", Upload: 100, Download: 100}
+	runner.observeTrafficSnapshotLocked(state, []trafficSnapshotItem{item}, false)
+	streamID := trafficStreamID("core", "user:7")
+	stream := state.Streams[streamID]
+	if stream == nil {
+		t.Fatal("missing stream")
+	}
+	stream.AcceptedUpload = 100
+	stream.AcceptedDownload = 100
+	stream.Status = trafficStatusHealthy
+	state.PendingReports = map[string]*trafficPendingRange{}
+	item.PeriodKey = "new-cycle"
+	item.Upload = 120
+	item.Download = 130
+	runner.observeTrafficSnapshotLocked(state, []trafficSnapshotItem{item}, false)
+	stream = state.Streams[streamID]
+	if stream == nil || stream.AcceptedUpload != 100 || stream.AcceptedDownload != 100 {
+		t.Fatalf("accepted reset on period migration: %#v", stream)
+	}
+	if len(state.PendingReports) != 1 {
+		t.Fatalf("pending = %#v", state.PendingReports)
+	}
+	for _, report := range state.PendingReports {
+		if report.FromUpload != 100 || report.ToUpload != 120 || report.PeriodKey != "new-cycle" {
+			t.Fatalf("migrated range = %#v", report)
+		}
 	}
 }

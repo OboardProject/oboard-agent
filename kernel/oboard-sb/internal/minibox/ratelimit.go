@@ -2,6 +2,8 @@ package minibox
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"io"
 	"net"
@@ -82,6 +84,7 @@ type runtimeConfig struct {
 }
 
 type runtimeCounters struct {
+	epoch                string
 	upload               atomic.Int64
 	download             atomic.Int64
 	acknowledgedUpload   atomic.Int64
@@ -101,21 +104,35 @@ type runtimeUsagePeriod struct {
 }
 
 type TrafficCounter struct {
-	Key       string `json:"key"`
-	User      string `json:"user"`
-	Inbound   string `json:"inbound"`
-	UserID    int64  `json:"user_id"`
-	InboundID int64  `json:"inbound_id,omitempty"`
-	PathID    int64  `json:"path_id,omitempty"`
-	PeriodKey string `json:"period_key,omitempty"`
-	Upload    int64  `json:"upload_bytes"`
-	Download  int64  `json:"download_bytes"`
+	Key          string `json:"key"`
+	CounterEpoch string `json:"counter_epoch,omitempty"`
+	User         string `json:"user"`
+	Inbound      string `json:"inbound"`
+	UserID       int64  `json:"user_id"`
+	InboundID    int64  `json:"inbound_id,omitempty"`
+	PathID       int64  `json:"path_id,omitempty"`
+	PeriodKey    string `json:"period_key,omitempty"`
+	Upload       int64  `json:"upload_bytes"`
+	Download     int64  `json:"download_bytes"`
 }
 
 type TrafficCounterAcknowledgement struct {
-	PeriodKey string `json:"period_key"`
-	Upload    int64  `json:"upload_bytes"`
-	Download  int64  `json:"download_bytes"`
+	CounterEpoch string `json:"counter_epoch,omitempty"`
+	PeriodKey    string `json:"period_key"`
+	Upload       int64  `json:"upload_bytes"`
+	Download     int64  `json:"download_bytes"`
+}
+
+func newCounterEpoch() string {
+	var raw [16]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "ce_invalid"
+	}
+	return "ce_" + base64.RawURLEncoding.EncodeToString(raw[:])
+}
+
+func newRuntimeCounters() *runtimeCounters {
+	return &runtimeCounters{epoch: newCounterEpoch()}
 }
 
 func NewRateLimitTracker(metadata RuntimeMetadata) *RateLimitTracker {
@@ -259,7 +276,7 @@ func newRuntimeStateWithClock(key, user, inbound string, policy RuntimeUserLimit
 }
 
 func (s *runtimeState) storePolicyLocked(policy RuntimeUserLimit, resetTraffic bool) *runtimeConfig {
-	counters := &runtimeCounters{}
+	counters := newRuntimeCounters()
 	if current := s.config.Load(); !resetTraffic && current != nil && current.counters != nil {
 		counters = current.counters
 	}
@@ -316,7 +333,7 @@ func (s *runtimeState) loadedConfig() *runtimeConfig {
 			return config
 		}
 	}
-	return &runtimeConfig{counters: &runtimeCounters{}}
+	return &runtimeConfig{counters: newRuntimeCounters()}
 }
 
 func (s *runtimeState) currentPolicy() RuntimeUserLimit {
@@ -409,11 +426,26 @@ func runtimeConfigDenied(config *runtimeConfig, unacknowledged int64) bool {
 		return false
 	}
 	used := policy.UsedBaselineBytes + unacknowledged
-	capBytes := policy.TrafficLimitBytes
-	if policy.LeaseEnforced && policy.LeaseBytes > 0 && policy.UsedBaselineBytes+policy.LeaseBytes < capBytes {
-		capBytes = policy.UsedBaselineBytes + policy.LeaseBytes
+	return used >= runtimeEffectiveCap(policy)
+}
+
+func runtimeEffectiveCap(policy RuntimeUserLimit) int64 {
+	if policy.TrafficLimitBytes <= 0 {
+		return 0
 	}
-	return used >= capBytes
+	capBytes := policy.TrafficLimitBytes
+	if !policy.LeaseEnforced {
+		return capBytes
+	}
+	leaseBytes := policy.LeaseBytes
+	if leaseBytes < 0 {
+		leaseBytes = 0
+	}
+	leaseCap := policy.UsedBaselineBytes + leaseBytes
+	if leaseCap < capBytes {
+		return leaseCap
+	}
+	return capBytes
 }
 
 func normalizeCredentialStatus(value string) string {
@@ -442,6 +474,9 @@ func (s *runtimeState) acknowledge(checkpoint TrafficCounterAcknowledgement) {
 	defer s.periodMu.Unlock()
 	config := s.loadedConfig()
 	if config.policy.PeriodKey != checkpoint.PeriodKey || config.counters == nil {
+		return
+	}
+	if checkpoint.CounterEpoch != "" && checkpoint.CounterEpoch != config.counters.epoch {
 		return
 	}
 	upload := runtimeMinInt64(checkpoint.Upload, config.counters.upload.Load())
@@ -518,7 +553,7 @@ func (s *runtimeState) snapshot() (TrafficCounter, bool) {
 		return TrafficCounter{}, false
 	}
 	policy := config.policy
-	return TrafficCounter{Key: s.key, User: s.user, Inbound: s.inbound, UserID: policy.UserID, InboundID: policy.InboundID, PathID: policy.PathID, PeriodKey: policy.PeriodKey, Upload: upload, Download: download}, true
+	return TrafficCounter{Key: s.key, CounterEpoch: config.counters.epoch, User: s.user, Inbound: s.inbound, UserID: policy.UserID, InboundID: policy.InboundID, PathID: policy.PathID, PeriodKey: policy.PeriodKey, Upload: upload, Download: download}, true
 }
 
 func (t *RateLimitTracker) Enabled() bool {
