@@ -997,9 +997,32 @@ func validSSHInboundHostname(host string) bool {
 	return true
 }
 
+var blockedSSHDestinationPrefixes = func() []netip.Prefix {
+	prefixes := []string{
+		"0.0.0.0/8", "100.64.0.0/10", "192.0.0.0/24", "192.0.2.0/24", "192.88.99.0/24",
+		"198.18.0.0/15", "198.51.100.0/24", "203.0.113.0/24", "240.0.0.0/4",
+		"2001:2::/48", "2001:10::/28", "2001:db8::/32",
+	}
+	out := make([]netip.Prefix, 0, len(prefixes))
+	for _, raw := range prefixes {
+		prefix := netip.MustParsePrefix(raw)
+		prefix = prefix.Masked()
+		out = append(out, prefix)
+	}
+	return out
+}()
+
 func isPermittedSSHDestination(address netip.Addr) bool {
 	address = address.Unmap()
-	return address.IsValid() && address.IsGlobalUnicast() && !address.IsPrivate() && !address.IsLoopback() && !address.IsLinkLocalUnicast() && !address.IsLinkLocalMulticast() && !address.IsMulticast() && !address.IsUnspecified()
+	if !address.IsValid() || !address.IsGlobalUnicast() || address.IsPrivate() || address.IsLoopback() || address.IsUnspecified() || address.IsLinkLocalUnicast() || address.IsLinkLocalMulticast() || address.IsMulticast() {
+		return false
+	}
+	for _, prefix := range blockedSSHDestinationPrefixes {
+		if prefix.Contains(address) {
+			return false
+		}
+	}
+	return true
 }
 
 func dialPermittedSSHAddresses(ctx context.Context, addresses []netip.Addr, port uint32) (net.Conn, error) {

@@ -347,6 +347,11 @@ func validateManagedPath(field, value string) error {
 		}
 	case "core_binary":
 		base := filepath.Base(cleaned)
+		// sing-box basename is retained as a one-release compatibility for
+		// hosts that still reference the upstream binary name after the
+		// rename to oboard-sb. New installs must use oboard-sb; remove the
+		// sing-box alternative after the first stable release with enforced
+		// oldest direct-upgrade version.
 		if base != "oboard-sb" && base != "sing-box" {
 			return fmt.Errorf("core_binary base name must be oboard-sb or sing-box")
 		}
@@ -363,8 +368,13 @@ func validateManagedPath(field, value string) error {
 // allowedCoreBinaryDir reports whether a directory is an acceptable location
 // for the root-executed kernel binary.
 func allowedCoreBinaryDir(dir string) bool {
+	dir = filepath.Clean(strings.TrimSpace(dir))
 	for _, allowed := range []string{"/usr/local/bin", "/usr/local/sbin", "/usr/bin", "/usr/sbin", "/bin", "/sbin", "/opt/oboard"} {
+		allowed = filepath.Clean(allowed)
 		if dir == allowed {
+			return true
+		}
+		if allowed == "/opt/oboard" && strings.HasPrefix(dir, allowed+string(filepath.Separator)) {
 			return true
 		}
 	}
@@ -422,7 +432,7 @@ func ValidateManagedCommand(field, value string) error {
 }
 
 func (r *Runner) lowOverheadTransport() *http.Transport {
-	return lowOverheadTransportWithClock(r.clock.Now)
+	return lowOverheadTransportWithClock(time.Now)
 }
 
 func lowOverheadTransport() *http.Transport {
@@ -430,6 +440,13 @@ func lowOverheadTransport() *http.Transport {
 }
 
 func lowOverheadTransportWithClock(now func() time.Time) *http.Transport {
+	if now == nil {
+		now = time.Now
+	}
+	// TLS verification must use wall-clock time. The logical/runtime clock is
+	// only for trusted_forward/mieru/replay windows and must never affect
+	// certificate validity checks; using a skewed logical clock would accept
+	// expired certificates or reject valid ones.
 	return &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
 		MaxIdleConns:          2,
@@ -439,7 +456,7 @@ func lowOverheadTransportWithClock(now func() time.Time) *http.Transport {
 		TLSHandshakeTimeout:   10 * time.Second,
 		ResponseHeaderTimeout: 20 * time.Second,
 		DisableCompression:    true,
-		TLSClientConfig:       &tls.Config{MinVersion: tls.VersionTLS12, Time: now},
+		TLSClientConfig:       &tls.Config{MinVersion: tls.VersionTLS12, Time: time.Now},
 	}
 }
 
@@ -534,7 +551,7 @@ func (r *Runner) connect(ctx context.Context) error {
 		return err
 	}
 	header := http.Header{"Authorization": []string{"Bearer " + cfg.AgentToken}, "X-Agent-ID": []string{cfg.AgentID}}
-	dialer := websocket.Dialer{ReadBufferSize: 1024, WriteBufferSize: 1024, EnableCompression: false, HandshakeTimeout: 10 * time.Second, TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, Time: r.clock.Now}}
+	dialer := websocket.Dialer{ReadBufferSize: 1024, WriteBufferSize: 1024, EnableCompression: false, HandshakeTimeout: 10 * time.Second, TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, Time: time.Now}}
 	conn, _, err := dialer.DialContext(ctx, url, header)
 	if err != nil {
 		return err
@@ -1169,10 +1186,16 @@ func updateRepoAllowed(repo string) bool {
 	return allowed[repo]
 }
 
+func isLocalSecurityField(key string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(key))
+	normalized = strings.ReplaceAll(normalized, "-", "")
+	normalized = strings.ReplaceAll(normalized, "_", "")
+	return strings.Contains(normalized, "localsecurity")
+}
+
 func (r *Runner) updateAgentConfig(patch Config, fields map[string]json.RawMessage) (map[string]any, error) {
 	for key := range fields {
-		lower := strings.ToLower(strings.TrimSpace(key))
-		if strings.Contains(lower, "local_security") || strings.Contains(lower, "local-security") {
+		if isLocalSecurityField(key) {
 			return map[string]any{"message": "agent config update rejected"}, errors.New("update_agent_config cannot modify local-security.json")
 		}
 	}

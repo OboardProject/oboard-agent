@@ -341,6 +341,12 @@ func (r *Runner) resolveManagedAssetValue(value any, desired map[string]model.Ma
 			return nil, errors.New("invalid managed asset placeholder")
 		}
 		kind := parts[0]
+		// The canonical kind is routing_rule_set; the hyphenated form
+		// routing-rule-set was emitted by an early controller prototype and
+		// is retained for one release window. New configs must use the
+		// underscore form; remove this branch after the first stable release
+		// that no longer emits the hyphenated literal (requires oldest
+		// direct-upgrade version enforcement).
 		if kind == "routing-rule-set" {
 			kind = "routing_rule_set"
 		}

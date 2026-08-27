@@ -80,6 +80,9 @@ func (r *Runner) validateRemoteExecPayload(payload model.RemoteExecTaskPayload) 
 	if strings.TrimSpace(payload.RequestID) == "" {
 		return errors.New("request_id is required")
 	}
+	if len(payload.RequestID) > 128 {
+		return errors.New("request_id exceeds limit")
+	}
 	if payload.ServerID != r.Config().ServerID && r.Config().ServerID != 0 {
 		return fmt.Errorf("payload server_id %d does not match enrolled server", payload.ServerID)
 	}
@@ -93,6 +96,16 @@ func (r *Runner) validateRemoteExecPayload(payload model.RemoteExecTaskPayload) 
 	if len(cwd) > remoteExecMaxCwd {
 		return errors.New("cwd exceeds limit")
 	}
+	if !filepath.IsAbs(cwd) {
+		return errors.New("cwd must be an absolute path")
+	}
+	if strings.Contains(cwd, "..") {
+		return errors.New("cwd must not contain dot-dot segments")
+	}
+	cleaned := filepath.Clean(cwd)
+	if cleaned != cwd {
+		return errors.New("cwd must be a cleaned absolute path")
+	}
 	switch payload.Command.Mode {
 	case model.RemoteExecModeArgv:
 		if len(payload.Command.Argv) == 0 || len(payload.Command.Argv) > remoteExecMaxArgv {
@@ -100,8 +113,14 @@ func (r *Runner) validateRemoteExecPayload(payload model.RemoteExecTaskPayload) 
 		}
 		total := 0
 		for _, arg := range payload.Command.Argv {
+			if len(arg) == 0 {
+				return errors.New("argv item is empty")
+			}
 			if len(arg) > remoteExecMaxArgBytes {
 				return errors.New("argv item exceeds limit")
+			}
+			if strings.Contains(arg, "\x00") {
+				return errors.New("argv item contains null byte")
 			}
 			total += len(arg)
 		}
@@ -109,8 +128,12 @@ func (r *Runner) validateRemoteExecPayload(payload model.RemoteExecTaskPayload) 
 			return errors.New("argv total exceeds limit")
 		}
 	case model.RemoteExecModeShell:
-		if strings.TrimSpace(payload.Command.Shell) == "" || len(payload.Command.Shell) > remoteExecMaxShell {
+		shell := strings.TrimSpace(payload.Command.Shell)
+		if shell == "" || len(shell) > remoteExecMaxShell {
 			return errors.New("shell command exceeds limit")
+		}
+		if strings.Contains(shell, "\x00") {
+			return errors.New("shell command contains null byte")
 		}
 	default:
 		return errors.New("unsupported remote exec mode")

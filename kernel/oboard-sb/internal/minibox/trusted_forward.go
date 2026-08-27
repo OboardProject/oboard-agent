@@ -329,6 +329,12 @@ func validTrustedForwardMAC(payload, received, key []byte) bool {
 	mac := hmac.New(sha256.New, key)
 	_, _ = mac.Write(payload)
 	expected := mac.Sum(nil)
+	if len(received) != trustedForwardTCPMACSize && len(received) != trustedForwardUDPMACSize && len(received) != len(expected) {
+		// Allow only the two truncated sizes and the full size to prevent
+		// downgrade to 1-byte MAC guesses; truncated 12/16 bytes still
+		// 96/128-bit security which is the intended wire format.
+		return false
+	}
 	return len(received) <= len(expected) && hmac.Equal(received, expected[:len(received)])
 }
 
@@ -351,16 +357,17 @@ func (r *trustedForwardReceiver) acceptNonce(nonce [16]byte) bool {
 	if r.nonces == nil {
 		r.nonces = make(map[[16]byte]time.Time)
 	}
+	// Proactively evict expired nonces on every accept to bound memory and
+	// prevent an attacker from filling the map with fresh nonces within the
+	// skew window.
+	cutoff := now.Add(-time.Duration(r.config.MaxClockSkewSeconds) * time.Second)
+	for key, seenAt := range r.nonces {
+		if seenAt.Before(cutoff) {
+			delete(r.nonces, key)
+		}
+	}
 	if len(r.nonces) >= trustedForwardMaxSessions {
-		cutoff := now.Add(-time.Duration(r.config.MaxClockSkewSeconds) * time.Second)
-		for key, seenAt := range r.nonces {
-			if seenAt.Before(cutoff) {
-				delete(r.nonces, key)
-			}
-		}
-		if len(r.nonces) >= trustedForwardMaxSessions {
-			return false
-		}
+		return false
 	}
 	r.nonces[nonce] = now
 	return true
