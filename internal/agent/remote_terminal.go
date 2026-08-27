@@ -10,7 +10,6 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/creack/pty"
@@ -28,6 +27,13 @@ const (
 	interactiveAbsoluteTTL = time.Hour
 	interactiveMaxMessage  = 64 << 10
 	interactiveMaxSessions = 2
+
+	interactiveReasonPTYStartFailed      = "pty_start_failed"
+	interactiveReasonURLFailed           = "interactive_url_failed"
+	interactiveReasonWebsocketDialFailed = "websocket_dial_failed"
+	interactiveReasonSessionLimit        = "session_limit"
+	interactiveReasonPrepareInvalid      = "prepare_invalid"
+	interactiveReasonLocalGateDenied     = "agent_local_gate_denied"
 )
 
 type terminalSession struct {
@@ -43,39 +49,39 @@ type terminalSession struct {
 
 func (r *Runner) handleInteractivePrepare(env model.InteractivePrepareEnvelope) error {
 	if env.SignatureVersion != 1 {
-		return fmt.Errorf("unsupported interactive signature_version %d", env.SignatureVersion)
+		return r.failInteractivePrepare(env.SessionID, interactiveReasonPrepareInvalid, fmt.Errorf("unsupported interactive signature_version %d", env.SignatureVersion))
 	}
 	if env.Kind != "terminal" {
-		return errors.New("unsupported interactive kind")
+		return r.failInteractivePrepare(env.SessionID, interactiveReasonPrepareInvalid, errors.New("unsupported interactive kind"))
 	}
 	if !r.localGateAllows("remote_terminal") {
-		return errors.New("agent_local_gate_denied")
+		return r.failInteractivePrepare(env.SessionID, interactiveReasonLocalGateDenied, errors.New("agent_local_gate_denied"))
 	}
 	serverID := r.Config().ServerID
 	if serverID > 0 && env.ServerID != serverID {
-		return fmt.Errorf("interactive session belongs to server %d, enrolled server is %d", env.ServerID, serverID)
+		return r.failInteractivePrepare(env.SessionID, interactiveReasonPrepareInvalid, fmt.Errorf("interactive session belongs to server %d, enrolled server is %d", env.ServerID, serverID))
 	}
 	issued, err := parseInteractiveTime(env.IssuedAt)
 	expires, expErr := parseInteractiveTime(env.ExpiresAt)
 	if err != nil || expErr != nil {
-		return errors.New("invalid interactive timestamps")
+		return r.failInteractivePrepare(env.SessionID, interactiveReasonPrepareInvalid, errors.New("invalid interactive timestamps"))
 	}
 	now := time.Now().UTC()
 	if expires.Before(now) {
-		return errors.New("interactive prepare expired")
+		return r.failInteractivePrepare(env.SessionID, interactiveReasonPrepareInvalid, errors.New("interactive prepare expired"))
 	}
 	if issued.After(now.Add(30 * time.Second)) {
-		return errors.New("interactive prepare issued in the future")
+		return r.failInteractivePrepare(env.SessionID, interactiveReasonPrepareInvalid, errors.New("interactive prepare issued in the future"))
 	}
 	secret := security.HashSecret(r.Config().AgentToken)
 	if !security.VerifyInteractiveEnvelope(secret, security.InteractiveEnvelope{
 		Type: env.Type, ServerID: env.ServerID, SessionID: env.SessionID, Nonce: env.Nonce,
 		IssuedAt: env.IssuedAt, ExpiresAt: env.ExpiresAt, Kind: env.Kind, Cols: env.Cols, Rows: env.Rows,
 	}, env.Signature) {
-		return errors.New("interactive prepare signature verification failed")
+		return r.failInteractivePrepare(env.SessionID, interactiveReasonPrepareInvalid, errors.New("interactive prepare signature verification failed"))
 	}
 	if !r.rememberInteractiveNonce(env.Nonce) {
-		return errors.New("interactive prepare nonce replayed")
+		return r.failInteractivePrepare(env.SessionID, interactiveReasonPrepareInvalid, errors.New("interactive prepare nonce replayed"))
 	}
 	cols, rows := env.Cols, env.Rows
 	if cols <= 0 || cols > interactiveMaxCols {
@@ -118,18 +124,42 @@ func (r *Runner) rememberInteractiveNonce(nonce string) bool {
 	return true
 }
 
-func (r *Runner) runTerminalSession(env model.InteractivePrepareEnvelope, cols, rows int, secret string) {
-	r.interactiveMu.Lock()
-	if r.terminalSessions == nil {
-		r.terminalSessions = map[string]*terminalSession{}
+func (r *Runner) failInteractivePrepare(sessionID, reason string, err error) error {
+	detail := ""
+	if err != nil {
+		detail = err.Error()
 	}
-	if len(r.terminalSessions) >= interactiveMaxSessions {
-		r.interactiveMu.Unlock()
-		log.Printf("interactive session rejected: session limit")
+	r.reportInteractiveFailed(sessionID, reason, detail)
+	if err != nil {
+		return err
+	}
+	return errors.New(reason)
+}
+
+func (r *Runner) reportInteractiveFailed(sessionID, reason, detail string) {
+	if strings.TrimSpace(sessionID) == "" || strings.TrimSpace(reason) == "" {
 		return
 	}
-	r.interactiveMu.Unlock()
+	log.Printf("interactive failed session=%s reason=%s detail=%s", sessionID, reason, detail)
+	payload := map[string]any{
+		"type": "interactive_failed", "session_id": sessionID, "reason": reason, "ts": time.Now().UTC(),
+	}
+	if detail != "" {
+		payload["detail"] = detail
+	}
+	r.sendControl(payload)
+}
 
+func (r *Runner) reportInteractiveReady(sessionID string) {
+	if strings.TrimSpace(sessionID) == "" {
+		return
+	}
+	r.sendControl(map[string]any{
+		"type": "interactive_ready", "session_id": sessionID, "ts": time.Now().UTC(),
+	})
+}
+
+func startInteractivePTY(cols, rows int) (*os.File, *exec.Cmd, error) {
 	shell := "/bin/bash"
 	if _, err := exec.LookPath(shell); err != nil {
 		shell = "/bin/sh"
@@ -141,16 +171,34 @@ func (r *Runner) runTerminalSession(env model.InteractivePrepareEnvelope, cols, 
 	cmd := exec.Command(shell)
 	cmd.Dir = cwd
 	cmd.Env = append(remoteExecEnv(), "TERM=xterm-256color", "COLORTERM=truecolor")
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// pty.StartWithSize sets Setsid and Setctty. Do not also set Setpgid:
+	// a session leader cannot change its process group (EPERM).
 	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
+	return ptmx, cmd, err
+}
+
+func (r *Runner) runTerminalSession(env model.InteractivePrepareEnvelope, cols, rows int, secret string) {
+	r.interactiveMu.Lock()
+	if r.terminalSessions == nil {
+		r.terminalSessions = map[string]*terminalSession{}
+	}
+	if len(r.terminalSessions) >= interactiveMaxSessions {
+		r.interactiveMu.Unlock()
+		r.reportInteractiveFailed(env.SessionID, interactiveReasonSessionLimit, "interactive session rejected: session limit")
+		return
+	}
+	r.interactiveMu.Unlock()
+
+	ptmx, cmd, err := startInteractivePTY(cols, rows)
 	if err != nil {
-		log.Printf("interactive pty start failed: %v", err)
+		r.reportInteractiveFailed(env.SessionID, interactiveReasonPTYStartFailed, err.Error())
 		return
 	}
 	wsURL, err := security.ControllerInteractiveWebSocketURL(r.Config().ControllerURL, env.SessionID, version.IsDev(), r.Config().AllowInsecureController)
 	if err != nil {
 		_ = ptmx.Close()
 		killProcessGroup(cmd)
+		r.reportInteractiveFailed(env.SessionID, interactiveReasonURLFailed, err.Error())
 		return
 	}
 	header := http.Header{
@@ -161,9 +209,9 @@ func (r *Runner) runTerminalSession(env model.InteractivePrepareEnvelope, cols, 
 	dialer := websocket.Dialer{ReadBufferSize: 4096, WriteBufferSize: 4096, EnableCompression: false, HandshakeTimeout: 10 * time.Second}
 	conn, _, err := dialer.Dial(wsURL, header)
 	if err != nil {
-		log.Printf("interactive websocket dial failed: %v", err)
 		_ = ptmx.Close()
 		killProcessGroup(cmd)
+		r.reportInteractiveFailed(env.SessionID, interactiveReasonWebsocketDialFailed, err.Error())
 		return
 	}
 	conn.SetReadLimit(interactiveMaxMessage)
@@ -191,6 +239,7 @@ func (r *Runner) runTerminalSession(env model.InteractivePrepareEnvelope, cols, 
 		}
 	}()
 	_ = conn.WriteJSON(map[string]any{"type": "ready"})
+	r.reportInteractiveReady(env.SessionID)
 	for {
 		deadline := session.last.Add(interactiveIdleTimeout)
 		absolute := session.created.Add(interactiveAbsoluteTTL)

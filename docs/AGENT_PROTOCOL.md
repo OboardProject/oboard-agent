@@ -1583,12 +1583,27 @@ not use TCP/22, and does not occupy the single Agent task slot.
 Control-channel messages (signed HMAC, 60s prepare TTL):
 
 - `interactive_prepare` — Agent validates signature, server_id, nonce, TTL, and
-  the local security gate, then dials `/api/v1/agent/interactive/{session_id}`
-  with `X-OBoard-Interactive-Proof` and starts a PTY (`/bin/bash` then `/bin/sh`).
+  the local security gate, then starts a PTY (`/bin/bash` then `/bin/sh`) and
+  dials `/api/v1/agent/interactive/{session_id}` with
+  `X-OBoard-Interactive-Proof`. PTY start uses the PTY library session
+  (`Setsid`/`Setctty`) and must not also set `Setpgid`.
+- `interactive_ready` — Agent → Controller after the PTY is up and the reverse
+  WebSocket is connected. Controller cancels the 20s prepare timeout. The Agent
+  also writes `{"type":"ready"}` on the reverse WebSocket; the browser shows
+  connected only after that message.
+- `interactive_failed` — Agent → Controller when PTY start, interactive URL
+  construction, reverse WebSocket dial, session-limit, local-gate, or prepare
+  validation fails. Payload is `{session_id, reason, detail?}`. Controller
+  deletes the session, writes `{"type":"error","reason":"...","detail":"..."}`
+  to the browser if connected, and sends `interactive_close`.
 - `interactive_close` — Agent closes the PTY, signals the process group, and
   waits then SIGKILLs leftovers.
 - `remote_exec_cancel` — best-effort cancel of an in-flight `remote_exec` by
   `request_id`.
+
+If the Agent does not connect the reverse WebSocket or send `interactive_ready`
+within 20 seconds, Controller closes the session with `reason=prepare_timeout`
+so a failed prepare cannot occupy a terminal slot.
 
 The Agent WebSocket reader is decoupled from the single-slot task worker so
 prepare/close/cancel/heartbeat continue while a deployment is running.

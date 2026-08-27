@@ -131,6 +131,8 @@ type Runner struct {
 	interactiveMu              sync.Mutex
 	terminalSessions           map[string]*terminalSession
 	interactiveNonces          map[string]time.Time
+	controlMu                  sync.Mutex
+	controlSend                func(payload any, wait bool) error
 }
 
 const (
@@ -212,6 +214,22 @@ func (r *Runner) Config() Config {
 func (r *Runner) storeConfig(cfg Config) {
 	copy := cfg
 	r.config.Store(&copy)
+}
+
+func (r *Runner) setControlSend(send func(payload any, wait bool) error) {
+	r.controlMu.Lock()
+	r.controlSend = send
+	r.controlMu.Unlock()
+}
+
+func (r *Runner) sendControl(payload any) {
+	r.controlMu.Lock()
+	send := r.controlSend
+	r.controlMu.Unlock()
+	if send == nil {
+		return
+	}
+	_ = send(payload, false)
 }
 
 func (r *Runner) stateDir() string {
@@ -587,6 +605,8 @@ func (r *Runner) connect(ctx context.Context) error {
 			return connectionCtx.Err()
 		}
 	}
+	r.setControlSend(writeMessage)
+	defer r.setControlSend(nil)
 	if err := writeMessage(map[string]any{"type": "health_report", "health_report": r.Probe(false)}, false); err != nil {
 		return err
 	}
@@ -790,7 +810,7 @@ func (r *Runner) connect(ctx context.Context) error {
 				continue
 			}
 			if err := r.handleInteractivePrepare(env); err != nil {
-				log.Printf("interactive_prepare rejected: %v", err)
+				log.Printf("interactive_prepare rejected session=%s: %v", env.SessionID, err)
 			}
 		case "interactive_close":
 			if typed.SessionID != "" {
