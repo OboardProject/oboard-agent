@@ -1426,7 +1426,10 @@ counters. Checkpoints are Agent-local state and are not additional fields on
 this Controller request.
 
 Runtime policies carry `lease_bytes`, `reset_lease_bytes`, and
-`lease_enforced`. They also carry `reset_mode`, `reset_day`, `reset_anchor`,
+`lease_enforced`. Controller sets `lease_enforced` only while this server
+still has a positive remaining lease. A zero remaining lease with
+`quota_state=active` keeps the global cap instead of rejecting the relay.
+They also carry `reset_mode`, `reset_day`, `reset_anchor`,
 and `previous_period_key`. `reset_anchor` is an RFC3339Nano timestamp used by
 `anniversary_month` and `never`; `previous_period_key` tells Agent/core that a
 Controller-side reset-policy migration carried the old period into the current

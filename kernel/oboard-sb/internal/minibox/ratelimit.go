@@ -410,7 +410,7 @@ func runtimeConfigDenied(config *runtimeConfig, unacknowledged int64) bool {
 	}
 	used := policy.UsedBaselineBytes + unacknowledged
 	capBytes := policy.TrafficLimitBytes
-	if policy.LeaseEnforced && policy.UsedBaselineBytes+policy.LeaseBytes < capBytes {
+	if policy.LeaseEnforced && policy.LeaseBytes > 0 && policy.UsedBaselineBytes+policy.LeaseBytes < capBytes {
 		capBytes = policy.UsedBaselineBytes + policy.LeaseBytes
 	}
 	return used >= capBytes

@@ -249,6 +249,18 @@ func TestSSHInboundAcknowledgementPreventsBaselineDoubleCount(t *testing.T) {
 	}
 }
 
+func TestSSHInboundZeroLeaseKeepsActiveQuota(t *testing.T) {
+	counter := &sshInboundCounter{}
+	counter.setPolicy(model.TrafficRuntimePolicy{UserID: 7, Billable: true, TrafficLimitBytes: 100, UsedBaselineBytes: 4, LeaseEnforced: true, QuotaState: "active"})
+	if counter.quotaExceeded() {
+		t.Fatal("active SSH quota with an empty remaining lease must not reject transfers")
+	}
+	counter.setPolicy(model.TrafficRuntimePolicy{UserID: 7, Billable: true, TrafficLimitBytes: 10, UsedBaselineBytes: 10, LeaseEnforced: true, QuotaState: "active"})
+	if !counter.quotaExceeded() {
+		t.Fatal("empty SSH lease must still reject once the global quota is consumed")
+	}
+}
+
 func TestSSHInboundQuotaAggregatesSameUserAcrossInbounds(t *testing.T) {
 	usage := &sshInboundUserUsage{periods: map[string]*sshInboundUsagePeriod{}}
 	first := &sshInboundCounter{usage: usage}

@@ -280,12 +280,69 @@ func TestExpiredRuntimePolicyResetsCountersOnlyOnce(t *testing.T) {
 	}
 }
 
-func TestZeroOfflineLeaseRejectsTraffic(t *testing.T) {
+func TestZeroOfflineLeaseKeepsActiveQuotaRelay(t *testing.T) {
 	tracker := NewRateLimitTracker(RuntimeMetadata{RateLimits: RuntimeRateLimits{Users: map[string]RuntimeUserLimit{
-		"alice": {UserID: 7, Billable: true, TrafficLimitBytes: 100, LeaseEnforced: true},
+		"alice": {UserID: 7, Billable: true, TrafficLimitBytes: 100, UsedBaselineBytes: 4, LeaseEnforced: true, QuotaState: "active", EnforcementMode: "disconnect_and_reject"},
 	}}})
-	if !tracker.stateForKey("user:alice").denied() {
-		t.Fatal("zero enforced lease must not fall back to the full account quota")
+	state := tracker.stateForKey("user:alice")
+	if state.denied() {
+		t.Fatal("active quota with an empty remaining lease must not black-hole the relay")
+	}
+	client, server := net.Pipe()
+	defer client.Close()
+	wrapped := tracker.RoutedConnection(context.Background(), server, adapter.InboundContext{User: "alice"}, nil, nil)
+	tracked := baseTrackedConn(wrapped)
+	if tracked.closed.Load() || tracked.deny() {
+		t.Fatal("matching user connection should stay open while global quota remains")
+	}
+	done := make(chan error, 1)
+	go func() {
+		buf := make([]byte, 4)
+		n, err := wrapped.Read(buf)
+		if err != nil {
+			done <- err
+			return
+		}
+		if n != 4 || string(buf[:n]) != "ping" {
+			done <- errors.New("unexpected payload")
+			return
+		}
+		_, err = wrapped.Write([]byte("pong"))
+		done <- err
+	}()
+	if _, err := client.Write([]byte("ping")); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 4)
+	n, err := client.Read(buf)
+	if err != nil || n != 4 || string(buf) != "pong" {
+		t.Fatalf("relay copy failed n=%d err=%v payload=%q", n, err, buf)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestZeroOfflineLeaseStillHonorsGlobalQuotaAndExceededState(t *testing.T) {
+	exhausted := NewRateLimitTracker(RuntimeMetadata{RateLimits: RuntimeRateLimits{Users: map[string]RuntimeUserLimit{
+		"alice": {UserID: 7, Billable: true, TrafficLimitBytes: 10, UsedBaselineBytes: 10, LeaseEnforced: true, QuotaState: "active"},
+	}}})
+	if !exhausted.stateForKey("user:alice").denied() {
+		t.Fatal("empty lease must still deny once the global quota is consumed")
+	}
+	marked := NewRateLimitTracker(RuntimeMetadata{RateLimits: RuntimeRateLimits{Users: map[string]RuntimeUserLimit{
+		"alice": {UserID: 7, Billable: true, TrafficLimitBytes: 100, UsedBaselineBytes: 4, LeaseEnforced: true, QuotaState: "quota_exceeded", EnforcementMode: "disconnect_and_reject"},
+	}}})
+	if !marked.stateForKey("user:alice").denied() {
+		t.Fatal("quota_exceeded must still deny even when the remaining lease is empty")
+	}
+	limited := NewRateLimitTracker(RuntimeMetadata{RateLimits: RuntimeRateLimits{Users: map[string]RuntimeUserLimit{
+		"alice": {UserID: 7, Billable: true, TrafficLimitBytes: 100, UsedBaselineBytes: 4, LeaseBytes: 6, LeaseEnforced: true, QuotaState: "active"},
+	}}})
+	state := limited.stateForKey("user:alice")
+	state.addTraffic(6, 0)
+	if !state.denied() {
+		t.Fatal("a positive remaining lease must still cap below the global quota")
 	}
 }
 

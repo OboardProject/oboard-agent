@@ -1208,7 +1208,7 @@ func (c *sshInboundCounter) quotaExceeded() bool {
 		return false
 	}
 	capBytes := policy.TrafficLimitBytes
-	if policy.LeaseEnforced && policy.UsedBaselineBytes+policy.LeaseBytes < capBytes {
+	if policy.LeaseEnforced && policy.LeaseBytes > 0 && policy.UsedBaselineBytes+policy.LeaseBytes < capBytes {
 		capBytes = policy.UsedBaselineBytes + policy.LeaseBytes
 	}
 	return policy.UsedBaselineBytes+c.unacknowledged(policy.PeriodKey) >= capBytes
