@@ -6,9 +6,10 @@ const (
 	RemoteAccessModeStandard = "standard"
 	RemoteAccessModeHardened = "hardened"
 
-	RemoteAccessCapabilityTerminal  = "remote_terminal_v1"
-	RemoteAccessCapabilityExec      = "remote_exec_v1"
-	RemoteAccessCapabilityLocalGate = "remote_access_local_gate_v1"
+	RemoteAccessCapabilityTerminal         = "remote_terminal_v1"
+	RemoteAccessCapabilityTerminalLoginEnv = "terminal_login_env_v1"
+	RemoteAccessCapabilityExec             = "remote_exec_v1"
+	RemoteAccessCapabilityLocalGate        = "remote_access_local_gate_v1"
 
 	RemoteExecOriginMCP   = "mcp"
 	RemoteExecOriginPanel = "panel"
@@ -107,5 +108,6 @@ type InteractivePrepareEnvelope struct {
 	Kind             string `json:"kind"`
 	Cols             int    `json:"cols"`
 	Rows             int    `json:"rows"`
+	Mode             string `json:"mode,omitempty"`
 	Signature        string `json:"signature,omitempty"`
 }

@@ -14,10 +14,11 @@ import (
 
 	"github.com/OboardProject/oboard-agent/internal/model"
 	"github.com/OboardProject/oboard-agent/internal/security"
+	"github.com/OboardProject/oboard-agent/internal/terminal"
 )
 
 func TestStartInteractivePTYDoesNotSetPgid(t *testing.T) {
-	ptmx, cmd, err := startInteractivePTY(80, 24)
+	ptmx, cmd, spec, err := startInteractivePTY(80, 24, terminal.ModeMinimal)
 	if err != nil {
 		t.Fatalf("start interactive pty: %v", err)
 	}
@@ -25,6 +26,9 @@ func TestStartInteractivePTYDoesNotSetPgid(t *testing.T) {
 		_ = ptmx.Close()
 		killProcessGroup(cmd)
 	}()
+	if spec.Mode != terminal.ModeMinimal {
+		t.Fatalf("mode = %q", spec.Mode)
+	}
 	if cmd.SysProcAttr != nil && cmd.SysProcAttr.Setpgid {
 		t.Fatal("Setpgid must stay false; pty.StartWithSize already sets Setsid and Setctty")
 	}
@@ -148,7 +152,7 @@ func TestInteractiveSessionLimitReportsFailure(t *testing.T) {
 	now := time.Now().UTC()
 	runner.runTerminalSession(model.InteractivePrepareEnvelope{
 		SessionID: "sess-limit", IssuedAt: now.Format(time.RFC3339Nano), ExpiresAt: now.Add(time.Minute).Format(time.RFC3339Nano),
-	}, 80, 24, "secret")
+	}, 80, 24, terminal.ModeLogin, "secret")
 	select {
 	case payload := <-got:
 		if payload["type"] != "interactive_failed" || payload["reason"] != interactiveReasonSessionLimit {

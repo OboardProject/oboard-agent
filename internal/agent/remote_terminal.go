@@ -17,6 +17,7 @@ import (
 
 	"github.com/OboardProject/oboard-agent/internal/model"
 	"github.com/OboardProject/oboard-agent/internal/security"
+	"github.com/OboardProject/oboard-agent/internal/terminal"
 	"github.com/OboardProject/oboard-agent/internal/version"
 )
 
@@ -34,17 +35,22 @@ const (
 	interactiveReasonSessionLimit        = "session_limit"
 	interactiveReasonPrepareInvalid      = "prepare_invalid"
 	interactiveReasonLocalGateDenied     = "agent_local_gate_denied"
+	interactiveReasonLoginShellDisabled  = "login_shell_disabled"
+	interactiveReasonLoginShellMissing   = "login_shell_missing"
+	interactiveReasonShellExited         = "shell_exited"
 )
 
 type terminalSession struct {
-	id      string
-	ptmx    *os.File
-	cmd     *exec.Cmd
-	conn    *websocket.Conn
-	created time.Time
-	last    time.Time
-	once    sync.Once
-	stop    chan struct{}
+	id          string
+	ptmx        *os.File
+	cmd         *exec.Cmd
+	conn        *websocket.Conn
+	spec        terminal.SessionSpec
+	created     time.Time
+	last        time.Time
+	once        sync.Once
+	stop        chan struct{}
+	closeReason string
 }
 
 func (r *Runner) handleInteractivePrepare(env model.InteractivePrepareEnvelope) error {
@@ -90,7 +96,11 @@ func (r *Runner) handleInteractivePrepare(env model.InteractivePrepareEnvelope) 
 	if rows <= 0 || rows > interactiveMaxRows {
 		rows = 32
 	}
-	go r.runTerminalSession(env, cols, rows, secret)
+	mode, err := terminal.ParseMode(env.Mode)
+	if err != nil {
+		return r.failInteractivePrepare(env.SessionID, interactiveReasonPrepareInvalid, err)
+	}
+	go r.runTerminalSession(env, cols, rows, mode, secret)
 	return nil
 }
 
@@ -159,25 +169,16 @@ func (r *Runner) reportInteractiveReady(sessionID string) {
 	})
 }
 
-func startInteractivePTY(cols, rows int) (*os.File, *exec.Cmd, error) {
-	shell := "/bin/bash"
-	if _, err := exec.LookPath(shell); err != nil {
-		shell = "/bin/sh"
+func startInteractivePTY(cols, rows int, mode terminal.Mode) (*os.File, *exec.Cmd, terminal.SessionSpec, error) {
+	spec, err := terminal.BuildSession(terminal.Request{Mode: mode, Cols: cols, Rows: rows, TERM: terminal.DefaultTERM, COLORTERM: terminal.DefaultCOLORTERM})
+	if err != nil {
+		return nil, nil, spec, err
 	}
-	cwd := "/root"
-	if _, err := os.Stat(cwd); err != nil {
-		cwd = "/"
-	}
-	cmd := exec.Command(shell)
-	cmd.Dir = cwd
-	cmd.Env = append(remoteExecEnv(), "TERM=xterm-256color", "COLORTERM=truecolor")
-	// pty.StartWithSize sets Setsid and Setctty. Do not also set Setpgid:
-	// a session leader cannot change its process group (EPERM).
-	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
-	return ptmx, cmd, err
+	ptmx, cmd, err := terminal.Spawn(spec)
+	return ptmx, cmd, spec, err
 }
 
-func (r *Runner) runTerminalSession(env model.InteractivePrepareEnvelope, cols, rows int, secret string) {
+func (r *Runner) runTerminalSession(env model.InteractivePrepareEnvelope, cols, rows int, mode terminal.Mode, secret string) {
 	r.interactiveMu.Lock()
 	if r.terminalSessions == nil {
 		r.terminalSessions = map[string]*terminalSession{}
@@ -189,11 +190,19 @@ func (r *Runner) runTerminalSession(env model.InteractivePrepareEnvelope, cols, 
 	}
 	r.interactiveMu.Unlock()
 
-	ptmx, cmd, err := startInteractivePTY(cols, rows)
+	ptmx, cmd, spec, err := startInteractivePTY(cols, rows, mode)
 	if err != nil {
-		r.reportInteractiveFailed(env.SessionID, interactiveReasonPTYStartFailed, err.Error())
+		reason := interactiveReasonPTYStartFailed
+		if terminal.IsLoginDisabled(err) {
+			reason = interactiveReasonLoginShellDisabled
+		} else if terminal.IsShellMissing(err) {
+			reason = interactiveReasonLoginShellMissing
+		}
+		r.reportInteractiveFailed(env.SessionID, reason, err.Error())
 		return
 	}
+	log.Printf("terminal session started session=%s uid=%d username=%s shell=%s mode=%s cwd=%s rows=%d cols=%d",
+		env.SessionID, spec.UID, spec.Username, spec.Shell, spec.Mode, spec.WorkDir, rows, cols)
 	wsURL, err := security.ControllerInteractiveWebSocketURL(r.Config().ControllerURL, env.SessionID, version.IsDev(), r.Config().AllowInsecureController)
 	if err != nil {
 		_ = ptmx.Close()
@@ -215,11 +224,17 @@ func (r *Runner) runTerminalSession(env model.InteractivePrepareEnvelope, cols, 
 		return
 	}
 	conn.SetReadLimit(interactiveMaxMessage)
-	session := &terminalSession{id: env.SessionID, ptmx: ptmx, cmd: cmd, conn: conn, created: time.Now(), last: time.Now(), stop: make(chan struct{})}
+	session := &terminalSession{id: env.SessionID, ptmx: ptmx, cmd: cmd, spec: spec, conn: conn, created: time.Now(), last: time.Now(), stop: make(chan struct{})}
 	r.interactiveMu.Lock()
 	r.terminalSessions[env.SessionID] = session
 	r.interactiveMu.Unlock()
-	defer r.closeTerminalSession(env.SessionID, "agent_cleanup")
+	defer func() {
+		reason := session.closeReason
+		if reason == "" {
+			reason = "agent_cleanup"
+		}
+		r.closeTerminalSession(env.SessionID, reason)
+	}()
 
 	go func() {
 		buf := make([]byte, 8192)
@@ -233,12 +248,13 @@ func (r *Runner) runTerminalSession(env model.InteractivePrepareEnvelope, cols, 
 				}
 			}
 			if readErr != nil {
+				session.closeReason = interactiveReasonShellExited
 				session.signalStop()
 				return
 			}
 		}
 	}()
-	_ = conn.WriteJSON(map[string]any{"type": "ready"})
+	_ = conn.WriteJSON(map[string]any{"type": "ready", "info": spec.Diagnostic()})
 	r.reportInteractiveReady(env.SessionID)
 	for {
 		deadline := session.last.Add(interactiveIdleTimeout)
@@ -306,7 +322,12 @@ func (r *Runner) closeTerminalSession(sessionID, reason string) {
 		_ = session.ptmx.Close()
 	}
 	killProcessGroup(session.cmd)
-	log.Printf("interactive session closed session=%s reason=%s", sessionID, reason)
+	exitCode := -1
+	if session.cmd != nil && session.cmd.ProcessState != nil {
+		exitCode = session.cmd.ProcessState.ExitCode()
+	}
+	log.Printf("interactive session closed session=%s reason=%s uid=%d username=%s shell=%s mode=%s cwd=%s exit_code=%d",
+		sessionID, reason, session.spec.UID, session.spec.Username, session.spec.Shell, session.spec.Mode, session.spec.WorkDir, exitCode)
 }
 
 func (r *Runner) closeAllTerminalSessions(reason string) {

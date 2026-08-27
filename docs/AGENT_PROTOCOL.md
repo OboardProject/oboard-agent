@@ -1583,22 +1583,43 @@ The script can delay restarting `oboard-agent` so the current HTTP task result c
 Remote Terminal is an Agent PTY relay for human operators. It is not SSH, does
 not use TCP/22, and does not occupy the single Agent task slot.
 
+The PTY child is a login-compatible Unix session for the Agent's current
+account: passwd shell with `-l`, HOME as cwd, and a reconstructed environment
+(`HOME`/`USER`/`LOGNAME`/`SHELL`/`PATH`/`TERM`). Login mode also loads
+`/etc/default/locale` or `/etc/locale.conf`, `/etc/environment`, and optional
+`/etc/oboard-agent/terminal.env`. It does not inherit `os.Environ()`, Agent
+tokens, `OBOARD_*` process variables, or `SSH_*`, and it does not run PAM,
+`login -f`, `su -`, or `/etc/ssh/sshrc`. `mode=minimal` skips those files and
+`-l` so a broken profile can still open a shell.
+
 Control-channel messages (signed HMAC, 60s prepare TTL):
 
 - `interactive_prepare` — Agent validates signature, server_id, nonce, TTL, and
-  the local security gate, then starts a PTY (`/bin/bash` then `/bin/sh`) and
-  dials `/api/v1/agent/interactive/{session_id}` with
+  the local security gate, then starts a login-compatible PTY and dials
+  `/api/v1/agent/interactive/{session_id}` with
   `X-OBoard-Interactive-Proof`. PTY start uses the PTY library session
-  (`Setsid`/`Setctty`) and must not also set `Setpgid`.
+  (`Setsid`/`Setctty`) and must not also set `Setpgid`. Shell, cwd, and
+  environment are resolved on the Agent host: the current Unix account, the
+  passwd login shell with `-l` (or `mode=minimal` without profiles), HOME as
+  cwd, and a from-zero environment. Controller may send `mode=login|minimal`
+  only when the Agent advertises `terminal_login_env_v1`; it must not send
+  `shell`, `command`, or `env`. Signature canonical bytes stay the existing
+  cols/rows envelope so older Agents keep verifying. Missing `mode` defaults
+  to login on Agents that implement this capability.
 - `interactive_ready` — Agent → Controller after the PTY is up and the reverse
   WebSocket is connected. Controller cancels the 20s prepare timeout. The Agent
-  also writes `{"type":"ready"}` on the reverse WebSocket; the browser shows
-  connected only after that message.
+  also writes `{"type":"ready","info":{...}}` on the reverse WebSocket; the
+  browser shows connected only after that message. `info` is diagnostic
+  identity only (username, uid, gid, home, shell, mode, cwd, term, environment
+  file loaded flags) and never includes environment values or terminal bytes.
 - `interactive_failed` — Agent → Controller when PTY start, interactive URL
-  construction, reverse WebSocket dial, session-limit, local-gate, or prepare
-  validation fails. Payload is `{session_id, reason, detail?}`. Controller
-  deletes the session, writes `{"type":"error","reason":"...","detail":"..."}`
-  to the browser if connected, and sends `interactive_close`.
+  construction, reverse WebSocket dial, session-limit, local-gate, prepare
+  validation, nologin shell, or missing login shell fails. Payload is
+  `{session_id, reason, detail?}`. Controller deletes the session, writes
+  `{"type":"error","reason":"...","detail":"..."}` to the browser if connected,
+  and sends `interactive_close`. `login_shell_disabled` and
+  `login_shell_missing` are readable Agent-local failures; `shell_exited`
+  closes a session whose login shell has already left.
 - `interactive_close` — Agent closes the PTY, signals the process group, and
   waits then SIGKILLs leftovers.
 - `remote_exec_cancel` — best-effort cancel of an in-flight `remote_exec` by
@@ -1622,7 +1643,7 @@ Hello/health advertise:
 ```json
 {
   "remote_access": {
-    "capabilities": ["remote_terminal_v1", "remote_exec_v1", "remote_access_local_gate_v1"],
+    "capabilities": ["remote_terminal_v1", "terminal_login_env_v1", "remote_exec_v1", "remote_access_local_gate_v1"],
     "local_mode": "standard",
     "local_allow": {
       "remote_terminal": false,

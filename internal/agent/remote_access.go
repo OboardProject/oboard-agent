@@ -22,6 +22,7 @@ func (r *Runner) remoteAccessReport() model.RemoteAccessReport {
 	return model.RemoteAccessReport{
 		Capabilities: []string{
 			model.RemoteAccessCapabilityTerminal,
+			model.RemoteAccessCapabilityTerminalLoginEnv,
 			model.RemoteAccessCapabilityExec,
 			model.RemoteAccessCapabilityLocalGate,
 		},
