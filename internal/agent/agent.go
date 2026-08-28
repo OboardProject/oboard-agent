@@ -508,26 +508,32 @@ func (r *Runner) Run(ctx context.Context) error {
 	_ = r.configureCoreConnectionAudit(ctx, cfg.ConnectionAuditEnabled)
 	_ = r.configureCoreClock(ctx)
 	go r.startCoreWatchdog(ctx)
-	backoff := 5 * time.Second
 	failures := 0
+	firstAfterDrop := false
 	for {
-		if err := r.connect(ctx); err == nil {
+		started := time.Now()
+		err := r.connect(ctx)
+		if ctx.Err() != nil {
+			return nil
+		}
+		lived := time.Since(started)
+		authFailure := isAuthReconnectError(err)
+		if lived >= 60*time.Second {
 			failures = 0
-			backoff = 5 * time.Second
-			continue
-		} else {
+			firstAfterDrop = true
+		} else if !authFailure {
 			failures++
-			if failures == 1 || failures%20 == 0 {
-				log.Printf("controller connection failed: attempt=%d next_retry=%s error=%v", failures, backoff, err)
-			}
+		}
+		cfg := r.Config()
+		delay := reconnectDelay(cfg.AgentID, cfg.ControllerURL, max(0, failures-1), firstAfterDrop, authFailure)
+		firstAfterDrop = false
+		if err != nil && (failures <= 1 || failures%20 == 0 || authFailure) {
+			log.Printf("controller connection failed: attempt=%d next_retry=%s error=%v", failures, delay, err)
 		}
 		select {
 		case <-ctx.Done():
 			return nil
-		case <-time.After(backoff):
-		}
-		if backoff < 30*time.Second {
-			backoff *= 2
+		case <-time.After(delay):
 		}
 	}
 }

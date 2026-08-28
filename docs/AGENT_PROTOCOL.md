@@ -153,6 +153,20 @@ Auth headers are required.
 8. If a connection drops while a task is in-flight, Controller requeues that
    task as pending with a readable result message.
 
+### Reconnect
+
+Agent reconnect jitter is local and does not change the WebSocket or task
+contract. The process still connects immediately on first start.
+
+- After a session of at least 60 seconds, the first reconnect waits
+  `SHA-256(agent_id + NUL + controller_url)` modulo 5000 milliseconds so a
+  Controller restart does not reconnect the whole fleet at once.
+- Consecutive failures use full jitter: attempt 0 waits 0–1s, then 0–2s, 0–4s,
+  up to 0–60s.
+- HTTP 401/403 or identity failures wait 2–5 minutes.
+- `update_agent` payload, task signing, Agent ID/token, and `task_ack` are
+  unchanged.
+
 ### Controller Messages
 
 `hello`:
