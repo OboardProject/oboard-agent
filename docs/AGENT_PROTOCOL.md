@@ -551,6 +551,30 @@ The Agent returns a single object with `message`, a count `summary`, and a `step
 
 Controller only emits the top-level task types documented as task headings below. Time checking, WARP preparation, forwarding apply and tunnel apply are deployment steps; Controller also uses the standalone `check_time` task for scheduled and mode-change checks. DNS policy reconciliation is a deployment step, while an operator-requested one-shot test uses `benchmark_dns`.
 
+### `apply_traffic_policy`
+
+Payload:
+
+```json
+{
+  "policy_revision": 9182,
+  "reason": "user_policy_changed",
+  "policies": {
+    "7": {
+      "policy_revision": 9182,
+      "user_id": 7,
+      "traffic_limit_bytes": 10737418240,
+      "used_baseline_bytes": 734003200,
+      "lease_bytes": 67108864
+    }
+  }
+}
+```
+
+This task is gated by `traffic_policy_revision`, not `config_version`. The signed envelope may copy `policy_revision` into the task `config_version` field for transport, but Agent must persist it separately from `last-applied-version.json`. Incoming revision older than the applied revision is skipped; the same revision with the same content is idempotent; the same revision with different content is a protocol error.
+
+Agent applies core `POST /traffic/policy` first, then Agent-native SSH in-memory policy. It must not run `oboard-sb -check`, reload, restart, port-forward, tunnel, DNS, MTU, WARP, or probe steps. New Agents advertise `traffic_policy_v1` in health `kernel_capabilities`. Controllers send this task only for administrator or period-policy changes; ordinary traffic reports return the same policies in the HTTP response and must not queue this task.
+
 ### `apply_core_config`
 
 Payload:

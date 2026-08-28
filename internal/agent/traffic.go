@@ -58,6 +58,8 @@ type trafficLocalState struct {
 	PendingReports   map[string]*trafficPendingRange     `json:"pending_reports,omitempty"`
 	Sync             trafficSyncState                    `json:"sync"`
 	RecoveryRequired bool                                `json:"recovery_required,omitempty"`
+	PolicyRevision   int64                               `json:"policy_revision,omitempty"`
+	Policies         map[string]model.TrafficRuntimePolicy `json:"policies,omitempty"`
 }
 
 type trafficStreamState struct {
@@ -189,6 +191,7 @@ type trafficReportResponse struct {
 	AcceptedReports   []trafficAcceptedReport   `json:"accepted_reports"`
 	StreamCheckpoints []trafficStreamCheckpoint `json:"stream_checkpoints"`
 	Policies          map[string]interface{}    `json:"policies"`
+	PolicyRevision    int64                     `json:"policy_revision"`
 }
 
 func (r *Runner) startTrafficLoop(ctx context.Context) {
@@ -515,7 +518,27 @@ func (r *Runner) reportTrafficLedger(ctx context.Context, state *trafficLocalSta
 	if err := r.saveTrafficState(*state); err != nil {
 		return err
 	}
-	return r.pushTrafficPolicies(ctx, applyConservativeTrafficPolicies(resp.Policies, state), state.Acknowledged)
+	policies := applyConservativeTrafficPolicies(resp.Policies, state)
+	typed := trafficPoliciesFromWire(policies)
+	revision := resp.PolicyRevision
+	if revision == 0 {
+		revision = trafficPolicyRevisionFromPolicies(typed)
+	}
+	if revision > 0 {
+		skipped, err := checkTrafficPolicyRevision(state.PolicyRevision, state.Policies, revision, typed)
+		if err != nil {
+			return err
+		}
+		if skipped {
+			return nil
+		}
+	}
+	if err := r.pushTrafficPolicies(ctx, policies, state.Acknowledged); err != nil {
+		return err
+	}
+	state.PolicyRevision = revision
+	state.Policies = typed
+	return r.saveTrafficState(*state)
 }
 
 func (r *Runner) syncTrafficPolicies(ctx context.Context, state *trafficLocalState) error {
@@ -1301,4 +1324,108 @@ func applyStaleLeasePolicies(policies map[string]interface{}, state *trafficLoca
 		state.Sync.Status = trafficStatusStale
 	}
 	return out
+}
+
+func (r *Runner) applyTrafficPolicyTask(payload model.ApplyTrafficPolicyTaskPayload) (map[string]any, error) {
+	r.trafficMu.Lock()
+	defer r.trafficMu.Unlock()
+	state := r.trafficStateLocked()
+	skipped, err := checkTrafficPolicyRevision(state.PolicyRevision, state.Policies, payload.PolicyRevision, payload.Policies)
+	if err != nil {
+		return map[string]any{"message": "traffic policy rejected"}, err
+	}
+	result := map[string]any{"message": "traffic policy applied", "policy_revision": payload.PolicyRevision}
+	if skipped {
+		result["message"] = "traffic policy unchanged"
+		result["skipped"] = true
+		return result, nil
+	}
+	if err := r.pushTrafficPolicies(context.Background(), trafficPoliciesToWire(payload.Policies), state.Acknowledged); err != nil {
+		return map[string]any{"message": "traffic policy apply failed"}, err
+	}
+	state.PolicyRevision = payload.PolicyRevision
+	state.Policies = payload.Policies
+	if err := r.saveTrafficState(*state); err != nil {
+		return map[string]any{"message": "traffic policy persist failed"}, err
+	}
+	return result, nil
+}
+
+func (r *Runner) restoreTrafficRuntimePolicies(ctx context.Context) error {
+	r.trafficMu.Lock()
+	state := r.trafficStateLocked()
+	policies := trafficPoliciesToWire(state.Policies)
+	acks := state.Acknowledged
+	r.trafficMu.Unlock()
+	if len(policies) == 0 {
+		return nil
+	}
+	return r.pushTrafficPolicies(ctx, policies, acks)
+}
+
+func checkTrafficPolicyRevision(applied int64, appliedPolicies map[string]model.TrafficRuntimePolicy, incoming int64, incomingPolicies map[string]model.TrafficRuntimePolicy) (bool, error) {
+	if incoming <= 0 {
+		return false, errors.New("traffic_policy_revision must be positive")
+	}
+	if incoming < applied {
+		return true, nil
+	}
+	if incoming == applied {
+		if trafficPolicyContentID(appliedPolicies) != trafficPolicyContentID(incomingPolicies) {
+			return false, fmt.Errorf("traffic_policy_revision %d was already applied with different content", incoming)
+		}
+		return true, nil
+	}
+	return false, nil
+}
+
+func trafficPolicyContentID(policies map[string]model.TrafficRuntimePolicy) string {
+	encoded, err := json.Marshal(policies)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(encoded)
+	return fmt.Sprintf("%x", sum[:])
+}
+
+func trafficPoliciesToWire(policies map[string]model.TrafficRuntimePolicy) map[string]interface{} {
+	out := make(map[string]interface{}, len(policies))
+	for key, policy := range policies {
+		encoded, err := json.Marshal(policy)
+		if err != nil {
+			continue
+		}
+		var raw map[string]interface{}
+		if json.Unmarshal(encoded, &raw) != nil {
+			continue
+		}
+		out[key] = raw
+	}
+	return out
+}
+
+func trafficPoliciesFromWire(policies map[string]interface{}) map[string]model.TrafficRuntimePolicy {
+	out := make(map[string]model.TrafficRuntimePolicy, len(policies))
+	for key, raw := range policies {
+		encoded, err := json.Marshal(raw)
+		if err != nil {
+			continue
+		}
+		var policy model.TrafficRuntimePolicy
+		if json.Unmarshal(encoded, &policy) != nil {
+			continue
+		}
+		out[key] = policy
+	}
+	return out
+}
+
+func trafficPolicyRevisionFromPolicies(policies map[string]model.TrafficRuntimePolicy) int64 {
+	var revision int64
+	for _, policy := range policies {
+		if policy.PolicyRevision > revision {
+			revision = policy.PolicyRevision
+		}
+	}
+	return revision
 }

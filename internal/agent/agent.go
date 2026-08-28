@@ -501,6 +501,9 @@ func (r *Runner) Run(ctx context.Context) error {
 	if err := r.restoreManagedSSHInboundsOnStartup(); err != nil {
 		log.Printf("restore managed SSH inbounds: %v", err)
 	}
+	if err := r.restoreTrafficRuntimePolicies(ctx); err != nil {
+		log.Printf("restore traffic runtime policies: %v", err)
+	}
 	r.startLogMaintenance(ctx)
 	r.startTrafficLoop(ctx)
 	r.startLatencyProbeLoop(ctx)
@@ -932,6 +935,20 @@ func (r *Runner) executeAgentTask(task model.AgentTask) (string, string) {
 			return "failed", jsonResult(err.Error())
 		}
 		result, err := r.applyCoreConfigTask(task.ConfigVersion, payload)
+		if err != nil {
+			result["error"] = err.Error()
+			return "failed", jsonMap(result)
+		}
+		return "succeeded", jsonMap(result)
+	case model.AgentTaskTypeApplyTrafficPolicy:
+		var payload model.ApplyTrafficPolicyTaskPayload
+		if err := json.Unmarshal([]byte(task.PayloadJSON), &payload); err != nil {
+			return "failed", jsonResult(err.Error())
+		}
+		if payload.PolicyRevision == 0 {
+			payload.PolicyRevision = task.ConfigVersion
+		}
+		result, err := r.applyTrafficPolicyTask(payload)
 		if err != nil {
 			result["error"] = err.Error()
 			return "failed", jsonMap(result)
@@ -2537,7 +2554,7 @@ func buildHealthReport(binary string, timeout time.Duration, host hostStaticInfo
 		AgentVersion:       version.Version,
 		AgentBuild:         version.Build,
 		SingBoxVersion:     coreVersion,
-		KernelCapabilities: append([]string(nil), kernelCapabilities...),
+		KernelCapabilities: append(append([]string(nil), kernelCapabilities...), model.AgentCapabilityTrafficPolicy),
 		TCPFastOpenState:   tfoState,
 		TCPFastOpenValue:   tfoValue,
 		Timestamp:          time.Now().UTC(),

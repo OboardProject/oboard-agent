@@ -318,3 +318,24 @@ func TestSameEpochPeriodMigrationKeepsAcceptedCheckpoint(t *testing.T) {
 		}
 	}
 }
+
+func TestCheckTrafficPolicyRevisionGate(t *testing.T) {
+	applied := map[string]model.TrafficRuntimePolicy{"7": {UserID: 7, UsedBaselineBytes: 100, PolicyRevision: 10}}
+	incoming := map[string]model.TrafficRuntimePolicy{"7": {UserID: 7, UsedBaselineBytes: 100, PolicyRevision: 10}}
+	skipped, err := checkTrafficPolicyRevision(10, applied, 9, incoming)
+	if err != nil || !skipped {
+		t.Fatalf("older revision should skip, err=%v skipped=%v", err, skipped)
+	}
+	skipped, err = checkTrafficPolicyRevision(10, applied, 10, incoming)
+	if err != nil || !skipped {
+		t.Fatalf("same revision same content should be idempotent, err=%v skipped=%v", err, skipped)
+	}
+	different := map[string]model.TrafficRuntimePolicy{"7": {UserID: 7, UsedBaselineBytes: 200, PolicyRevision: 10}}
+	if _, err := checkTrafficPolicyRevision(10, applied, 10, different); err == nil {
+		t.Fatal("same revision different content should fail")
+	}
+	skipped, err = checkTrafficPolicyRevision(10, applied, 11, different)
+	if err != nil || skipped {
+		t.Fatalf("newer revision should apply, err=%v skipped=%v", err, skipped)
+	}
+}

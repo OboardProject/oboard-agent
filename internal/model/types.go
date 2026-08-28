@@ -730,6 +730,7 @@ type AgentTask struct {
 const (
 	AgentTaskTypeApplyDeployment       = "apply_deployment"
 	AgentTaskTypeApplyCoreConfig       = "apply_core_config"
+	AgentTaskTypeApplyTrafficPolicy    = "apply_traffic_policy"
 	AgentTaskTypeUpdateAgent           = "update_agent"
 	AgentTaskTypeUninstallAgent        = "uninstall_agent"
 	AgentTaskTypeUpdateAgentConfig     = "update_agent_config"
@@ -748,6 +749,8 @@ const (
 	AgentTaskTypeRemoteExec            = "remote_exec"
 	AgentTaskTypeRemoteOperation       = "remote_operation"
 )
+
+const AgentCapabilityTrafficPolicy = "traffic_policy_v1"
 
 type NetworkInterfaceInfo struct {
 	Name      string   `json:"name"`
@@ -798,12 +801,19 @@ type ApplyCoreConfigTaskPayload struct {
 	Assets       []ManagedAssetReference `json:"assets,omitempty"`
 }
 
+type ApplyTrafficPolicyTaskPayload struct {
+	PolicyRevision int64                           `json:"policy_revision"`
+	Reason         string                          `json:"reason,omitempty"`
+	Policies       map[string]TrafficRuntimePolicy `json:"policies"`
+}
+
 // DeploymentTaskPayload keeps one user deployment as one Agent task while
 // preserving the individual execution plans needed by the Agent.
 type DeploymentTaskPayload struct {
 	Version              int64                      `json:"version"`
 	Config               ApplyCoreConfigTaskPayload `json:"config"`
 	ConfigChanged        bool                       `json:"config_changed"`
+	TriggerReason        string                     `json:"trigger_reason,omitempty"`
 	WARPRequests         []WARPRequestPlan          `json:"warp_requests,omitempty"`
 	TimeCheck            *TimeCheckPlan             `json:"time_check,omitempty"`
 	PortForwards         PortForwardPlan            `json:"port_forwards"`
@@ -1151,6 +1161,7 @@ type TrafficRuntimePolicy struct {
 	Timezone          string `json:"timezone,omitempty"`
 	QuotaState        string `json:"quota_state,omitempty"`
 	EnforcementMode   string `json:"enforcement_mode,omitempty"`
+	PolicyRevision    int64  `json:"policy_revision,omitempty"`
 }
 
 // Linux exposes TCP Fast Open through the net.ipv4.tcp_fastopen bitmask, where
