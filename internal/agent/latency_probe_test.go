@@ -56,6 +56,23 @@ func TestValidLatencyProbeIPv4(t *testing.T) {
 	}
 }
 
+func TestValidateLatencyProbeTargetAcceptsRegionalHostname(t *testing.T) {
+	hostname := model.LatencyProbeTarget{ProbeID: "广东-中国电信-0", Kind: "regional", Province: "广东", Carrier: "中国电信", Host: "gd-ct-v4.ip.zstaticcdn.com", Port: 80}
+	if err := validateLatencyProbeTarget(hostname, model.LatencyProbeModeTCP); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateLatencyProbeTarget(model.LatencyProbeTarget{ProbeID: "ok", Kind: "regional", Province: "广东", Carrier: "中国电信", Host: "gd-ct-v4.ip.zstaticcdn.com", IP: "192.0.2.1", Port: 80}, model.LatencyProbeModeTCP); err == nil {
+		t.Fatal("hostname target with a prefilled IP was accepted")
+	}
+	if err := validateLatencyProbeTarget(model.LatencyProbeTarget{ProbeID: "ok", Kind: "regional", Province: "广东", Carrier: "中国电信", Host: "localhost", Port: 80}, model.LatencyProbeModeTCP); err == nil {
+		t.Fatal("localhost regional host was accepted")
+	}
+	literal := model.LatencyProbeTarget{ProbeID: "广东-教育网-0", Kind: "regional", Province: "广东", Carrier: "教育网", Host: "192.0.2.1", IP: "192.0.2.1", Port: 80}
+	if err := validateLatencyProbeTarget(literal, model.LatencyProbeModeTCP); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func mustParseAddr(t *testing.T, value string) netip.Addr {
 	t.Helper()
 	addr, err := netip.ParseAddr(value)

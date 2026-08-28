@@ -143,9 +143,15 @@ func validateLatencyProbeTarget(target model.LatencyProbeTarget, mode model.Late
 			return errors.New("公网延迟目标无效")
 		}
 	case "regional":
-		addr, err := netip.ParseAddr(host)
-		if err != nil || !validLatencyProbeIPv4(addr) || strings.TrimSpace(target.IP) != addr.String() || strings.TrimSpace(target.Province) == "" || strings.TrimSpace(target.Carrier) == "" {
-			return errors.New("地区目标必须是公网 IPv4 地址")
+		if strings.TrimSpace(target.Province) == "" || strings.TrimSpace(target.Carrier) == "" {
+			return errors.New("地区目标必须包含省份和运营商")
+		}
+		if addr, err := netip.ParseAddr(host); err == nil {
+			if !validLatencyProbeIPv4(addr) || strings.TrimSpace(target.IP) != addr.String() {
+				return errors.New("地区目标必须是公网 IPv4 地址")
+			}
+		} else if !validLatencyProbeHostname(host) || strings.TrimSpace(target.IP) != "" {
+			return errors.New("地区目标必须是公网 IPv4 地址或主机名")
 		}
 	default:
 		return errors.New("延迟目标类型无效")
@@ -161,6 +167,38 @@ func validateLatencyProbeTarget(target model.LatencyProbeTarget, mode model.Late
 
 func validLatencyProbeIPv4(addr netip.Addr) bool {
 	return addr.IsValid() && addr.Is4() && addr.IsGlobalUnicast() && !addr.IsPrivate() && !addr.IsLoopback() && !addr.IsLinkLocalUnicast() && !addr.IsLinkLocalMulticast() && !addr.IsMulticast() && !addr.IsUnspecified()
+}
+
+func validLatencyProbeHostname(host string) bool {
+	host = strings.ToLower(strings.TrimSpace(host))
+	if host == "" || len(host) > 253 || strings.Contains(host, "..") {
+		return false
+	}
+	host = strings.TrimSuffix(host, ".")
+	labels := strings.Split(host, ".")
+	if len(labels) < 2 {
+		return false
+	}
+	for _, label := range labels {
+		if len(label) < 1 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, c := range label {
+			if (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '-' {
+				return false
+			}
+		}
+	}
+	tld := labels[len(labels)-1]
+	if len(tld) < 2 {
+		return false
+	}
+	for _, c := range tld {
+		if c < 'a' || c > 'z' {
+			return false
+		}
+	}
+	return true
 }
 
 func icmpProbeSamplesContext(ctx context.Context, host string, _ int, count int, interval, timeout time.Duration) ([]int64, []string) {

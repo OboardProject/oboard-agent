@@ -884,7 +884,7 @@ instead of creating a duplicate. The endpoint does not deploy configuration.
 Controller uses this task for an immediate run of the same unified latency test
 that Agent runs on schedule. Every plan contains exactly one public target plus
 the configured exact province-carrier pairs, subject to the total target cap.
-Controller downloads the regional IPv4 list from the stable
+Controller downloads the regional target list from the stable
 `OboardProject/resource/probe/probe-targets-cn.json` path and refreshes its
 validated cache every six hours. A failed refresh keeps the last valid plan.
 
@@ -900,15 +900,17 @@ validated cache every six hours. A failed refresh keeps the last valid plan.
   "timeout_ms": 3000,
   "targets": [
     {"probe_id":"public-cloudflare","kind":"public","host":"cp.cloudflare.com","port":0},
-    {"probe_id":"广东-中国电信-0","kind":"regional","province":"广东","carrier":"中国电信","host":"192.0.2.10","ip":"192.0.2.10","port":0},
-    {"probe_id":"浙江-中国联通-0","kind":"regional","province":"浙江","carrier":"中国联通","host":"192.0.2.20","ip":"192.0.2.20","port":0}
+    {"probe_id":"广东-中国电信-0","kind":"regional","province":"广东","carrier":"中国电信","host":"gd-ct-v4.ip.zstaticcdn.com","port":0},
+    {"probe_id":"浙江-中国联通-0","kind":"regional","province":"浙江","carrier":"中国联通","host":"zj-cu-v4.ip.zstaticcdn.com","port":0}
   ]
 }
 ```
 
 For TCP Ping, the public target uses port 443 and regional targets use port 80.
 For ICMP Ping, every target uses port 0 in both plan and report. Agent accepts
-only the allowlisted public hostnames and literal public IPv4 regional targets,
+only the allowlisted public hostnames and regional targets that are either a
+literal public IPv4 or a DNS hostname. Hostname regional targets omit `ip` in
+the signed plan; Agent resolves them to a public IPv4 at probe time. It
 runs at most 16 targets concurrently, performs 1 to 10 samples, and caps the
 whole batch at 90 seconds. One unreachable target does not discard other
 results.
@@ -926,8 +928,8 @@ still contains every target:
     "mode": "icmp",
     "province": "广东",
     "carrier": "中国电信",
-    "host": "192.0.2.10",
-    "ip": "192.0.2.10",
+    "host": "gd-ct-v4.ip.zstaticcdn.com",
+    "ip": "",
     "port": 0,
     "available": true,
     "latency_ms": 23,
