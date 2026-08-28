@@ -26,8 +26,8 @@ func main() {
 	controllerURL := flag.String("controller", "", "controller URL")
 	enrollOnly := flag.Bool("enroll-only", false, "enroll, save config, and exit")
 	stateDir := flag.String("state-dir", "/var/lib/oboard-agent", "agent state directory")
-	coreBinary := flag.String("core-binary", "", "proxy core binary; defaults to oboard-sb then sing-box")
-	coreService := flag.String("core-service", "", "systemd service to restart; defaults to oboard-sb then sing-box")
+	coreBinary := flag.String("core-binary", "", "proxy core binary; defaults to the oboard-sb binary installed beside the Agent")
+	coreService := flag.String("core-service", "", "system service to restart; defaults to oboard-sb")
 	resourceProfile := flag.String("resource-profile", "", "resource profile: auto, small, or large; default auto-detects memory and containers")
 	commandTimeout := flag.Int("command-timeout", 20, "external command timeout in seconds")
 	reloadCommand := flag.String("reload-command", "auto", "core hot reload preset: auto, none, systemd-reload, or openrc-reload")
@@ -103,6 +103,8 @@ func main() {
 	if provided["update-repo"] {
 		cfg.UpdateRepo = *updateRepo
 	}
+	executablePath, _ := os.Executable()
+	cfg = fillLocalCoreDefaults(cfg, executablePath)
 	runner := agent.New(cfg)
 	if err := runner.Config().Validate(); err != nil {
 		log.Fatal(err)
@@ -116,9 +118,6 @@ func main() {
 		if err := runner.Enroll(ctx, enrollToken); err != nil {
 			log.Fatal(err)
 		}
-		if err := agent.SaveConfig(*configPath, runner.Config()); err != nil {
-			log.Fatal(err)
-		}
 		log.Printf("agent enrolled and config saved to %s", *configPath)
 		if *enrollOnly {
 			return
@@ -127,6 +126,16 @@ func main() {
 	if err := runner.Run(ctx); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func fillLocalCoreDefaults(cfg agent.Config, executablePath string) agent.Config {
+	if strings.TrimSpace(cfg.CoreBinary) == "" && strings.TrimSpace(executablePath) != "" {
+		cfg.CoreBinary = agent.InstalledCoreBinary(executablePath)
+	}
+	if strings.TrimSpace(cfg.CoreService) == "" {
+		cfg.CoreService = "oboard-sb"
+	}
+	return cfg
 }
 
 // isManagementCommand reports whether the first argument selects the local

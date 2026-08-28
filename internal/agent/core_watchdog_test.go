@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"context"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -14,5 +16,14 @@ func TestCoreWatchdogBackoff(t *testing.T) {
 		if got := coreWatchdogBackoff(tt.attempt); got != tt.want {
 			t.Fatalf("attempt %d backoff = %s, want %s", tt.attempt, got, tt.want)
 		}
+	}
+}
+
+func TestCoreWatchdogRefreshesServiceAfterConfigChange(t *testing.T) {
+	runner := New(Config{StateDir: t.TempDir(), CoreService: "oboard-sb", ResourceProfile: "large"})
+	status := coreWatchdogStatus{Service: "sing-box", ConfigPath: filepath.Join(runner.stateDir(), "sing-box.json")}
+	runner.runCoreWatchdogCheck(context.Background(), &status, time.Now().UTC())
+	if status.Service != "oboard-sb" || status.State != "waiting_for_config" {
+		t.Fatalf("watchdog status did not follow current core service: %#v", status)
 	}
 }

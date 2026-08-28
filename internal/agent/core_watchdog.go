@@ -62,6 +62,7 @@ func (r *Runner) runCoreWatchdogCheck(ctx context.Context, status *coreWatchdogS
 	if ctx.Err() != nil || !r.managedRestartEnabled() {
 		return
 	}
+	status.Service = r.coreService()
 	status.LastCheckedAt = now
 	if info, err := os.Stat(status.ConfigPath); err != nil || info.Size() == 0 {
 		status.State = "waiting_for_config"

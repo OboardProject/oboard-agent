@@ -381,6 +381,25 @@ func allowedCoreBinaryDir(dir string) bool {
 	return false
 }
 
+func InstalledCoreBinary(executablePath string) string {
+	executablePath = strings.TrimSpace(executablePath)
+	if executablePath == "" {
+		return ""
+	}
+	if resolved, err := filepath.EvalSymlinks(executablePath); err == nil {
+		executablePath = resolved
+	}
+	absolute, err := filepath.Abs(executablePath)
+	if err != nil {
+		return ""
+	}
+	candidate := filepath.Join(filepath.Dir(absolute), "oboard-sb")
+	if validateManagedPath("core_binary", candidate) != nil {
+		return ""
+	}
+	return candidate
+}
+
 func validateWarpCommand(value string) error {
 	value = strings.TrimSpace(value)
 	switch value {
@@ -461,6 +480,12 @@ func lowOverheadTransportWithClock(now func() time.Time) *http.Transport {
 }
 
 func (r *Runner) Enroll(ctx context.Context, enrollmentToken string) error {
+	bootstrap := r.Config()
+	if strings.TrimSpace(bootstrap.ConfigPath) != "" {
+		if err := SaveConfig(bootstrap.ConfigPath, bootstrap); err != nil {
+			return fmt.Errorf("save enrollment bootstrap config: %w", err)
+		}
+	}
 	reqBody := map[string]any{"enrollment_token": enrollmentToken, "health": r.Probe(true)}
 	var resp struct {
 		ServerID               int64  `json:"server_id"`
@@ -482,6 +507,11 @@ func (r *Runner) Enroll(ctx context.Context, enrollmentToken string) error {
 	cfg.ConnectionAuditEnabled = resp.ConnectionAuditEnabled
 	r.storeConfig(cfg)
 	r.connectionAudit.setEnabled(cfg.ConnectionAuditEnabled)
+	if strings.TrimSpace(cfg.ConfigPath) != "" {
+		if err := SaveConfig(cfg.ConfigPath, cfg); err != nil {
+			return fmt.Errorf("save enrolled agent config: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -1223,6 +1253,7 @@ func (r *Runner) updateAgentConfig(patch Config, fields map[string]json.RawMessa
 		}
 	}
 	current := r.Config()
+	currentCoreService := r.coreService()
 	oldController := current.ControllerURL
 	oldStateDir := current.StateDir
 	next := current
@@ -1287,14 +1318,44 @@ func (r *Runner) updateAgentConfig(patch Config, fields map[string]json.RawMessa
 	if err := next.Validate(); err != nil {
 		return map[string]any{"message": "agent config update rejected"}, err
 	}
+	nextCoreService := strings.TrimSpace(next.CoreService)
+	if nextCoreService == "" {
+		nextCoreService = "oboard-sb"
+	}
+	coreServiceChanged := currentCoreService != nextCoreService
+	coreIdentityChanged := current.CoreBinary != next.CoreBinary || current.CoreService != next.CoreService
 	path := next.ConfigPath
 	if path == "" {
 		path = "/etc/oboard-agent/config.json"
 	}
+	r.coreLifecycleMu.Lock()
+	stoppedPreviousService := false
+	previousServiceManager := ""
+	if coreServiceChanged && r.managedRestartEnabled() {
+		previousServiceManager = serviceManager()
+		if previousServiceManager != "" && managedServiceActive(previousServiceManager, currentCoreService) == nil {
+			if err := stopManagedService(previousServiceManager, currentCoreService); err != nil {
+				r.coreLifecycleMu.Unlock()
+				return map[string]any{"message": "agent config update rejected", "core_service": currentCoreService}, fmt.Errorf("stop previous core service %s: %w", currentCoreService, err)
+			}
+			stoppedPreviousService = true
+		}
+	}
 	if err := SaveConfig(path, next); err != nil {
+		if stoppedPreviousService {
+			_ = startManagedService(previousServiceManager, currentCoreService)
+		}
+		r.coreLifecycleMu.Unlock()
 		return map[string]any{"message": "agent config update failed", "path": path}, err
 	}
 	r.storeConfig(next)
+	if coreIdentityChanged {
+		r.mu.Lock()
+		r.coreBinaryCache = ""
+		r.coreServiceCache = ""
+		r.mu.Unlock()
+	}
+	r.coreLifecycleMu.Unlock()
 	r.connectionAudit.setEnabled(next.ConnectionAuditEnabled)
 	coreAuditErr := r.configureCoreConnectionAudit(context.Background(), next.ConnectionAuditEnabled)
 	if !next.ConnectionAuditEnabled {
@@ -1318,18 +1379,15 @@ func (r *Runner) updateAgentConfig(patch Config, fields map[string]json.RawMessa
 		r.connectionAuditStateLoaded = false
 		r.connectionAuditMu.Unlock()
 	}
-	if current.CoreBinary != next.CoreBinary || current.CoreService != next.CoreService {
-		r.mu.Lock()
-		r.coreBinaryCache = ""
-		r.coreServiceCache = ""
-		r.mu.Unlock()
-	}
 	result := map[string]any{
 		"message":                  "agent config updated",
 		"path":                     path,
 		"controller_changed":       oldController != "" && next.ControllerURL != oldController,
 		"restart_recommended":      oldController != "" && next.ControllerURL != oldController,
 		"connection_audit_enabled": next.ConnectionAuditEnabled,
+		"previous_core_service":    currentCoreService,
+		"core_service":             nextCoreService,
+		"previous_service_stopped": stoppedPreviousService,
 	}
 	if coreAuditErr != nil {
 		result["connection_audit_core_sync_error"] = coreAuditErr.Error()
@@ -2101,14 +2159,28 @@ func (r *Runner) coreHotReloadSupported() bool {
 }
 
 func (r *Runner) coreServiceActive() error {
-	switch detectServiceManager() {
+	return managedServiceActive(detectServiceManager(), r.coreService())
+}
+
+func managedServiceActive(manager, service string) error {
+	switch manager {
 	case "systemd":
-		return runCommand(3*time.Second, "systemctl", "is-active", "--quiet", r.coreService())
+		return runCommand(3*time.Second, "systemctl", "is-active", "--quiet", service)
 	case "openrc":
-		return runCommand(3*time.Second, "rc-service", r.coreService(), "status")
+		return runCommand(3*time.Second, "rc-service", service, "status")
 	default:
 		return errors.New("supported service manager is unavailable")
 	}
+}
+
+func startManagedService(manager, service string) error {
+	if manager == "systemd" {
+		return runCommand(20*time.Second, "systemctl", "start", service)
+	}
+	if manager == "openrc" {
+		return runCommand(20*time.Second, "rc-service", service, "start")
+	}
+	return fmt.Errorf("supported service manager is unavailable")
 }
 
 func (r *Runner) waitCoreServiceStable(timeout time.Duration) error {
@@ -2226,11 +2298,7 @@ func (r *Runner) coreBinary() string {
 	if r.coreBinaryCache != "" {
 		return r.coreBinaryCache
 	}
-	if _, err := exec.LookPath("oboard-sb"); err == nil {
-		r.coreBinaryCache = "oboard-sb"
-		return r.coreBinaryCache
-	}
-	r.coreBinaryCache = "sing-box"
+	r.coreBinaryCache = "oboard-sb"
 	return r.coreBinaryCache
 }
 
@@ -2243,11 +2311,7 @@ func (r *Runner) coreService() string {
 	if r.coreServiceCache != "" {
 		return r.coreServiceCache
 	}
-	if _, err := exec.LookPath("oboard-sb"); err == nil {
-		r.coreServiceCache = "oboard-sb"
-		return r.coreServiceCache
-	}
-	r.coreServiceCache = "sing-box"
+	r.coreServiceCache = "oboard-sb"
 	return r.coreServiceCache
 }
 
@@ -2867,10 +2931,7 @@ func formatCoreVersion(out string) string {
 }
 
 func detectCoreBinary() string {
-	if _, err := exec.LookPath("oboard-sb"); err == nil {
-		return "oboard-sb"
-	}
-	return "sing-box"
+	return "oboard-sb"
 }
 
 func kernel() string {

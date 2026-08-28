@@ -45,6 +45,85 @@ func TestNormalizeConfigResourceDefaults(t *testing.T) {
 	}
 }
 
+func TestImplicitCoreIdentityUsesOBoardNames(t *testing.T) {
+	runner := New(Config{})
+	if got := runner.coreBinary(); got != "oboard-sb" {
+		t.Fatalf("implicit core binary = %q, want oboard-sb", got)
+	}
+	if got := runner.coreService(); got != "oboard-sb" {
+		t.Fatalf("implicit core service = %q, want oboard-sb", got)
+	}
+	if got := detectCoreBinary(); got != "oboard-sb" {
+		t.Fatalf("detected core binary = %q, want oboard-sb", got)
+	}
+}
+
+func TestEnrollTimeoutPreservesBootstrapCoreConfig(t *testing.T) {
+	t.Setenv("OBOARD_DISABLE_PUBLIC_IP_DETECT", "1")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(200 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"server_id":7,"agent_id":"agent-7","agent_token":"token-7"}`))
+	}))
+	defer server.Close()
+
+	configPath := filepath.Join(t.TempDir(), "agent.json")
+	runner := New(Config{
+		ConfigPath:              configPath,
+		ControllerURL:           server.URL,
+		StateDir:                "/var/lib/oboard-agent",
+		CoreBinary:              "/opt/oboard/oboard-sb",
+		CoreService:             "oboard-sb",
+		AllowInsecureController: true,
+	})
+	runner.client.Timeout = 25 * time.Millisecond
+	if err := runner.Enroll(context.Background(), "enrollment-token"); err == nil {
+		t.Fatal("expected enrollment timeout")
+	}
+	stored, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.CoreBinary != "/opt/oboard/oboard-sb" || stored.CoreService != "oboard-sb" {
+		t.Fatalf("bootstrap core config was lost after timeout: %#v", stored)
+	}
+	if stored.AgentID != "" || stored.AgentToken != "" {
+		t.Fatalf("unconfirmed enrollment credentials were persisted: %#v", stored)
+	}
+}
+
+func TestEnrollSuccessPersistsCredentialsAndCoreConfig(t *testing.T) {
+	t.Setenv("OBOARD_DISABLE_PUBLIC_IP_DETECT", "1")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"server_id":7,"agent_id":"agent-7","agent_token":"token-7","connection_audit_enabled":true}`))
+	}))
+	defer server.Close()
+
+	configPath := filepath.Join(t.TempDir(), "agent.json")
+	runner := New(Config{
+		ConfigPath:              configPath,
+		ControllerURL:           server.URL,
+		StateDir:                "/var/lib/oboard-agent",
+		CoreBinary:              "/opt/oboard/oboard-sb",
+		CoreService:             "oboard-sb",
+		AllowInsecureController: true,
+	})
+	if err := runner.Enroll(context.Background(), "enrollment-token"); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.ServerID != 7 || stored.AgentID != "agent-7" || stored.AgentToken != "token-7" || !stored.ConnectionAuditEnabled {
+		t.Fatalf("enrollment credentials were not persisted: %#v", stored)
+	}
+	if stored.CoreBinary != "/opt/oboard/oboard-sb" || stored.CoreService != "oboard-sb" {
+		t.Fatalf("enrollment changed the core identity: %#v", stored)
+	}
+}
+
 func TestExecuteDeploymentTaskReturnsOneReadableResult(t *testing.T) {
 	dir := t.TempDir()
 	config := `{"log":{"level":"warn"}}`
@@ -1647,6 +1726,57 @@ func TestControllerCannotGrantPanelUpdateConsent(t *testing.T) {
 	}
 	if granted.Config().AllowPanelUpdate {
 		t.Fatal("consent withdrawal was ignored")
+	}
+}
+
+func TestCoreServiceChangeStopsPreviousManagedInstance(t *testing.T) {
+	dir := t.TempDir()
+	binDir := filepath.Join(dir, "bin")
+	if err := os.Mkdir(binDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	serviceLog := filepath.Join(dir, "services.log")
+	rcService := filepath.Join(binDir, "rc-service")
+	if err := os.WriteFile(rcService, []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$SERVICE_LOG\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir)
+	t.Setenv("SERVICE_LOG", serviceLog)
+
+	configPath := filepath.Join(dir, "agent.json")
+	runner := New(Config{
+		ConfigPath:      configPath,
+		StateDir:        filepath.Join(dir, "state"),
+		CoreBinary:      "/usr/bin/sing-box",
+		CoreService:     "sing-box",
+		RestartCommand:  "auto",
+		ResourceProfile: "large",
+	})
+	patch := Config{CoreBinary: "/opt/oboard/oboard-sb", CoreService: "oboard-sb"}
+	fields := map[string]json.RawMessage{
+		"core_binary":  json.RawMessage(`"/opt/oboard/oboard-sb"`),
+		"core_service": json.RawMessage(`"oboard-sb"`),
+	}
+	result, err := runner.updateAgentConfig(patch, fields)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stopped, _ := result["previous_service_stopped"].(bool); !stopped {
+		t.Fatalf("previous service was not stopped: %#v", result)
+	}
+	commands, err := os.ReadFile(serviceLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(commands); got != "sing-box status\nsing-box stop\n" {
+		t.Fatalf("managed service transition commands = %q", got)
+	}
+	stored, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.CoreBinary != "/opt/oboard/oboard-sb" || stored.CoreService != "oboard-sb" {
+		t.Fatalf("new core identity was not persisted: %#v", stored)
 	}
 }
 
