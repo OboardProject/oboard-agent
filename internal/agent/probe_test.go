@@ -371,6 +371,47 @@ func TestNetworkRateUsesCounterDeltaAndRejectsReset(t *testing.T) {
 	}
 }
 
+func TestCPUCountFromCPUInfoDoesNotParseModelName(t *testing.T) {
+	qemuXeon := `processor	: 0
+vendor_id	: GenuineIntel
+cpu family	: 6
+model		: 58
+model name	: Intel Xeon E3-12xx v2 (Ivy Bridge, IBRS)
+processor	: 1
+model name	: Intel Xeon E3-12xx v2 (Ivy Bridge, IBRS)
+processor	: 2
+model name	: Intel Xeon E3-12xx v2 (Ivy Bridge, IBRS)
+processor	: 3
+model name	: Intel Xeon E3-12xx v2 (Ivy Bridge, IBRS)
+`
+	if name := cpuNameFromCPUInfo(qemuXeon); name != "Intel Xeon E3-12xx v2 (Ivy Bridge, IBRS)" {
+		t.Fatalf("cpu name = %q", name)
+	}
+	if cores := cpuCountFromCPUInfo(qemuXeon); cores != 4 {
+		t.Fatalf("cpu cores = %d, want 4 logical processors not a model token", cores)
+	}
+
+	amdNamedCores := `processor	: 0
+model name	: AMD EPYC 7763 64-Core Processor
+processor	: 1
+model name	: AMD EPYC 7763 64-Core Processor
+`
+	if cores := cpuCountFromCPUInfo(amdNamedCores); cores != 2 {
+		t.Fatalf("named-core model parsed as cores: %d", cores)
+	}
+
+	armHardwareOnly := `Hardware	: BCM2835
+Revision	: a020d3
+Serial		: 00000000
+`
+	if name := cpuNameFromCPUInfo(armHardwareOnly); name != "BCM2835" {
+		t.Fatalf("arm hardware name = %q", name)
+	}
+	if cores := cpuCountFromCPUInfo(armHardwareOnly); cores != 0 {
+		t.Fatalf("hardware-only cpuinfo cores = %d, want 0 so NumCPU can fall back", cores)
+	}
+}
+
 func TestMonitoringModeLocalIntervals(t *testing.T) {
 	if got := monitoringLocalMetricsInterval("standard"); got != 9*time.Second {
 		t.Fatalf("standard interval = %s", got)

@@ -46,18 +46,23 @@ type networkCounterSample struct {
 }
 
 type hostStaticInfo struct {
-	CPUName string
-	Kernel  string
-	Distro  distroInfo
+	CPUName  string
+	CPUCores int
+	Kernel   string
+	Distro   distroInfo
 }
 
 const firstCPUSampleWait = 250 * time.Millisecond
 
 func detectHostStaticInfo() hostStaticInfo {
-	info := hostStaticInfo{CPUName: runtime.GOARCH, Kernel: kernel()}
+	info := hostStaticInfo{CPUName: runtime.GOARCH, CPUCores: runtime.NumCPU(), Kernel: kernel()}
 	if runtime.GOOS == "linux" {
-		if cpuName := linuxCPUName(); cpuName != "" {
-			info.CPUName = cpuName
+		name, cores := linuxCPUInfo()
+		if name != "" {
+			info.CPUName = name
+		}
+		if cores > 0 {
+			info.CPUCores = cores
 		}
 		info.Distro = detectDistroInfo()
 	}
@@ -201,12 +206,17 @@ func linuxProcessCount(procRoot string) uint64 {
 	return count
 }
 
-func linuxCPUName() string {
+func linuxCPUInfo() (name string, cores int) {
 	b, err := os.ReadFile("/proc/cpuinfo")
 	if err != nil {
-		return ""
+		return "", 0
 	}
-	for _, line := range strings.Split(string(b), "\n") {
+	content := string(b)
+	return cpuNameFromCPUInfo(content), cpuCountFromCPUInfo(content)
+}
+
+func cpuNameFromCPUInfo(content string) string {
+	for _, line := range strings.Split(content, "\n") {
 		if strings.HasPrefix(line, "model name") || strings.HasPrefix(line, "Hardware") {
 			parts := strings.SplitN(line, ":", 2)
 			if len(parts) == 2 {
@@ -215,6 +225,22 @@ func linuxCPUName() string {
 		}
 	}
 	return ""
+}
+
+func cpuCountFromCPUInfo(content string) int {
+	count := 0
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "processor") {
+			continue
+		}
+		key, _, ok := strings.Cut(trimmed, ":")
+		if !ok || strings.TrimSpace(key) != "processor" {
+			continue
+		}
+		count++
+	}
+	return count
 }
 
 func linuxMemory() (total uint64, used uint64) {
