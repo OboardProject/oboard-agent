@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -106,17 +107,25 @@ func TestDownloadAndInstallSignedRelease(t *testing.T) {
 	}
 }
 
-func TestDownloadReleaseAssetRetriesTruncatedResponse(t *testing.T) {
+func TestDownloadReleaseAssetResumesTruncatedResponse(t *testing.T) {
 	data := []byte("complete-signed-binary")
 	expected := security.ReleaseManifestFile{SHA256: sha256Hex(data), Size: int64(len(data))}
 	var requests atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Length", strconv.Itoa(len(data)))
-		if requests.Add(1) == 1 {
-			_, _ = w.Write(data[:len(data)/2])
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		request := requests.Add(1)
+		if request == 2 {
+			wantRange := fmt.Sprintf("bytes=%d-", len(data)/2)
+			if got := r.Header.Get("Range"); got != wantRange {
+				t.Errorf("resume range = %q, want %q", got, wantRange)
+			}
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", len(data)/2, len(data)-1, len(data)))
+			w.Header().Set("Content-Length", strconv.Itoa(len(data)-len(data)/2))
+			w.WriteHeader(http.StatusPartialContent)
+			_, _ = w.Write(data[len(data)/2:])
 			return
 		}
-		_, _ = w.Write(data)
+		w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+		_, _ = w.Write(data[:len(data)/2])
 	}))
 	defer server.Close()
 
@@ -135,10 +144,25 @@ func TestDownloadReleaseAssetReportsExhaustedRetries(t *testing.T) {
 	data := []byte("complete-signed-binary")
 	expected := security.ReleaseManifestFile{SHA256: sha256Hex(data), Size: int64(len(data))}
 	var requests atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
-		w.Header().Set("Content-Length", strconv.Itoa(len(data)))
-		_, _ = w.Write(data[:len(data)/2])
+		start := int64(0)
+		if rawRange := r.Header.Get("Range"); rawRange != "" {
+			if _, err := fmt.Sscanf(rawRange, "bytes=%d-", &start); err != nil {
+				t.Errorf("invalid range %q: %v", rawRange, err)
+			}
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, len(data)-1, len(data)))
+			w.Header().Set("Content-Length", strconv.Itoa(len(data)-int(start)))
+			w.WriteHeader(http.StatusPartialContent)
+		} else {
+			w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+		}
+		remaining := data[start:]
+		cut := len(remaining) / 2
+		if cut < 1 {
+			cut = 1
+		}
+		_, _ = w.Write(remaining[:cut])
 	}))
 	defer server.Close()
 

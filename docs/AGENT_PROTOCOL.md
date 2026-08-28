@@ -1099,6 +1099,8 @@ Payload:
 - `panel`: download from Controller `/install/agent-self-update.sh` and `/downloads/*`. Release Agents reject this unless `allow_panel_update=true` or the Agent build is dev.
 - `github`: run the GitHub update script from `github_repo`.
 
+Every manifest and binary transfer gets at most three attempts. A binary transfer interrupted after receiving bytes resumes from the verified target file's current size when the origin honors HTTP Range; an origin that ignores Range is restarted safely from byte zero. Permanent HTTP errors, local filesystem errors, and verification failures are not treated as connection retries, and no downloaded binary is installed until the signed manifest size and SHA-256 checks pass.
+
 ### `uninstall_agent`
 
 Payload:
@@ -1608,6 +1610,7 @@ Used by `update_agent` when source is `panel`. It downloads:
 - `/downloads/oboard-sb-linux-amd64` or `/downloads/oboard-sb-linux-arm64`
 
 The script can delay restarting `oboard-agent` so the current HTTP task result can be posted before process replacement. It reads the persisted install directory before replacing either binary.
+Its download helpers use the same three-attempt limit and `curl --continue-at -`, so a transient Controller connection loss keeps the partial file for the next attempt instead of restarting the transfer.
 
 ## Protocol Rules
 

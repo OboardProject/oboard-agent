@@ -177,9 +177,11 @@ func downloadReleaseAssetWithPolicy(ctx context.Context, client *http.Client, ra
 		}
 		lastErr = err
 		if ctxErr := ctx.Err(); ctxErr != nil {
+			_ = os.Remove(path)
 			return fmt.Errorf("download %s stopped after %d attempts: %w", name, attempt, ctxErr)
 		}
 		if !retryable {
+			_ = os.Remove(path)
 			return fmt.Errorf("download %s: %w", name, err)
 		}
 		if attempt == attempts {
@@ -190,16 +192,33 @@ func downloadReleaseAssetWithPolicy(ctx context.Context, client *http.Client, ra
 			delay = policy.retryDelays[attempt-1]
 		}
 		if err := waitReleaseRetry(ctx, delay); err != nil {
+			_ = os.Remove(path)
 			return fmt.Errorf("download %s stopped after %d attempts: %w", name, attempt, err)
 		}
 	}
+	_ = os.Remove(path)
 	return fmt.Errorf("download %s failed after %d attempts: %w", name, attempts, lastErr)
 }
 
 func downloadReleaseAssetOnce(ctx context.Context, client *http.Client, rawURL, path string, maxBytes int64, expected *security.ReleaseManifestFile) (bool, error) {
+	resumeAt := int64(0)
+	if expected != nil {
+		if info, err := os.Stat(path); err == nil {
+			if !info.Mode().IsRegular() || info.Size() < 0 || info.Size() >= expected.Size {
+				_ = os.Remove(path)
+			} else {
+				resumeAt = info.Size()
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return false, err
+		}
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return false, err
+	}
+	if resumeAt > 0 {
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", resumeAt))
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -209,36 +228,54 @@ func downloadReleaseAssetOnce(ctx context.Context, client *http.Client, rawURL, 
 		return true, err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
+	if resp.StatusCode != http.StatusOK && !(resumeAt > 0 && resp.StatusCode == http.StatusPartialContent) {
 		return retryableReleaseStatus(resp.StatusCode), fmt.Errorf("returned %s", resp.Status)
+	}
+	if resumeAt > 0 && resp.StatusCode == http.StatusPartialContent && !validReleaseContentRange(resp.Header.Get("Content-Range"), resumeAt, expected.Size) {
+		_ = os.Remove(path)
+		return true, errors.New("resume response has an invalid content range")
+	}
+	if resumeAt > 0 && resp.StatusCode == http.StatusOK {
+		// A compliant origin may ignore Range. Restart safely from byte zero
+		// instead of appending a second full copy to the partial file.
+		resumeAt = 0
 	}
 	if resp.ContentLength > maxBytes {
 		return false, errors.New("response exceeds size limit")
 	}
-	if expected != nil && resp.ContentLength >= 0 && resp.ContentLength != expected.Size {
-		return true, fmt.Errorf("response length %d does not match signed size %d", resp.ContentLength, expected.Size)
+	if expected != nil && resp.ContentLength >= 0 && resp.ContentLength != expected.Size-resumeAt {
+		return true, fmt.Errorf("response length %d does not match remaining signed size %d", resp.ContentLength, expected.Size-resumeAt)
 	}
 	// #nosec G304 -- path is a fixed file inside a newly created private update directory.
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	flags := os.O_CREATE | os.O_WRONLY
+	if resumeAt > 0 {
+		flags |= os.O_APPEND
+	} else {
+		flags |= os.O_TRUNC
+	}
+	f, err := os.OpenFile(path, flags, 0o600)
 	if err != nil {
 		return false, err
 	}
 	complete := false
+	keepPartial := false
 	defer func() {
 		_ = f.Close()
-		if !complete {
+		if !complete && !keepPartial {
 			_ = os.Remove(path)
 		}
 	}()
-	readLimit := maxBytes
+	readLimit := maxBytes - resumeAt
 	if expected != nil && expected.Size < readLimit {
-		readLimit = expected.Size
+		readLimit = expected.Size - resumeAt
 	}
 	written, copyErr := io.Copy(f, io.LimitReader(resp.Body, readLimit+1))
 	closeErr := f.Close()
 	if copyErr != nil {
 		var pathErr *os.PathError
-		return !errors.As(copyErr, &pathErr), copyErr
+		retryable := !errors.As(copyErr, &pathErr)
+		keepPartial = retryable && expected != nil && resumeAt+written < expected.Size
+		return retryable, copyErr
 	}
 	if closeErr != nil {
 		return false, closeErr
@@ -250,9 +287,14 @@ func downloadReleaseAssetOnce(ctx context.Context, client *http.Client, rawURL, 
 		return false, errors.New("response exceeds size limit")
 	}
 	if resp.ContentLength >= 0 && written != resp.ContentLength {
+		keepPartial = expected != nil && resumeAt+written < expected.Size
 		return true, fmt.Errorf("received %d of %d bytes", written, resp.ContentLength)
 	}
 	if expected != nil {
+		if resumeAt+written < expected.Size {
+			keepPartial = true
+			return true, fmt.Errorf("received %d of %d signed bytes", resumeAt+written, expected.Size)
+		}
 		sha, size, err := security.SHA256File(path)
 		if err != nil {
 			return false, err
@@ -263,6 +305,15 @@ func downloadReleaseAssetOnce(ctx context.Context, client *http.Client, rawURL, 
 	}
 	complete = true
 	return false, nil
+}
+
+func validReleaseContentRange(value string, start, total int64) bool {
+	value = strings.TrimSpace(value)
+	var gotStart, gotEnd, gotTotal int64
+	if n, err := fmt.Sscanf(value, "bytes %d-%d/%d", &gotStart, &gotEnd, &gotTotal); err != nil || n != 3 {
+		return false
+	}
+	return value == fmt.Sprintf("bytes %d-%d/%d", gotStart, gotEnd, gotTotal) && gotStart == start && gotEnd == total-1 && gotTotal == total
 }
 
 func retryableReleaseStatus(status int) bool {
