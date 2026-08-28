@@ -645,7 +645,7 @@ Payload:
   "version": 1783278569000000000,
   "correction_mode": "off",
   "threshold_seconds": 30,
-  "ntp_servers": ["time.cloudflare.com", "time.google.com", "pool.ntp.org"],
+  "ntp_servers": ["time.cloudflare.com", "time.google.com", "ntp.aliyun.com"],
   "force": false
 }
 ```
@@ -662,9 +662,14 @@ Correction modes:
 
 Agent queries exactly three configured NTP sources concurrently with a
 five-second batch timeout, requires at least two replies, and uses their median
-offset. A Controller `ts` observed within the previous two minutes is the
-fallback when NTP quorum is unavailable. When both references exist, Agent
-rejects the NTP result if it differs from Controller by more than five seconds.
+offset. Controller independently queries the same three sources every minute,
+requires the same quorum, and uses its median result to maintain a two-minute
+NTP reference cache. Agent control messages include `ts` and `ts_source` only
+while that cache is fresh; an unavailable Controller quorum never falls back
+to its unverified system clock. A Controller `ts` observed within the previous
+two minutes is the Agent fallback when its own NTP quorum is unavailable. When
+both references exist, Agent rejects the NTP result if it differs from the
+Controller NTP reference by more than five seconds.
 
 Result:
 
@@ -674,7 +679,7 @@ Result:
   "correction_mode": "auto",
   "raw_offset_ms": 42000,
   "effective_offset_ms": 0,
-  "source": "ntp:time.cloudflare.com,time.google.com,pool.ntp.org",
+  "source": "ntp:time.cloudflare.com,time.google.com,ntp.aliyun.com",
   "checked_at": "2026-07-08T00:00:00Z",
   "system_sync_attempted": true,
   "system_sync_succeeded": false,
