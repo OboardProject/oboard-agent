@@ -81,7 +81,6 @@ type Runner struct {
 	logMaintenanceEvery        time.Duration
 	trafficState               trafficLocalState
 	trafficStateLoaded         bool
-	trafficControllerProtocol  int
 	connectionAuditState       connectionAuditLocalState
 	connectionAuditStateLoaded bool
 	latencyProbeState          latencyProbeLocalState

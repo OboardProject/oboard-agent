@@ -205,7 +205,7 @@ func TestTrafficRangeReportIDIsDeterministic(t *testing.T) {
 	report := &trafficPendingRange{StreamID: "ts_a", CounterEpoch: "ce_1", PeriodKey: "2026-08-01", FromUpload: 8, ToUpload: 10, FromDownload: 8, ToDownload: 10}
 	first := trafficRangeReportID("agent-1", report)
 	second := trafficRangeReportID("agent-1", report)
-	if first == "" || first != second || !strings.HasPrefix(first, "tr2_") {
+	if first == "" || first != second || !strings.HasPrefix(first, "tr_") {
 		t.Fatalf("report ids = %q %q", first, second)
 	}
 }
@@ -213,7 +213,6 @@ func TestTrafficRangeReportIDIsDeterministic(t *testing.T) {
 func TestPersistBeforeReloadWritesPendingRange(t *testing.T) {
 	dir := t.TempDir()
 	runner := New(Config{StateDir: dir, AgentID: "agent-1"})
-	runner.lastKernelCapabilities = []string{trafficLedgerCapability}
 	runner.coreClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		if req.URL.Path != "/traffic/snapshot" {
 			return &http.Response{StatusCode: http.StatusNotFound, Body: http.NoBody, Header: make(http.Header)}, nil
@@ -243,13 +242,32 @@ func TestPersistBeforeReloadWritesPendingRange(t *testing.T) {
 	}
 }
 
+func TestLegacyPendingConvertsToCheckpointRange(t *testing.T) {
+	runner := New(Config{StateDir: t.TempDir(), AgentID: "agent-1"})
+	state := runner.trafficStateLocked()
+	state.Pending = []trafficPendingReport{{
+		ReportID: "legacy-pending", UserID: 7, PeriodKey: "2026-08-01", Upload: 20, Download: 30,
+		SnapshotKey: "user:7", CumulativeUpload: 120, CumulativeDownload: 130,
+	}}
+	state.Last = map[string]trafficSnapshotItem{"user:7": {Key: "user:7", Source: "core", CounterEpoch: "ce_1"}}
+	if !runner.convertLegacyPendingToRangesLocked(state) {
+		t.Fatal("expected leftover pending to convert")
+	}
+	if len(state.Pending) != 0 {
+		t.Fatalf("leftover pending = %#v", state.Pending)
+	}
+	report := state.PendingReports["legacy-pending"]
+	if report == nil || report.FromUpload != 100 || report.ToUpload != 120 || report.FromDownload != 100 || report.ToDownload != 130 || report.CounterEpoch != "ce_1" {
+		t.Fatalf("converted range = %#v", report)
+	}
+}
+
 func TestControllerCheckpointRecoveryDoesNotRebillFromZero(t *testing.T) {
 	runner := New(Config{StateDir: t.TempDir(), AgentID: "agent-1"})
 	state := &trafficLocalState{SchemaVersion: 2, Streams: map[string]*trafficStreamState{}, PendingReports: map[string]*trafficPendingRange{}, RecoveryRequired: true}
 	streamID := trafficStreamID("core", "user:7")
 	state.Streams[streamID] = &trafficStreamState{Source: "core", SnapshotKey: "user:7", CounterEpoch: "ce_1", PeriodKey: "2026-08-01", UserID: 7, ObservedUpload: 10, ObservedDownload: 10, Status: trafficStatusRecovering}
 	applyTrafficLedgerResponse(state, trafficReportResponse{
-		ProtocolVersion: 2,
 		StreamCheckpoints: []trafficStreamCheckpoint{{
 			Source: "core", StreamID: streamID, CounterEpoch: "ce_1", PeriodKey: "2026-08-01", AcceptedUpload: 8, AcceptedDownload: 8, Status: trafficStatusHealthy,
 		}},

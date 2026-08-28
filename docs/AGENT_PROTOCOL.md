@@ -1377,44 +1377,22 @@ Controller verifies the port forward source server is the authenticated server. 
 
 ### `POST /api/v1/agent/traffic-reports`
 
-Agent-authenticated.
-
-Request:
-
-```json
-{
-  "period_key": "2026-07",
-  "items": [
-    {
-      "report_id": "agent-a-user-1-1721280000",
-      "user_id": 1,
-      "inbound_id": 1,
-      "path_id": 17,
-      "upload_bytes": 1024,
-      "download_bytes": 4096,
-      "started_at": "2026-07-18T04:00:00Z",
-      "ended_at": "2026-07-18T04:00:15Z"
-    }
-  ]
-}
-```
-
-Requests with `protocol_version=2` upload checkpoint ranges instead of client
-deltas. Kernel `GET /traffic/snapshot` and Agent-native SSH snapshots include a
-per-counter `counter_epoch`. Agent derives `stream_id` from `source` plus the
-snapshot key and a deterministic `report_id` from the range. Controller computes
-the billed delta, validates continuity against `traffic_counter_streams`, and
-returns `stream_checkpoints` plus `accepted_reports` (`accepted`, `duplicate`,
+Agent-authenticated. This is the current `/api/v1` traffic contract. Delta
+`items` payloads and a parallel `protocol_version` field are rejected. Kernel
+`GET /traffic/snapshot` and Agent-native SSH snapshots include a per-counter
+`counter_epoch`. Agent derives `stream_id` from `source` plus the snapshot key
+and a deterministic `report_id` from the range. Controller computes the billed
+delta, validates continuity against `traffic_counter_streams`, and returns
+`stream_checkpoints` plus `accepted_reports` (`accepted`, `duplicate`,
 `covered`, `checkpoint_gap`, `checkpoint_overlap`, `epoch_conflict`, `rejected`).
 A lost HTTP ACK retries the same range without double billing. Missing or corrupt
 `traffic-state.json` must reconcile against Controller checkpoints instead of
 billing `0 → current`. Same-epoch counter regression is fail-closed. Kernels
-advertise `traffic_ledger_v2`; Controllers without that response fall back to
-V1 `items`. ACK payloads include `counter_epoch` and are ignored on mismatch.
+advertise `traffic_ledger`. ACK payloads include `counter_epoch` and are ignored
+on mismatch.
 
 ```json
 {
-  "protocol_version": 2,
   "agent_instance_id": "ce_...",
   "streams": [
     {
@@ -1430,7 +1408,7 @@ V1 `items`. ACK payloads include `counter_epoch` and are ignored on mismatch.
   ],
   "reports": [
     {
-      "report_id": "tr2_...",
+      "report_id": "tr_...",
       "source": "core",
       "stream_id": "ts_...",
       "counter_epoch": "ce_...",
@@ -1448,9 +1426,9 @@ V1 `items`. ACK payloads include `counter_epoch` and are ignored on mismatch.
 
 Controller verifies:
 
-- no more than 1000 streams and 500 reports are included on V2, or 500 V1 items;
-- every report has a stable `report_id` for idempotent accounting, and V2 also
-  rejects duplicate checkpoint ranges even when the ID differs;
+- no more than 1000 streams and 500 reports are included;
+- every report has a stable `report_id` for idempotent accounting, and duplicate
+  checkpoint ranges are rejected even when the ID differs;
 - byte counters are non-negative;
 - a normal inbound belongs to the authenticated server, or a transparent-path
   report names the root inbound and a path whose derived processing server is
@@ -1460,9 +1438,9 @@ Controller verifies:
 - user is active;
 - user is allowed on that inbound.
 
-The response returns `accepted_report_ids` for V1, or `protocol_version=2` with
-`stream_checkpoints` and `accepted_reports` for V2, plus runtime policies only
-for users whose first authentication/decryption point is that server. Downstream shared
+The response returns `stream_checkpoints`, `accepted_reports`, and
+`accepted_report_ids`, plus runtime policies only for users whose first
+authentication/decryption point is that server. Downstream shared
 SS/SSH/WireGuard nodes receive no end-user quota lease and do not report the
 same bytes again.
 
@@ -1478,9 +1456,7 @@ Runtime policies carry `lease_bytes`, `reset_lease_bytes`, and
 `lease_enforced`. For a limited user Controller always sets
 `lease_enforced=true`. Effective cap is `used_baseline_bytes + max(lease_bytes, 0)`,
 so a zero remaining lease rejects new billable traffic instead of falling back
-to the global quota. Mixed-version Agents that lack `traffic_ledger_v2` receive
-a per-server `quota_state=quota_exceeded` shim when their lease is 0; the
-global period state is not changed. They also carry `reset_mode`, `reset_day`, `reset_anchor`,
+to the global quota. They also carry `reset_mode`, `reset_day`, `reset_anchor`,
 and `previous_period_key`. `reset_anchor` is an RFC3339Nano timestamp used by
 `anniversary_month` and `never`; `previous_period_key` tells Agent/core that a
 Controller-side reset-policy migration carried the old period into the current
