@@ -52,6 +52,9 @@ type Config struct {
 	CoreLogBackups          int                      `json:"core_log_backups"`
 	LogBackupsSet           bool                     `json:"-"`
 	CoreLogBackupsSet       bool                     `json:"-"`
+	LogMaxMBSet             bool                     `json:"-"`
+	CoreLogMaxMBSet         bool                     `json:"-"`
+	StorageProfile          string                   `json:"storage_profile"`
 	WarpCommand             string                   `json:"warp_command"`
 	UpdateSource            string                   `json:"update_source"`
 	AllowPanelUpdate        bool                     `json:"allow_panel_update"`
@@ -147,7 +150,11 @@ func New(cfg Config) *Runner {
 	resources := DetectResourceInfo(cfg.ResourceProfile)
 	tuning := ApplyRuntimeTuning(resources)
 	clock := newRuntimeClock(cfg.StateDir)
-	runner := &Runner{coreClient: unixHTTPClient(coreAPISocket), builtinForwardStops: map[int64]func(){}, lastForwardProbe: map[int64]time.Time{}, resources: resources, tuning: tuning, hostInfo: detectHostStaticInfo(), logDir: "/var/log", logMaintenanceEvery: logMaintenanceInterval, monitoringMode: "lightweight", metricReportWake: make(chan struct{}, 1), connectionAudit: newConnectionAuditAccumulator(cfg.ConnectionAuditEnabled), clock: clock}
+	profile := StorageProfile(strings.ToLower(strings.TrimSpace(cfg.StorageProfile)))
+	if profile == StorageProfileAuto {
+		profile = detectStorageProfile(cfg.StateDir, StorageProfileAuto)
+	}
+	runner := &Runner{coreClient: unixHTTPClient(coreAPISocket), builtinForwardStops: map[int64]func(){}, lastForwardProbe: map[int64]time.Time{}, resources: resources, tuning: tuning, hostInfo: detectHostStaticInfo(), logDir: "/var/log", logMaintenanceEvery: logMaintenanceIntervalForProfile(profile), monitoringMode: "lightweight", metricReportWake: make(chan struct{}, 1), connectionAudit: newConnectionAuditAccumulator(cfg.ConnectionAuditEnabled), clock: clock}
 	runner.client = &http.Client{Timeout: 20 * time.Second, Transport: runner.lowOverheadTransport()}
 	runner.storeConfig(cfg)
 	return runner
@@ -182,6 +189,9 @@ func (cfg Config) Validate() error {
 	}
 	if !validResourceProfile(cfg.ResourceProfile) {
 		return fmt.Errorf("resource_profile must be auto, small, or large")
+	}
+	if !validStorageProfile(cfg.StorageProfile) {
+		return fmt.Errorf("storage_profile must be auto, tiny, small, or standard")
 	}
 	if cfg.CommandTimeoutSeconds < 5 || cfg.CommandTimeoutSeconds > 120 {
 		return fmt.Errorf("command_timeout_seconds must be between 5 and 120")
@@ -253,6 +263,8 @@ func LoadConfig(path string) (Config, error) {
 	if err := json.Unmarshal(b, &fields); err == nil {
 		_, cfg.LogBackupsSet = fields["log_backups"]
 		_, cfg.CoreLogBackupsSet = fields["core_log_backups"]
+		_, cfg.LogMaxMBSet = fields["log_max_mb"]
+		_, cfg.CoreLogMaxMBSet = fields["core_log_max_mb"]
 	}
 	return cfg, nil
 }
@@ -291,21 +303,57 @@ func normalizeConfig(cfg Config) Config {
 	if normalizeTimeCorrectionMode(cfg.TimeCorrectionMode) == "" {
 		cfg.TimeCorrectionMode = model.TimeCorrectionOff
 	}
-	if cfg.LogMaxMB <= 0 {
-		cfg.LogMaxMB = 16
+	if cfg.StorageProfile == "" {
+		cfg.StorageProfile = string(StorageProfileAuto)
 	}
-	if cfg.LogBackups < 0 {
-		cfg.LogBackups = 0
-	} else if cfg.LogBackups == 0 && !cfg.LogBackupsSet {
-		cfg.LogBackups = 3
+	cfg.StorageProfile = strings.ToLower(strings.TrimSpace(cfg.StorageProfile))
+	// Apply storage-profile defaults when user did not explicitly set log limits.
+	storageProfile := StorageProfile(cfg.StorageProfile)
+	if storageProfile == StorageProfileAuto {
+		storageProfile = detectStorageProfile(cfg.StateDir, StorageProfileAuto)
 	}
-	if cfg.CoreLogMaxMB <= 0 {
-		cfg.CoreLogMaxMB = 64
+	var explicitAgentMax, explicitCoreMax *int
+	var explicitAgentBackups, explicitCoreBackups *int
+	if cfg.LogMaxMBSet {
+		v := cfg.LogMaxMB
+		explicitAgentMax = &v
 	}
-	if cfg.CoreLogBackups < 0 {
-		cfg.CoreLogBackups = 0
-	} else if cfg.CoreLogBackups == 0 && !cfg.CoreLogBackupsSet {
-		cfg.CoreLogBackups = 3
+	if cfg.CoreLogMaxMBSet {
+		v := cfg.CoreLogMaxMB
+		explicitCoreMax = &v
+	}
+	if cfg.LogBackupsSet {
+		v := cfg.LogBackups
+		explicitAgentBackups = &v
+	}
+	if cfg.CoreLogBackupsSet {
+		v := cfg.CoreLogBackups
+		explicitCoreBackups = &v
+	}
+	defAgentMax, defAgentBackups, defCoreMax, defCoreBackups := logBudgetForProfile(storageProfile, explicitAgentMax, explicitAgentBackups, explicitCoreMax, explicitCoreBackups)
+	if !cfg.LogMaxMBSet {
+		if cfg.LogMaxMB <= 0 {
+			cfg.LogMaxMB = defAgentMax
+		}
+	}
+	if !cfg.LogBackupsSet {
+		if cfg.LogBackups < 0 {
+			cfg.LogBackups = 0
+		} else if cfg.LogBackups == 0 {
+			cfg.LogBackups = defAgentBackups
+		}
+	}
+	if !cfg.CoreLogMaxMBSet {
+		if cfg.CoreLogMaxMB <= 0 {
+			cfg.CoreLogMaxMB = defCoreMax
+		}
+	}
+	if !cfg.CoreLogBackupsSet {
+		if cfg.CoreLogBackups < 0 {
+			cfg.CoreLogBackups = 0
+		} else if cfg.CoreLogBackups == 0 {
+			cfg.CoreLogBackups = defCoreBackups
+		}
 	}
 	cfg.UpdateSource = strings.ToLower(strings.TrimSpace(cfg.UpdateSource))
 	if cfg.UpdateRepo = strings.TrimSpace(cfg.UpdateRepo); cfg.UpdateRepo == "" {
@@ -522,6 +570,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 	r.logStartupSummary(cfg)
 	r.applyLowMemorySocketTuning()
+	r.reconcileUpdateArtifacts()
 	if err := r.restoreManagedPortForwardsOnStartup(); err != nil {
 		log.Printf("restore managed port forwards: %v", err)
 	}
@@ -1286,6 +1335,7 @@ func (r *Runner) updateAgentConfig(patch Config, fields map[string]json.RawMessa
 	}
 	if _, ok := fields["log_max_mb"]; ok {
 		next.LogMaxMB = patch.LogMaxMB
+		next.LogMaxMBSet = true
 	}
 	if _, ok := fields["log_backups"]; ok {
 		next.LogBackups = patch.LogBackups
@@ -1293,10 +1343,17 @@ func (r *Runner) updateAgentConfig(patch Config, fields map[string]json.RawMessa
 	}
 	if _, ok := fields["core_log_max_mb"]; ok {
 		next.CoreLogMaxMB = patch.CoreLogMaxMB
+		next.CoreLogMaxMBSet = true
 	}
 	if _, ok := fields["core_log_backups"]; ok {
 		next.CoreLogBackups = patch.CoreLogBackups
 		next.CoreLogBackupsSet = true
+	}
+	if _, ok := fields["storage_profile"]; ok {
+		next.StorageProfile = strings.TrimSpace(patch.StorageProfile)
+	}
+	if _, ok := fields["resource_profile"]; ok {
+		next.ResourceProfile = strings.TrimSpace(patch.ResourceProfile)
 	}
 	if _, ok := fields["connection_audit_enabled"]; ok {
 		next.ConnectionAuditEnabled = patch.ConnectionAuditEnabled
@@ -1365,8 +1422,12 @@ func (r *Runner) updateAgentConfig(patch Config, fields map[string]json.RawMessa
 		_ = os.Remove(r.connectionAuditStatePath())
 		r.connectionAuditMu.Unlock()
 	}
-	logSettingsChanged := current.LogMaxMB != next.LogMaxMB || current.LogBackups != next.LogBackups || current.CoreLogMaxMB != next.CoreLogMaxMB || current.CoreLogBackups != next.CoreLogBackups
+	logSettingsChanged := current.LogMaxMB != next.LogMaxMB || current.LogBackups != next.LogBackups || current.CoreLogMaxMB != next.CoreLogMaxMB || current.CoreLogBackups != next.CoreLogBackups || current.StorageProfile != next.StorageProfile || current.ResourceProfile != next.ResourceProfile
 	if logSettingsChanged {
+		// Refresh interval from new profile
+		if profile := storageProfileFromConfig(next); profile != "" {
+			r.logMaintenanceEvery = logMaintenanceIntervalForProfile(profile)
+		}
 		r.enforceLogLimits(false)
 	}
 	if oldStateDir != next.StateDir {
@@ -2554,6 +2615,21 @@ func (r *Runner) Probe(force bool) model.HealthReport {
 	health.NetworkTotalDownloadBytes = probe.NetworkTotalDownloadBytes
 	health.Timestamp = now
 	health.RemoteAccess = r.remoteAccessReport()
+	diskInfo := r.storageDiskInfo()
+	health.DiskAvailableBytes = diskInfo.AvailableBytes
+	health.DiskPressure = diskInfo.Pressure
+	health.StorageProfile = string(diskInfo.StorageProfile)
+	health.Storage = &model.StorageDiskInfo{
+		TotalBytes:     diskInfo.TotalBytes,
+		AvailableBytes: diskInfo.AvailableBytes,
+		UsagePercent:   diskInfo.UsagePercent,
+		StorageProfile: string(diskInfo.StorageProfile),
+		Pressure:       diskInfo.Pressure,
+	}
+	// Opportunistic emergency cleanup on health probe interval (cheap statfs, not du)
+	if diskInfo.Pressure == "critical" {
+		go r.enforceEmergencyDiskCleanup()
+	}
 	if applied, appliedErr := r.loadAppliedVersion(); appliedErr == nil {
 		health.AppliedConfigVersion = applied.Version
 		health.AppliedConfigDigest = applied.PayloadID

@@ -25,7 +25,7 @@ type managedLog struct {
 	Backups  int
 }
 
-type logFileState struct {
+type LogFileState struct {
 	Service   string `json:"service"`
 	Path      string `json:"path"`
 	SizeBytes int64  `json:"size_bytes"`
@@ -35,6 +35,8 @@ type logFileState struct {
 	Cleared   bool   `json:"cleared"`
 	Error     string `json:"error,omitempty"`
 }
+
+type logFileState = LogFileState
 
 func (r *Runner) managedLogs() []managedLog {
 	cfg := r.Config()
@@ -66,6 +68,7 @@ func (r *Runner) logPolicySummary() map[string]any {
 
 func (r *Runner) startLogMaintenance(ctx context.Context) {
 	r.enforceLogLimits(false)
+	r.enforceEmergencyDiskCleanup()
 	go func() {
 		interval := r.logMaintenanceEvery
 		if interval <= 0 {
@@ -73,21 +76,39 @@ func (r *Runner) startLogMaintenance(ctx context.Context) {
 		}
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
+		// Light statfs pressure check runs less frequently than log rotation.
+		pressureTicker := time.NewTicker(60 * time.Second)
+		defer pressureTicker.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
+				// Refresh interval from current storage profile dynamically.
+				if cur := r.storageProfile(); cur != "" {
+					next := logMaintenanceIntervalForProfile(cur)
+					if next != interval {
+						interval = next
+						ticker.Reset(interval)
+					}
+				}
 				r.enforceLogLimits(false)
+			case <-pressureTicker.C:
+				if r.storageDiskInfo().Pressure == "critical" {
+					r.enforceEmergencyDiskCleanup()
+				}
+				// Periodic stale temp cleanup (24h TTL)
+				cleanStalePrivateUpdateTemps()
+				_ = r.cleanStaleCandidateFiles()
 			}
 		}
 	}()
 }
 
-func (r *Runner) enforceLogLimits(force bool) []logFileState {
+func (r *Runner) enforceLogLimits(force bool) []LogFileState {
 	r.logMu.Lock()
 	defer r.logMu.Unlock()
-	items := make([]logFileState, 0, 2)
+	items := make([]LogFileState, 0, 2)
 	for _, policy := range r.managedLogs() {
 		state := logFileState{Service: policy.Service, Path: policy.Path, MaxBytes: policy.MaxBytes, Backups: policy.Backups}
 		if err := pruneLogBackups(policy.Path, policy.Backups); err != nil {
@@ -225,6 +246,8 @@ func pruneLogBackups(path string, backups int) error {
 	return nil
 }
 
+func (r *Runner) enforceLogLimitsForMaintenance() []LogFileState { return r.enforceLogLimits(false) }
+
 func (r *Runner) manageLogs(payloadJSON string) (map[string]any, error) {
 	var payload model.ManageLogsTaskPayload
 	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
@@ -243,7 +266,7 @@ func (r *Runner) manageLogs(payloadJSON string) (map[string]any, error) {
 	}
 	r.logMu.Lock()
 	defer r.logMu.Unlock()
-	states := make([]logFileState, 0, 2)
+	states := make([]LogFileState, 0, 2)
 	var failures []string
 	for _, policy := range r.managedLogs() {
 		if payload.Services != "all" && payload.Services != policy.Service {

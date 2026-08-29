@@ -1,0 +1,11 @@
+[Unit]
+Description=Run OBoard Storage Maintenance every minute
+Requires=oboard-storage-maintenance.service
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1min
+Unit=oboard-storage-maintenance.service
+
+[Install]
+WantedBy=timers.target

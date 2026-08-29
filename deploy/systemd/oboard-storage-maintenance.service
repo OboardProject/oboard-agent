@@ -1,0 +1,16 @@
+[Unit]
+Description=OBoard Storage Maintenance
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/local/bin/oboard-agent maintenance storage
+StandardOutput=journal
+StandardError=journal
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=false
+ProtectHome=true
+ReadWritePaths=/usr/local/bin /etc/oboard-agent /var/lib/oboard-agent /var/log /run

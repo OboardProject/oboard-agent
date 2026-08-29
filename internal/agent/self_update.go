@@ -95,11 +95,23 @@ func downloadAndInstallSignedRelease(ctx context.Context, baseClient *http.Clien
 	ctx, cancel := context.WithTimeout(ctx, releaseUpdateTimeout)
 	defer cancel()
 	client := releaseHTTPClient(baseClient, u.Scheme == "https")
-	tmpDir, err := os.MkdirTemp("", "oboard-signed-update.*")
-	if err != nil {
-		return security.ReleaseManifest{}, err
+	// Prefer staging in the target filesystem to avoid cross-FS peak duplication.
+	stagingRoot := filepath.Dir(targets.Agent)
+	protectedStagingDir, stagingErr := os.MkdirTemp(stagingRoot, ".oboard-update-")
+	useStagingDir := stagingErr == nil
+	var tmpDir string
+	if useStagingDir {
+		tmpDir = protectedStagingDir
+		// Ensure 0700
+		_ = os.Chmod(tmpDir, 0o700)
+		defer os.RemoveAll(tmpDir)
+	} else {
+		tmpDir, err = os.MkdirTemp("", "oboard-signed-update.*")
+		if err != nil {
+			return security.ReleaseManifest{}, err
+		}
+		defer os.RemoveAll(tmpDir)
 	}
-	defer os.RemoveAll(tmpDir)
 
 	manifestPath := filepath.Join(tmpDir, "release-manifest.json")
 	signaturePath := filepath.Join(tmpDir, "release-manifest.json.sig")
@@ -137,10 +149,70 @@ func downloadAndInstallSignedRelease(ctx context.Context, baseClient *http.Clien
 	if err := ctx.Err(); err != nil {
 		return security.ReleaseManifest{}, fmt.Errorf("release update stopped before installation: %w", err)
 	}
+	// Disk preflight before committing to filesystem
+	if err := checkUpdateDiskBudget(targets, agentFile.Size, coreFile.Size); err != nil {
+		return security.ReleaseManifest{}, err
+	}
 	if err := installVerifiedReleaseFiles(filepath.Join(tmpDir, agentName), filepath.Join(tmpDir, coreName), targets); err != nil {
 		return security.ReleaseManifest{}, err
 	}
 	return manifest, nil
+}
+
+func checkUpdateDiskBudget(targets signedReleaseTargets, agentSize, coreSize int64) error {
+	// Estimate required: new binaries + reserve
+	profile := StorageProfileStandard
+	// Try to infer profile from state dir if available via filesystem check
+	stats, err := filesystemStats(filepath.Dir(targets.Agent))
+	if err != nil {
+		return nil // best effort, don't block
+	}
+	// Tiny/small detection based on total
+	if stats.TotalBytes <= 1<<30 || stats.AvailableBytes <= 256<<20 {
+		profile = StorageProfileTiny
+	} else if stats.TotalBytes <= 4<<30 || stats.AvailableBytes <= 1<<30 {
+		profile = StorageProfileSmall
+	}
+	var reserve uint64
+	switch profile {
+	case StorageProfileTiny:
+		reserve = 32 << 20
+		if stats.TotalBytes/20 > reserve {
+			reserve = stats.TotalBytes / 20
+		}
+	case StorageProfileSmall:
+		reserve = 64 << 20
+		if stats.TotalBytes/20 > reserve {
+			reserve = stats.TotalBytes / 20
+		}
+	default:
+		reserve = 128 << 20
+		if stats.TotalBytes/20 > reserve {
+			reserve = stats.TotalBytes / 20
+		}
+	}
+	required := uint64(agentSize + coreSize)
+	available := stats.AvailableBytes
+	if available < required+reserve {
+		return &InsufficientSpaceError{
+			Required:  required,
+			Reserve:   reserve,
+			Available: available,
+			Total:     stats.TotalBytes,
+		}
+	}
+	return nil
+}
+
+type InsufficientSpaceError struct {
+	Required  uint64
+	Reserve   uint64
+	Available uint64
+	Total     uint64
+}
+
+func (e *InsufficientSpaceError) Error() string {
+	return "insufficient disk space"
 }
 
 func releaseHTTPClient(base *http.Client, requireHTTPS bool) *http.Client {

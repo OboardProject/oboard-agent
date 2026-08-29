@@ -18,6 +18,47 @@ import (
 
 func main() {
 	args := os.Args[1:]
+	if len(args) >= 1 && strings.EqualFold(args[0], "maintenance") {
+		// Lightweight offline maintenance: no controller connection, no state sync.
+		configPath := defaultConfig()
+		if len(args) >= 3 && args[1] == "-config" {
+			configPath = args[2]
+		} else {
+			for i, a := range args {
+				if a == "-config" && i+1 < len(args) {
+					configPath = args[i+1]
+					break
+				}
+				if strings.HasPrefix(a, "-config=") {
+					configPath = strings.TrimPrefix(a, "-config=")
+					break
+				}
+			}
+		}
+		// Also respect flag parsing for --config style
+		for _, a := range args {
+			if strings.HasPrefix(a, "--config=") {
+				configPath = strings.TrimPrefix(a, "--config=")
+			}
+		}
+		if len(args) >= 2 && args[1] == "storage" {
+			cfg, err := agent.LoadConfig(configPath)
+			if err != nil && !os.IsNotExist(err) {
+				fmt.Fprintf(os.Stderr, "load config %s: %v\n", configPath, err)
+				os.Exit(1)
+			}
+			// Normalize to apply profile defaults
+			// Use a minimal runner just for storage maintenance.
+			runner := agent.New(cfg)
+			states := runner.MaintainStorage()
+			for _, s := range states {
+				fmt.Fprintf(os.Stdout, "%s: %s max=%d backups=%d rotated=%v err=%s\n", s.Service, s.Path, s.MaxBytes, s.Backups, s.Rotated, s.Error)
+			}
+			os.Exit(0)
+		}
+		fmt.Fprintf(os.Stderr, "usage: %s maintenance storage [-config path]\n", os.Args[0])
+		os.Exit(2)
+	}
 	if filepath.Base(os.Args[0]) == "obag" || isManagementCommand(args) {
 		os.Exit(agent.RunManagementConsole(defaultConfig(), args, os.Stdin, os.Stdout, os.Stderr))
 	}
