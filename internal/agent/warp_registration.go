@@ -202,6 +202,74 @@ func warpAddressMatchesIPStack(address netip.Addr, stack model.IPStack) bool {
 	}
 }
 
+func warpBindingFromDialConstraint(dc *model.DialConstraint) warpRegistrationBinding {
+	if dc == nil || strings.TrimSpace(dc.Mode) != "interface" {
+		return warpRegistrationBinding{}
+	}
+	b := warpRegistrationBinding{InterfaceName: strings.TrimSpace(dc.InterfaceName)}
+	addr := strings.TrimSpace(dc.SourceAddress)
+	if addr != "" {
+		if parsed, err := netip.ParseAddr(addr); err == nil {
+			// Preserve as a /32 or /128 prefix for the existing prefix-matching path.
+			if parsed.Is4() {
+				b.SourcePrefix = parsed.String() + "/32"
+			} else {
+				b.SourcePrefix = parsed.String() + "/128"
+			}
+		} else if p, err := netip.ParsePrefix(addr); err == nil {
+			b.SourcePrefix = p.Masked().String()
+		}
+	}
+	// Family is handled via IPStack preference; no need to encode separately here.
+	return b
+}
+
+func applyDialConstraintToEndpoint(endpoint map[string]any, dc *model.DialConstraint) error {
+	if dc == nil || strings.TrimSpace(dc.Mode) != "interface" {
+		return nil
+	}
+	if detour, _ := endpoint["detour"].(string); strings.TrimSpace(detour) != "" {
+		return fmt.Errorf("WARP underlay binding cannot be combined with detour")
+	}
+	delete(endpoint, "detour")
+	iface := strings.TrimSpace(dc.InterfaceName)
+	if iface != "" {
+		if err := core.ValidateNetworkInterfaceName(iface); err != nil {
+			return fmt.Errorf("invalid underlay interface: %w", err)
+		}
+		endpoint["bind_interface"] = iface
+	} else {
+		delete(endpoint, "bind_interface")
+	}
+	addrStr := strings.TrimSpace(dc.SourceAddress)
+	if addrStr != "" {
+		addr, err := netip.ParseAddr(addrStr)
+		if err != nil {
+			if p, perr := netip.ParsePrefix(addrStr); perr == nil {
+				addr = p.Addr()
+			} else {
+				return fmt.Errorf("invalid underlay source address %q", addrStr)
+			}
+		}
+		if family := strings.ToLower(strings.TrimSpace(dc.Family)); family == "ipv4_only" && addr.Is6() {
+			return fmt.Errorf("family ipv4_only conflicts with IPv6 source_address")
+		} else if family == "ipv6_only" && addr.Is4() {
+			return fmt.Errorf("family ipv6_only conflicts with IPv4 source_address")
+		}
+		if addr.Is4() {
+			endpoint["inet4_bind_address"] = addr.String()
+			delete(endpoint, "inet6_bind_address")
+		} else {
+			endpoint["inet6_bind_address"] = addr.String()
+			delete(endpoint, "inet4_bind_address")
+		}
+	} else {
+		delete(endpoint, "inet4_bind_address")
+		delete(endpoint, "inet6_bind_address")
+	}
+	return nil
+}
+
 func boundWARPRegistrationClient(ctx context.Context, base *http.Client, binding warpRegistrationBinding, plan model.WARPRequestPlan) (*http.Client, error) {
 	if binding.key() == "" {
 		return base, nil

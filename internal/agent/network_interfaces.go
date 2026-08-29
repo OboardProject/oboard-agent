@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/netip"
@@ -101,4 +103,25 @@ func networkInterfaceSortRank(iface model.NetworkInterfaceInfo) int {
 		return 1
 	}
 	return 2
+}
+
+func collectNetworkInventory() (*model.NetworkInterfaceInventory, string, error) {
+	interfaces, err := listNetworkInterfaces()
+	if err != nil {
+		return nil, "", err
+	}
+	// Deterministic hash over canonical JSON.
+	canonical, err := jsonMarshalCanonical(interfaces)
+	if err != nil {
+		return nil, "", err
+	}
+	hash := fmt.Sprintf("%x", sha256.Sum256(canonical))
+	inv := &model.NetworkInterfaceInventory{Interfaces: interfaces, Hash: hash}
+	return inv, hash, nil
+}
+
+func jsonMarshalCanonical(v any) ([]byte, error) {
+	// Use standard json.Marshal which is deterministic for this struct (sorted fields).
+	// For extra determinism, we could sort again but interfaces are already sorted.
+	return json.Marshal(v)
 }

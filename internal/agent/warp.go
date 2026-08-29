@@ -79,7 +79,12 @@ func (r *Runner) requestWARPConfig(ctx context.Context, plan model.WARPRequestPl
 		return report
 	}
 	if strings.TrimSpace(cfg.WarpCommand) == "" || strings.TrimSpace(cfg.WarpCommand) == "auto" {
-		client, err := boundWARPRegistrationClient(ctx, r.client, binding, plan)
+		// Prefer explicit underlay from plan, otherwise fallback to legacy config-derived binding.
+		effectiveBinding := binding
+		if plan.Underlay != nil && strings.TrimSpace(plan.Underlay.Mode) == "interface" {
+			effectiveBinding = warpBindingFromDialConstraint(plan.Underlay)
+		}
+		client, err := boundWARPRegistrationClient(ctx, r.client, effectiveBinding, plan)
 		if err != nil {
 			report.Error = fmt.Sprintf("prepare bound WARP registration: %v", err)
 			return report
@@ -88,6 +93,12 @@ func (r *Runner) requestWARPConfig(ctx context.Context, plan model.WARPRequestPl
 		if err != nil {
 			report.Error = err.Error()
 			return report
+		}
+		if plan.Underlay != nil {
+			if err := applyDialConstraintToEndpoint(outbound, plan.Underlay); err != nil {
+				report.Error = err.Error()
+				return report
+			}
 		}
 		return r.persistReadyWARPReport(report, outbound)
 	}

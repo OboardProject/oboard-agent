@@ -489,14 +489,22 @@ type DNSBenchmarkPlan struct {
 	BootstrapCandidates   []DNSCandidate  `json:"bootstrap_candidates"`
 }
 
+type DialConstraint struct {
+	Mode          string `json:"mode"`
+	InterfaceName string `json:"interface_name,omitempty"`
+	SourceAddress string `json:"source_address,omitempty"`
+	Family        string `json:"family,omitempty"`
+}
+
 type WARPRequestPlan struct {
-	Version     int64   `json:"version"`
-	ServerID    int64   `json:"server_id"`
-	ProfileID   int64   `json:"profile_id"`
-	OutboundTag string  `json:"outbound_tag"`
-	IPStack     IPStack `json:"ip_stack"`
-	MTU         int     `json:"mtu"`
-	DNSStrategy string  `json:"dns_strategy"`
+	Version     int64           `json:"version"`
+	ServerID    int64           `json:"server_id"`
+	ProfileID   int64           `json:"profile_id"`
+	OutboundTag string          `json:"outbound_tag"`
+	IPStack     IPStack         `json:"ip_stack"`
+	MTU         int             `json:"mtu"`
+	DNSStrategy string          `json:"dns_strategy"`
+	Underlay    *DialConstraint `json:"underlay,omitempty"`
 }
 
 type WARPConfigReport struct {
@@ -758,6 +766,11 @@ type NetworkInterfaceInfo struct {
 	Running   bool     `json:"running"`
 	Loopback  bool     `json:"loopback"`
 	Addresses []string `json:"addresses"`
+}
+
+type NetworkInterfaceInventory struct {
+	Interfaces []NetworkInterfaceInfo `json:"interfaces"`
+	Hash       string                 `json:"hash,omitempty"`
 }
 
 type AgentEnrollRequest struct {
@@ -1245,10 +1258,11 @@ type HealthReport struct {
 	ConnectivityLatencyMS     int64        `json:"-"`
 	ConnectivityCheckedAt     time.Time    `json:"-"`
 	ConnectivityError         string       `json:"-"`
-	Timestamp                 time.Time    `json:"timestamp"`
-	AppliedConfigVersion      int64              `json:"applied_config_version,omitempty"`
-	AppliedConfigDigest       string             `json:"applied_config_digest,omitempty"`
-	RemoteAccess              RemoteAccessReport `json:"remote_access,omitempty"`
+	Timestamp                 time.Time                `json:"timestamp"`
+	AppliedConfigVersion      int64                  `json:"applied_config_version,omitempty"`
+	AppliedConfigDigest       string                 `json:"applied_config_digest,omitempty"`
+	RemoteAccess              RemoteAccessReport     `json:"remote_access,omitempty"`
+	NetworkInventory          *NetworkInterfaceInventory `json:"network_inventory,omitempty"`
 }
 
 type MetricReport struct {

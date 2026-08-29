@@ -290,11 +290,27 @@ func resolveDeploymentWARPConfig(config string, plans []model.WARPRequestPlan, r
 			if value, exists := placeholder["domain_resolver"]; exists {
 				resolvedEndpoint["domain_resolver"] = value
 			}
-			if value, exists := placeholder["bind_interface"]; exists {
+			// Preserve deployment-time dial bindings. Prefer explicit underlay
+			// fields (bind_interface, inet* ) when present; fallback to legacy
+			// detour style so old Controller still works.
+			if hasUnderlayDialFields(placeholder) {
+				for _, key := range []string{"bind_interface", "inet4_bind_address", "inet6_bind_address"} {
+					if value, exists := placeholder[key]; exists {
+						resolvedEndpoint[key] = value
+					} else {
+						delete(resolvedEndpoint, key)
+					}
+				}
 				delete(resolvedEndpoint, "detour")
+			} else if value, exists := placeholder["bind_interface"]; exists {
+				delete(resolvedEndpoint, "detour")
+				delete(resolvedEndpoint, "inet4_bind_address")
+				delete(resolvedEndpoint, "inet6_bind_address")
 				resolvedEndpoint["bind_interface"] = value
 			} else if value, exists := placeholder["detour"]; exists {
 				delete(resolvedEndpoint, "bind_interface")
+				delete(resolvedEndpoint, "inet4_bind_address")
+				delete(resolvedEndpoint, "inet6_bind_address")
 				resolvedEndpoint["detour"] = value
 			}
 			endpoints[index] = resolvedEndpoint
@@ -310,6 +326,21 @@ func resolveDeploymentWARPConfig(config string, plans []model.WARPRequestPlan, r
 		return "", err
 	}
 	return string(out), nil
+}
+
+func hasUnderlayDialFields(m map[string]any) bool {
+	if m == nil {
+		return false
+	}
+	for _, key := range []string{"inet4_bind_address", "inet6_bind_address"} {
+		if _, ok := m[key]; ok {
+			return true
+		}
+	}
+	// bind_interface alone is not sufficient to know it's underlay style,
+	// but if accompanied by inet* we treat it as underlay. Keep old logic
+	// for plain bind_interface.
+	return false
 }
 
 func canonicalConfigSHA256(config string) (string, error) {
