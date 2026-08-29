@@ -338,6 +338,117 @@ func TestVerifyReleaseFilesRejectsTraversalName(t *testing.T) {
 	}
 }
 
+func TestPreserveExistingReleaseFileDoesNotClone(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "oboard-agent")
+	data := []byte("old-agent")
+	if err := os.WriteFile(target, data, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := stagedReleaseFile{target: target}
+	if err := preserveExistingReleaseFile(&item); err != nil {
+		t.Fatal(err)
+	}
+	if !item.hadOld || item.backup == "" {
+		t.Fatalf("backup was not reserved: %+v", item)
+	}
+	backup, err := os.Stat(item.backup)
+	if item.linked {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !os.SameFile(before, backup) {
+			t.Fatal("backup cloned the live binary instead of linking it")
+		}
+		assertFileContent(t, target, data)
+		return
+	}
+	if err == nil {
+		t.Fatal("rename-style backup should not create a second copy before commit")
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+	assertFileContent(t, target, data)
+}
+
+func TestInstallVerifiedReleaseFilesRemovesStaleSidecars(t *testing.T) {
+	dir := t.TempDir()
+	agent := filepath.Join(dir, "oboard-agent")
+	core := filepath.Join(dir, "oboard-sb")
+	if err := os.WriteFile(agent, []byte("old-agent"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(core, []byte("old-core"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	staleNew := filepath.Join(dir, ".oboard-update-new.stale")
+	staleBackup := filepath.Join(dir, ".oboard-update-backup.stale")
+	if err := os.WriteFile(staleNew, []byte("stale-new"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(staleBackup, []byte("stale-backup"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	srcDir := t.TempDir()
+	agentSrc := filepath.Join(srcDir, "agent")
+	coreSrc := filepath.Join(srcDir, "core")
+	if err := os.WriteFile(agentSrc, []byte("new-agent"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(coreSrc, []byte("new-core"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := installVerifiedReleaseFiles(agentSrc, coreSrc, signedReleaseTargets{Agent: agent, Core: core}); err != nil {
+		t.Fatal(err)
+	}
+	assertFileContent(t, agent, []byte("new-agent"))
+	assertFileContent(t, core, []byte("new-core"))
+	matches, err := filepath.Glob(filepath.Join(dir, ".oboard-update-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("leftover update files: %v", matches)
+	}
+}
+
+func TestCommitStagedReleaseFilesRestoresFirstBinaryIfSecondFails(t *testing.T) {
+	dir := t.TempDir()
+	agent := filepath.Join(dir, "oboard-agent")
+	core := filepath.Join(dir, "oboard-sb")
+	if err := os.WriteFile(agent, []byte("old-agent"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(core, []byte("old-core"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	agentItem := stagedReleaseFile{target: agent}
+	coreItem := stagedReleaseFile{target: core}
+	if err := preserveExistingReleaseFile(&agentItem); err != nil {
+		t.Fatal(err)
+	}
+	if err := preserveExistingReleaseFile(&coreItem); err != nil {
+		t.Fatal(err)
+	}
+	agentStage := filepath.Join(dir, ".oboard-update-new.agent")
+	if err := os.WriteFile(agentStage, []byte("new-agent"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	agentItem.stage = agentStage
+	coreItem.stage = filepath.Join(dir, "missing-stage")
+	err := commitStagedReleaseFiles([]stagedReleaseFile{agentItem, coreItem})
+	if err == nil {
+		t.Fatal("expected second commit to fail")
+	}
+	assertFileContent(t, agent, []byte("old-agent"))
+	assertFileContent(t, core, []byte("old-core"))
+}
+
 func sha256Hex(value []byte) string {
 	sum := sha256.Sum256(value)
 	return hex.EncodeToString(sum[:])

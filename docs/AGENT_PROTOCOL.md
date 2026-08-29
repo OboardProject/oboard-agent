@@ -1133,7 +1133,7 @@ Payload:
 - `panel`: download from Controller `/install/agent-self-update.sh` and `/downloads/*`. Release Agents reject this unless `allow_panel_update=true` or the Agent build is dev.
 - `github`: run the GitHub update script from `github_repo`.
 
-Every manifest and binary transfer gets at most three attempts. A binary transfer interrupted after receiving bytes resumes from the verified target file's current size when the origin honors HTTP Range; an origin that ignores Range is restarted safely from byte zero. Permanent HTTP errors, local filesystem errors, and verification failures are not treated as connection retries, and no downloaded binary is installed until the signed manifest size and SHA-256 checks pass.
+Every manifest and binary transfer gets at most three attempts. A binary transfer interrupted after receiving bytes resumes from the verified target file's current size when the origin honors HTTP Range; an origin that ignores Range is restarted safely from byte zero. Permanent HTTP errors, local filesystem errors, and verification failures are not treated as connection retries, and no downloaded binary is installed until the signed manifest size and SHA-256 checks pass. Installation stages each verified binary beside the live path, preserves the previous inode with a same-directory hard link (or a rename if links are unavailable), then atomically replaces the live path. It never clones the running binary as a spare copy, and it removes leftover `.oboard-update-new.*` / `.oboard-update-backup.*` files first.
 
 ### `uninstall_agent`
 

@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/OboardProject/oboard-agent/internal/security"
@@ -390,10 +391,15 @@ type stagedReleaseFile struct {
 	stage  string
 	backup string
 	hadOld bool
+	linked bool
 }
 
 func installVerifiedReleaseFiles(agentSource, coreSource string, targets signedReleaseTargets) error {
 	items := []stagedReleaseFile{{source: agentSource, target: targets.Agent}, {source: coreSource, target: targets.Core}}
+	removeStaleReleaseSidecars(filepath.Dir(targets.Agent))
+	if filepath.Dir(targets.Core) != filepath.Dir(targets.Agent) {
+		removeStaleReleaseSidecars(filepath.Dir(targets.Core))
+	}
 	for i := range items {
 		// #nosec G301 -- executable installation directories must remain searchable; files are installed atomically with 0755.
 		if err := os.MkdirAll(filepath.Dir(items[i].target), 0o755); err != nil {
@@ -405,35 +411,90 @@ func installVerifiedReleaseFiles(agentSource, coreSource string, targets signedR
 			return err
 		}
 		items[i].stage = stage
-		if _, err := os.Stat(items[i].target); err == nil {
-			backup, err := copyReleaseFileBeside(items[i].target, items[i].target, ".oboard-update-backup.*")
-			if err != nil {
-				cleanupStagedReleaseFiles(items)
-				return err
-			}
-			items[i].backup = backup
-			items[i].hadOld = true
-		} else if !errors.Is(err, os.ErrNotExist) {
+		if err := preserveExistingReleaseFile(&items[i]); err != nil {
 			cleanupStagedReleaseFiles(items)
 			return err
 		}
 	}
-	for i := range items {
-		if err := os.Rename(items[i].stage, items[i].target); err != nil {
-			for _, installed := range items[:i] {
-				if installed.hadOld {
-					_ = os.Rename(installed.backup, installed.target)
-				} else {
-					_ = os.Remove(installed.target)
-				}
-			}
-			cleanupStagedReleaseFiles(items)
-			return err
-		}
-		items[i].stage = ""
+	if err := commitStagedReleaseFiles(items); err != nil {
+		cleanupStagedReleaseFiles(items)
+		return err
 	}
 	cleanupStagedReleaseFiles(items)
 	return nil
+}
+
+func preserveExistingReleaseFile(item *stagedReleaseFile) error {
+	if _, err := os.Stat(item.target); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	backup, err := reservedTempPath(filepath.Dir(item.target), ".oboard-update-backup.*")
+	if err != nil {
+		return err
+	}
+	item.backup = backup
+	item.hadOld = true
+	if err := os.Link(item.target, backup); err == nil {
+		item.linked = true
+		return nil
+	}
+	// Hard links are unavailable on some filesystems. Commit will rename the
+	// live file onto this reserved path instead of cloning it.
+	return nil
+}
+
+func commitStagedReleaseFiles(items []stagedReleaseFile) error {
+	for i := range items {
+		if err := commitStagedReleaseFile(&items[i]); err != nil {
+			restoreStagedReleaseFiles(items[:i])
+			return err
+		}
+	}
+	return nil
+}
+
+func commitStagedReleaseFile(item *stagedReleaseFile) error {
+	if item.hadOld && !item.linked {
+		if err := os.Rename(item.target, item.backup); err != nil {
+			return err
+		}
+	}
+	if err := os.Rename(item.stage, item.target); err != nil {
+		if item.hadOld && !item.linked {
+			_ = os.Rename(item.backup, item.target)
+		}
+		return err
+	}
+	item.stage = ""
+	return nil
+}
+
+func restoreStagedReleaseFiles(items []stagedReleaseFile) {
+	for _, item := range items {
+		if item.hadOld {
+			_ = os.Rename(item.backup, item.target)
+			continue
+		}
+		_ = os.Remove(item.target)
+	}
+}
+
+func reservedTempPath(dir, pattern string) (string, error) {
+	out, err := os.CreateTemp(dir, pattern)
+	if err != nil {
+		return "", err
+	}
+	name := out.Name()
+	if err := out.Close(); err != nil {
+		_ = os.Remove(name)
+		return "", err
+	}
+	if err := os.Remove(name); err != nil {
+		return "", err
+	}
+	return name, nil
 }
 
 func copyReleaseFileBeside(source, target, pattern string) (string, error) {
@@ -445,7 +506,7 @@ func copyReleaseFileBeside(source, target, pattern string) (string, error) {
 	defer in.Close()
 	out, err := os.CreateTemp(filepath.Dir(target), pattern)
 	if err != nil {
-		return "", err
+		return "", wrapNoSpace(err, filepath.Base(target))
 	}
 	name := out.Name()
 	ok := false
@@ -456,19 +517,49 @@ func copyReleaseFileBeside(source, target, pattern string) (string, error) {
 		}
 	}()
 	if _, err := io.Copy(out, in); err != nil {
-		return "", err
+		return "", wrapNoSpace(err, filepath.Base(target))
 	}
 	if err := out.Chmod(0o755); err != nil {
 		return "", err
 	}
 	if err := out.Sync(); err != nil {
-		return "", err
+		return "", wrapNoSpace(err, filepath.Base(target))
 	}
 	if err := out.Close(); err != nil {
-		return "", err
+		return "", wrapNoSpace(err, filepath.Base(target))
 	}
 	ok = true
 	return name, nil
+}
+
+func wrapNoSpace(err error, name string) error {
+	if err == nil || !isNoSpaceError(err) {
+		return err
+	}
+	return fmt.Errorf("not enough disk space to stage %s: %w", name, err)
+}
+
+func isNoSpaceError(err error) bool {
+	return errors.Is(err, syscall.ENOSPC) || errors.Is(err, syscall.EDQUOT)
+}
+
+func removeStaleReleaseSidecars(dir string) {
+	dir = filepath.Clean(dir)
+	if dir == "" || dir == "." {
+		return
+	}
+	for _, pattern := range []string{".oboard-update-new.*", ".oboard-update-backup.*"} {
+		matches, err := filepath.Glob(filepath.Join(dir, pattern))
+		if err != nil {
+			continue
+		}
+		for _, match := range matches {
+			if filepath.Dir(match) != dir {
+				continue
+			}
+			_ = os.RemoveAll(match)
+		}
+	}
 }
 
 func cleanupStagedReleaseFiles(items []stagedReleaseFile) {
