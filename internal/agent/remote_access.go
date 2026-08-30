@@ -24,6 +24,7 @@ func (r *Runner) remoteAccessReport() model.RemoteAccessReport {
 			model.RemoteAccessCapabilityTerminal,
 			model.RemoteAccessCapabilityTerminalLoginEnv,
 			model.RemoteAccessCapabilityExec,
+			model.RemoteAccessCapabilityInteractiveMCP,
 			model.RemoteAccessCapabilityLocalGate,
 		},
 		LocalMode:  policy.Mode,

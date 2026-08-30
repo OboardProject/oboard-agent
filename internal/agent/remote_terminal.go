@@ -54,14 +54,31 @@ type terminalSession struct {
 }
 
 func (r *Runner) handleInteractivePrepare(env model.InteractivePrepareEnvelope) error {
-	if env.SignatureVersion != 1 {
+	if env.SignatureVersion != security.InteractiveSignatureV1 && env.SignatureVersion != security.InteractiveSignatureV2 {
 		return r.failInteractivePrepare(env.SessionID, interactiveReasonPrepareInvalid, fmt.Errorf("unsupported interactive signature_version %d", env.SignatureVersion))
 	}
 	if env.Kind != "terminal" {
 		return r.failInteractivePrepare(env.SessionID, interactiveReasonPrepareInvalid, errors.New("unsupported interactive kind"))
 	}
-	if !r.localGateAllows("remote_terminal") {
-		return r.failInteractivePrepare(env.SessionID, interactiveReasonLocalGateDenied, errors.New("agent_local_gate_denied"))
+	// local gate per origin
+	origin := strings.TrimSpace(env.Origin)
+	if env.SignatureVersion == security.InteractiveSignatureV2 {
+		if origin == "" {
+			origin = model.InteractiveOriginHuman
+		}
+		if origin == model.InteractiveOriginMCP {
+			if !r.localGateAllows("mcp_interactive_terminal") {
+				return r.failInteractivePrepare(env.SessionID, interactiveReasonLocalGateDenied, errors.New("agent_local_gate_denied"))
+			}
+		} else {
+			if !r.localGateAllows("remote_terminal") {
+				return r.failInteractivePrepare(env.SessionID, interactiveReasonLocalGateDenied, errors.New("agent_local_gate_denied"))
+			}
+		}
+	} else {
+		if !r.localGateAllows("remote_terminal") {
+			return r.failInteractivePrepare(env.SessionID, interactiveReasonLocalGateDenied, errors.New("agent_local_gate_denied"))
+		}
 	}
 	serverID := r.Config().ServerID
 	if serverID > 0 && env.ServerID != serverID {
@@ -80,11 +97,20 @@ func (r *Runner) handleInteractivePrepare(env model.InteractivePrepareEnvelope) 
 		return r.failInteractivePrepare(env.SessionID, interactiveReasonPrepareInvalid, errors.New("interactive prepare issued in the future"))
 	}
 	secret := security.HashSecret(r.Config().AgentToken)
-	if !security.VerifyInteractiveEnvelope(secret, security.InteractiveEnvelope{
-		Type: env.Type, ServerID: env.ServerID, SessionID: env.SessionID, Nonce: env.Nonce,
-		IssuedAt: env.IssuedAt, ExpiresAt: env.ExpiresAt, Kind: env.Kind, Cols: env.Cols, Rows: env.Rows,
-	}, env.Signature) {
-		return r.failInteractivePrepare(env.SessionID, interactiveReasonPrepareInvalid, errors.New("interactive prepare signature verification failed"))
+	if env.SignatureVersion == security.InteractiveSignatureV2 {
+		if !security.VerifyInteractiveEnvelopeV2(secret, security.InteractiveEnvelope{
+			Type: env.Type, ServerID: env.ServerID, SessionID: env.SessionID, Nonce: env.Nonce,
+			IssuedAt: env.IssuedAt, ExpiresAt: env.ExpiresAt, Kind: env.Kind, Origin: origin, Cols: env.Cols, Rows: env.Rows, Mode: env.Mode,
+		}, env.Signature) {
+			return r.failInteractivePrepare(env.SessionID, interactiveReasonPrepareInvalid, errors.New("interactive prepare signature verification failed"))
+		}
+	} else {
+		if !security.VerifyInteractiveEnvelope(secret, security.InteractiveEnvelope{
+			Type: env.Type, ServerID: env.ServerID, SessionID: env.SessionID, Nonce: env.Nonce,
+			IssuedAt: env.IssuedAt, ExpiresAt: env.ExpiresAt, Kind: env.Kind, Cols: env.Cols, Rows: env.Rows,
+		}, env.Signature) {
+			return r.failInteractivePrepare(env.SessionID, interactiveReasonPrepareInvalid, errors.New("interactive prepare signature verification failed"))
+		}
 	}
 	if !r.rememberInteractiveNonce(env.Nonce) {
 		return r.failInteractivePrepare(env.SessionID, interactiveReasonPrepareInvalid, errors.New("interactive prepare nonce replayed"))

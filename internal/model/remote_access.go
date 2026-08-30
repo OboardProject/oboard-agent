@@ -9,6 +9,7 @@ const (
 	RemoteAccessCapabilityTerminal         = "remote_terminal_v1"
 	RemoteAccessCapabilityTerminalLoginEnv = "terminal_login_env_v1"
 	RemoteAccessCapabilityExec             = "remote_exec_v1"
+	RemoteAccessCapabilityInteractiveMCP   = "remote_interactive_mcp_v1"
 	RemoteAccessCapabilityLocalGate        = "remote_access_local_gate_v1"
 
 	RemoteExecOriginMCP   = "mcp"
@@ -16,9 +17,10 @@ const (
 	RemoteExecModeArgv    = "argv"
 	RemoteExecModeShell   = "shell"
 
-	PrivilegeRemoteOperations = "remote_operations"
-	PrivilegeRemoteExec       = "remote_exec"
-	PrivilegeRemoteShell      = "remote_shell"
+	PrivilegeRemoteOperations  = "remote_operations"
+	PrivilegeRemoteExec        = "remote_exec"
+	PrivilegeRemoteShell       = "remote_shell"
+	PrivilegeRemoteInteractive = "remote_interactive"
 
 	RemoteOperationSystemInfo     = "system_info"
 	RemoteOperationNetworkInfo    = "network_info"
@@ -37,10 +39,11 @@ type RemoteAccessReport struct {
 }
 
 type RemoteAccessLocalAllow struct {
-	RemoteTerminal      bool `json:"remote_terminal"`
-	MCPRemoteOperations bool `json:"mcp_remote_operations"`
-	MCPStructuredExec   bool `json:"mcp_structured_exec"`
-	MCPRawShell         bool `json:"mcp_raw_shell"`
+	RemoteTerminal       bool `json:"remote_terminal"`
+	MCPRemoteOperations  bool `json:"mcp_remote_operations"`
+	MCPStructuredExec    bool `json:"mcp_structured_exec"`
+	MCPRawShell          bool `json:"mcp_raw_shell"`
+	MCPInteractive       bool `json:"mcp_interactive_terminal"`
 }
 
 type RemoteExecCommand struct {
@@ -106,8 +109,14 @@ type InteractivePrepareEnvelope struct {
 	IssuedAt         string `json:"issued_at"`
 	ExpiresAt        string `json:"expires_at"`
 	Kind             string `json:"kind"`
+	Origin           string `json:"origin,omitempty"`
 	Cols             int    `json:"cols"`
 	Rows             int    `json:"rows"`
 	Mode             string `json:"mode,omitempty"`
 	Signature        string `json:"signature,omitempty"`
 }
+
+const (
+	InteractiveOriginHuman = "human"
+	InteractiveOriginMCP   = "mcp"
+)

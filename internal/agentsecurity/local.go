@@ -53,6 +53,8 @@ func (p Policy) Allows(feature string) bool {
 		return p.Allow.MCPStructuredExec
 	case "mcp_raw_shell":
 		return p.Allow.MCPRawShell
+	case "mcp_interactive_terminal", "mcp_interactive":
+		return p.Allow.MCPInteractive
 	default:
 		return false
 	}
@@ -146,6 +148,8 @@ func (s *Store) SetAllow(feature string, allow bool) error {
 		policy.Allow.MCPStructuredExec = allow
 	case "mcp-shell", "mcp_raw_shell":
 		policy.Allow.MCPRawShell = allow
+	case "mcp_interactive_terminal", "mcp_interactive", "mcp-interactive":
+		policy.Allow.MCPInteractive = allow
 	default:
 		return errors.New("unknown remote-access feature")
 	}

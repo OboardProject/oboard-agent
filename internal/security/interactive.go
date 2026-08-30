@@ -7,6 +7,11 @@ import (
 	"strings"
 )
 
+const (
+	InteractiveSignatureV1 = 1
+	InteractiveSignatureV2 = 2
+)
+
 type InteractiveEnvelope struct {
 	Type      string `json:"type"`
 	ServerID  int64  `json:"server_id"`
@@ -15,8 +20,10 @@ type InteractiveEnvelope struct {
 	IssuedAt  string `json:"issued_at"`
 	ExpiresAt string `json:"expires_at"`
 	Kind      string `json:"kind"`
+	Origin    string `json:"origin,omitempty"`
 	Cols      int    `json:"cols"`
 	Rows      int    `json:"rows"`
+	Mode      string `json:"mode,omitempty"`
 }
 
 func SignInteractiveEnvelope(secret string, env InteractiveEnvelope) string {
@@ -31,6 +38,28 @@ func VerifyInteractiveEnvelope(secret string, env InteractiveEnvelope, signature
 	return hmac.Equal([]byte(expected), []byte(signature))
 }
 
+func SignInteractiveEnvelopeV2(secret string, env InteractiveEnvelope) string {
+	env.Origin = normalizeInteractiveOrigin(env.Origin)
+	return sign(secret, canonicalInteractiveEnvelopeV2(env))
+}
+
+func VerifyInteractiveEnvelopeV2(secret string, env InteractiveEnvelope, signature string) bool {
+	if secret == "" || signature == "" {
+		return false
+	}
+	expected := SignInteractiveEnvelopeV2(secret, env)
+	return hmac.Equal([]byte(expected), []byte(signature))
+}
+
+func normalizeInteractiveOrigin(origin string) string {
+	switch strings.TrimSpace(origin) {
+	case "mcp":
+		return "mcp"
+	default:
+		return "human"
+	}
+}
+
 func canonicalInteractiveEnvelope(env InteractiveEnvelope) string {
 	b, _ := json.Marshal(struct {
 		Type      string `json:"type"`
@@ -43,6 +72,23 @@ func canonicalInteractiveEnvelope(env InteractiveEnvelope) string {
 		Cols      int    `json:"cols"`
 		Rows      int    `json:"rows"`
 	}{env.Type, env.ServerID, env.SessionID, env.Nonce, env.IssuedAt, env.ExpiresAt, env.Kind, env.Cols, env.Rows})
+	return string(b)
+}
+
+func canonicalInteractiveEnvelopeV2(env InteractiveEnvelope) string {
+	b, _ := json.Marshal(struct {
+		Type      string `json:"type"`
+		ServerID  int64  `json:"server_id"`
+		SessionID string `json:"session_id"`
+		Nonce     string `json:"nonce"`
+		IssuedAt  string `json:"issued_at"`
+		ExpiresAt string `json:"expires_at"`
+		Kind      string `json:"kind"`
+		Origin    string `json:"origin"`
+		Cols      int    `json:"cols"`
+		Rows      int    `json:"rows"`
+		Mode      string `json:"mode"`
+	}{env.Type, env.ServerID, env.SessionID, env.Nonce, env.IssuedAt, env.ExpiresAt, env.Kind, normalizeInteractiveOrigin(env.Origin), env.Cols, env.Rows, strings.TrimSpace(env.Mode)})
 	return string(b)
 }
 
