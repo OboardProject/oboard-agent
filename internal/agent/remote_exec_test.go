@@ -77,11 +77,11 @@ func TestRemoteExecJournalSurvivesRestart(t *testing.T) {
 func TestLocalSecurityHardenedDenies(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "local-security.json")
-	if err := os.WriteFile(path, []byte(`{"version":1,"mode":"hardened","allow":{"remote_terminal":false,"mcp_structured_exec":false,"mcp_raw_shell":false}}`), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(`{"version":1,"mode":"hardened","allow":{"remote_terminal":false,"mcp_enabled":false}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	runner := New(Config{ConfigPath: filepath.Join(dir, "config.json"), StateDir: dir, CommandTimeoutSeconds: 20, ResourceProfile: "small", TimeCorrectionMode: "off", LogMaxMB: 8, CoreLogMaxMB: 8})
-	if runner.localGateAllows("remote_terminal") || runner.localGateAllows("mcp_structured_exec") {
+	if runner.localGateAllows("remote_terminal") || runner.localGateAllows("mcp_enabled") {
 		t.Fatal("hardened deny should block remote access")
 	}
 }

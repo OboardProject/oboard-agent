@@ -317,7 +317,7 @@ func (r *Runner) executeRemoteOperationTask(task model.AgentTask) (string, strin
 	if err := json.Unmarshal([]byte(task.PayloadJSON), &payload); err != nil {
 		return "failed", jsonResult(err.Error())
 	}
-	if !r.localGateAllows("mcp_remote_operations") {
+	if !r.localGateAllows("mcp_enabled") {
 		return "failed", jsonMap(map[string]any{"error": "agent local security policy denied remote operations", "code": "agent_local_gate_denied"})
 	}
 	result, err := r.runRemoteOperation(payload)

@@ -39,11 +39,8 @@ type RemoteAccessReport struct {
 }
 
 type RemoteAccessLocalAllow struct {
-	RemoteTerminal       bool `json:"remote_terminal"`
-	MCPRemoteOperations  bool `json:"mcp_remote_operations"`
-	MCPStructuredExec    bool `json:"mcp_structured_exec"`
-	MCPRawShell          bool `json:"mcp_raw_shell"`
-	MCPInteractive       bool `json:"mcp_interactive_terminal"`
+	RemoteTerminal bool `json:"remote_terminal"`
+	MCPEnabled     bool `json:"mcp_enabled"`
 }
 
 type RemoteExecCommand struct {

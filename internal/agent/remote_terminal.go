@@ -67,7 +67,7 @@ func (r *Runner) handleInteractivePrepare(env model.InteractivePrepareEnvelope) 
 			origin = model.InteractiveOriginHuman
 		}
 		if origin == model.InteractiveOriginMCP {
-			if !r.localGateAllows("mcp_interactive_terminal") {
+			if !r.localGateAllows("mcp_enabled") {
 				return r.failInteractivePrepare(env.SessionID, interactiveReasonLocalGateDenied, errors.New("agent_local_gate_denied"))
 			}
 		} else {

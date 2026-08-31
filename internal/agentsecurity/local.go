@@ -47,14 +47,8 @@ func (p Policy) Allows(feature string) bool {
 	switch feature {
 	case "remote_terminal":
 		return p.Allow.RemoteTerminal
-	case "mcp_remote_operations":
-		return p.Allow.MCPRemoteOperations
-	case "mcp_structured_exec":
-		return p.Allow.MCPStructuredExec
-	case "mcp_raw_shell":
-		return p.Allow.MCPRawShell
-	case "mcp_interactive_terminal", "mcp_interactive":
-		return p.Allow.MCPInteractive
+	case "mcp_remote_operations", "mcp_structured_exec", "mcp_raw_shell", "mcp_interactive_terminal", "mcp_interactive", "mcp_enabled":
+		return p.Allow.MCPEnabled
 	default:
 		return false
 	}
@@ -142,14 +136,8 @@ func (s *Store) SetAllow(feature string, allow bool) error {
 	switch feature {
 	case "terminal", "remote_terminal":
 		policy.Allow.RemoteTerminal = allow
-	case "mcp-operations", "mcp_remote_operations":
-		policy.Allow.MCPRemoteOperations = allow
-	case "mcp-exec", "mcp_structured_exec":
-		policy.Allow.MCPStructuredExec = allow
-	case "mcp-shell", "mcp_raw_shell":
-		policy.Allow.MCPRawShell = allow
-	case "mcp_interactive_terminal", "mcp_interactive", "mcp-interactive":
-		policy.Allow.MCPInteractive = allow
+	case "mcp-operations", "mcp_remote_operations", "mcp-exec", "mcp_structured_exec", "mcp-shell", "mcp_raw_shell", "mcp_interactive_terminal", "mcp_interactive", "mcp-interactive", "mcp_enabled", "mcp":
+		policy.Allow.MCPEnabled = allow
 	default:
 		return errors.New("unknown remote-access feature")
 	}

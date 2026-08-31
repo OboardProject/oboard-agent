@@ -37,11 +37,5 @@ func (r *Runner) localGateAllows(feature string) bool {
 }
 
 func localGateFeatureForExec(origin, mode string) string {
-	if origin != model.RemoteExecOriginMCP {
-		return "mcp_structured_exec"
-	}
-	if mode == model.RemoteExecModeShell {
-		return "mcp_raw_shell"
-	}
-	return "mcp_structured_exec"
+	return "mcp_enabled"
 }
