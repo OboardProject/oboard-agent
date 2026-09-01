@@ -49,16 +49,16 @@ type trafficSnapshotItem struct {
 }
 
 type trafficLocalState struct {
-	SchemaVersion    int                                 `json:"schema_version"`
-	AgentInstanceID  string                              `json:"agent_instance_id,omitempty"`
-	Last             map[string]trafficSnapshotItem      `json:"last,omitempty"`
-	Pending          []trafficPendingReport              `json:"pending,omitempty"`
-	Acknowledged     map[string]trafficCounterCheckpoint `json:"acknowledged,omitempty"`
-	Streams          map[string]*trafficStreamState      `json:"streams,omitempty"`
-	PendingReports   map[string]*trafficPendingRange     `json:"pending_reports,omitempty"`
-	Sync             trafficSyncState                    `json:"sync"`
-	RecoveryRequired bool                                `json:"recovery_required,omitempty"`
-	PolicyRevision   int64                               `json:"policy_revision,omitempty"`
+	SchemaVersion    int                                   `json:"schema_version"`
+	AgentInstanceID  string                                `json:"agent_instance_id,omitempty"`
+	Last             map[string]trafficSnapshotItem        `json:"last,omitempty"`
+	Pending          []trafficPendingReport                `json:"pending,omitempty"`
+	Acknowledged     map[string]trafficCounterCheckpoint   `json:"acknowledged,omitempty"`
+	Streams          map[string]*trafficStreamState        `json:"streams,omitempty"`
+	PendingReports   map[string]*trafficPendingRange       `json:"pending_reports,omitempty"`
+	Sync             trafficSyncState                      `json:"sync"`
+	RecoveryRequired bool                                  `json:"recovery_required,omitempty"`
+	PolicyRevision   int64                                 `json:"policy_revision,omitempty"`
 	Policies         map[string]model.TrafficRuntimePolicy `json:"policies,omitempty"`
 }
 
@@ -167,8 +167,12 @@ type trafficStreamWire struct {
 }
 
 type trafficAcceptedReport struct {
-	ReportID         string `json:"report_id"`
-	Status           string `json:"status"`
+	ReportID string `json:"report_id"`
+	Status   string `json:"status"`
+	// Reason is set for status "rejected". A terminal reason means the report
+	// can never be accounted, so the pending record is dropped without opening
+	// a counter recovery.
+	Reason           string `json:"reason,omitempty"`
 	StreamID         string `json:"stream_id,omitempty"`
 	CounterEpoch     string `json:"counter_epoch,omitempty"`
 	PeriodKey        string `json:"period_key,omitempty"`
@@ -844,8 +848,9 @@ func applyTrafficLedgerResponse(state *trafficLocalState, resp trafficReportResp
 				delete(state.PendingReports, accepted.ReportID)
 			}
 		case trafficStatusCheckpointGap, trafficStatusCheckpointOverlap, trafficStatusEpochConflict, "rejected":
+			terminal := accepted.Status == "rejected" && terminalTrafficRejectionReason(accepted.Reason)
 			if report != nil {
-				if stream := state.Streams[report.StreamID]; stream != nil {
+				if stream := state.Streams[report.StreamID]; stream != nil && !terminal {
 					stream.Status = accepted.Status
 					stream.LastError = accepted.Status
 					if accepted.Status != "rejected" {
@@ -854,6 +859,12 @@ func applyTrafficLedgerResponse(state *trafficLocalState, resp trafficReportResp
 					}
 				}
 				delete(state.PendingReports, accepted.ReportID)
+			}
+			if terminal {
+				// The user, binding, inbound, or path this report accounts
+				// against is gone. Dropping it is the complete resolution;
+				// local counters are still consistent, so no recovery is due.
+				continue
 			}
 			state.RecoveryRequired = true
 		}
@@ -879,6 +890,20 @@ func applyTrafficLedgerResponse(state *trafficLocalState, resp trafficReportResp
 			state.Sync.LastError = stream.LastError
 			state.RecoveryRequired = true
 		}
+	}
+}
+
+// terminalTrafficRejectionReason lists the Controller reasons that mean a
+// report will never be accounted. They are business outcomes, not counter
+// problems, so they must not put the local traffic state into recovery.
+// binding_removed is accepted defensively; Controller currently answers an
+// unauthorized user/inbound pair with 403 instead of a per-report rejection.
+func terminalTrafficRejectionReason(reason string) bool {
+	switch strings.TrimSpace(reason) {
+	case "user_deleted", "user_inactive", "binding_removed", "inbound_deleted", "inbound_disabled", "path_removed":
+		return true
+	default:
+		return false
 	}
 }
 

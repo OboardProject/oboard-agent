@@ -21,7 +21,16 @@ import (
 	C "github.com/sagernet/sing-box/constant"
 )
 
-var kernelCapabilities = []string{"trusted_forward_v1", "outbound_egress_probe_v1", "outbound_relay_v1", "route_relay_v1", "runtime_clock_v1", "connection_presence_v1", "family_selector_v1", "traffic_ledger"}
+var kernelCapabilities = []string{"trusted_forward_v1", "outbound_egress_probe_v1", "outbound_relay_v1", "route_relay_v1", "runtime_clock_v1", "connection_presence_v1", "family_selector_v1", "traffic_ledger", "runtime_config_digest_v1"}
+
+// runtimeConfigState is the payload-free identity of the configuration this
+// process actually loaded. Agent compares it with the desired configuration so
+// a deployment cannot report success while the kernel still runs older state.
+type runtimeConfigState struct {
+	OperationalDigest string
+	StartedAt         time.Time
+	Generation        uint64
+}
 
 func main() {
 	config := flag.String("config", "config.json", "sing-box config path")
@@ -71,6 +80,12 @@ func main() {
 		return
 	}
 
+	operationalDigest, err := minibox.OperationalConfigDigestFile(*config)
+	if err != nil {
+		log.Fatal(err)
+	}
+	runtimeConfig := runtimeConfigState{OperationalDigest: operationalDigest, StartedAt: time.Now().UTC(), Generation: 1}
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	memoryReclaimer := minibox.StartMemoryReclaimer(ctx, runtimeTuning)
@@ -85,7 +100,7 @@ func main() {
 	tracker.SetSocketGovernor(socketGovernor)
 	if *api != "" {
 		go func() {
-			if err := serveHealth(ctx, *api, b, tracker, runtimeClock, runtimeTuning, memoryReclaimer, socketGovernor); err != nil && ctx.Err() == nil {
+			if err := serveHealth(ctx, *api, b, tracker, runtimeClock, runtimeTuning, memoryReclaimer, socketGovernor, runtimeConfig); err != nil && ctx.Err() == nil {
 				log.Println(err)
 			}
 		}()
@@ -120,11 +135,12 @@ func printVersion() {
 	fmt.Println(string(data))
 }
 
-func serveHealth(ctx context.Context, listen string, instance *box.Box, tracker *minibox.RateLimitTracker, runtimeClock *minibox.RuntimeClock, tuning minibox.RuntimeTuning, memoryReclaimer *minibox.MemoryReclaimer, socketGovernor *minibox.SocketBufferGovernor) error {
+func serveHealth(ctx context.Context, listen string, instance *box.Box, tracker *minibox.RateLimitTracker, runtimeClock *minibox.RuntimeClock, tuning minibox.RuntimeTuning, memoryReclaimer *minibox.MemoryReclaimer, socketGovernor *minibox.SocketBufferGovernor, runtimeConfig runtimeConfigState) error {
 	if err := validateLocalAPIListen(listen); err != nil {
 		return err
 	}
 	mux := http.NewServeMux()
+	registerRuntimeStatusHandler(mux, runtimeConfig)
 	registerOutboundEgressHandler(mux, instance)
 	registerOutboundRelayHandlers(mux, listen, instance)
 	registerRouteRelayHandlers(mux, listen, instance)
@@ -229,6 +245,25 @@ func serveHealth(ctx context.Context, listen string, instance *box.Box, tracker 
 		_ = srv.Shutdown(shutdownCtx)
 	}(ctx)
 	return srv.Serve(ln)
+}
+
+// registerRuntimeStatusHandler exposes the identity of the configuration this
+// process loaded. It returns a digest only; configuration content, credentials,
+// and file paths never leave the kernel.
+func registerRuntimeStatusHandler(mux *http.ServeMux, runtimeConfig runtimeConfigState) {
+	mux.HandleFunc("/runtime/status", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"operational_config_sha256": runtimeConfig.OperationalDigest,
+			"started_at":                runtimeConfig.StartedAt.Format(time.RFC3339Nano),
+			"pid":                       os.Getpid(),
+			"generation":                runtimeConfig.Generation,
+		})
+	})
 }
 
 func registerClockConfigHandler(mux *http.ServeMux, listen string, runtimeClock *minibox.RuntimeClock) {

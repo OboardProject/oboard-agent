@@ -251,7 +251,7 @@ func (t *RateLimitTracker) recordConnectionStart(state *runtimeState, metadata a
 	if t.auditActiveByIdentity[identityKey] > bucket.ActivePeak {
 		bucket.ActivePeak = t.auditActiveByIdentity[identityKey]
 	}
-	bucket.EndedAt = now.Format(time.RFC3339Nano)
+	advanceAuditEnd(bucket, now)
 	presenceKey := connectionPresenceKey(policy.UserID, policy.DeviceIDHash, policy.CredentialEpoch, sourceIP, network)
 	if admitted {
 		presence := t.presenceStates[presenceKey]
@@ -285,13 +285,18 @@ func (t *RateLimitTracker) recordConnectionPayload(handle string, upload, downlo
 	if bucket == nil {
 		return
 	}
-	now := t.timeNow().UTC().Format(time.RFC3339Nano)
+	nowTime := t.timeNow().UTC()
+	now := nowTime.Format(time.RFC3339Nano)
 	if bucket.PayloadFirstAt == "" {
 		bucket.PayloadFirstAt = now
 	}
 	bucket.PayloadLastAt = now
 	bucket.UploadBytes += upload
 	bucket.DownloadBytes += download
+	// A bucket that survived a drain keeps its window end at the drain
+	// boundary. Payload recorded afterwards must move that end forward too, or
+	// the next drain would emit payload_last_at > ended_at.
+	advanceAuditEnd(bucket, nowTime)
 	if len(parts) >= 4 && parts[3] == "true" {
 		if presence := t.presenceStates[parts[2]]; presence != nil {
 			firstPayload := !presence.Meaningful
@@ -348,7 +353,7 @@ func (t *RateLimitTracker) recordConnectionEnd(handle string) {
 				bucket.DurationGT20SCount++
 			}
 		}
-		bucket.EndedAt = now.Format(time.RFC3339Nano)
+		advanceAuditEnd(bucket, now)
 	}
 	if len(parts) >= 4 && parts[3] == "true" {
 		if presence := t.presenceStates[parts[2]]; presence != nil {
@@ -362,6 +367,88 @@ func (t *RateLimitTracker) recordConnectionEnd(handle string) {
 			}
 		}
 	}
+}
+
+// advanceAuditEnd moves a bucket's window end forward without ever moving it
+// backwards, and keeps it at or after the bucket's start and last payload time.
+// Controller rejects a report whose payload_last_at is later than ended_at, so
+// every writer must go through this helper.
+func advanceAuditEnd(bucket *ConnectionAuditBucket, now time.Time) {
+	if bucket == nil {
+		return
+	}
+	end := now.UTC()
+	if current, err := time.Parse(time.RFC3339Nano, bucket.EndedAt); err == nil && current.After(end) {
+		end = current
+	}
+	if started, err := time.Parse(time.RFC3339Nano, bucket.StartedAt); err == nil && started.After(end) {
+		end = started
+	}
+	if payload, err := time.Parse(time.RFC3339Nano, bucket.PayloadLastAt); err == nil && payload.After(end) {
+		end = payload
+	}
+	bucket.EndedAt = end.Format(time.RFC3339Nano)
+}
+
+// normalizeAuditItemWindow is the last defence before a bucket leaves the
+// kernel. The logical clock may step slightly backwards, so the emitted item is
+// clamped into
+// collection_started_at <= started_at <= payload_first_at <= payload_last_at <= ended_at <= collection_ended_at.
+func normalizeAuditItemWindow(item *ConnectionAuditBucket, collectionStarted, collectionEnded time.Time) {
+	if item == nil {
+		return
+	}
+	parse := func(value string) (time.Time, bool) {
+		parsed, err := time.Parse(time.RFC3339Nano, value)
+		return parsed.UTC(), err == nil
+	}
+	format := func(value time.Time) string { return value.UTC().Format(time.RFC3339Nano) }
+	started, hasStarted := parse(item.StartedAt)
+	if !hasStarted || started.Before(collectionStarted) {
+		started = collectionStarted
+	}
+	if started.After(collectionEnded) {
+		started = collectionEnded
+	}
+	ended, hasEnded := parse(item.EndedAt)
+	if !hasEnded || ended.Before(started) {
+		ended = started
+	}
+	payloadFirst, hasPayloadFirst := parse(item.PayloadFirstAt)
+	payloadLast, hasPayloadLast := parse(item.PayloadLastAt)
+	if hasPayloadFirst || hasPayloadLast {
+		if !hasPayloadFirst {
+			payloadFirst = payloadLast
+		}
+		if !hasPayloadLast {
+			payloadLast = payloadFirst
+		}
+		if payloadFirst.Before(started) {
+			payloadFirst = started
+		}
+		if payloadLast.Before(payloadFirst) {
+			payloadLast = payloadFirst
+		}
+		if payloadLast.After(collectionEnded) {
+			payloadLast = collectionEnded
+		}
+		if payloadFirst.After(payloadLast) {
+			payloadFirst = payloadLast
+		}
+		if ended.Before(payloadLast) {
+			ended = payloadLast
+		}
+		item.PayloadFirstAt = format(payloadFirst)
+		item.PayloadLastAt = format(payloadLast)
+	}
+	if ended.After(collectionEnded) {
+		ended = collectionEnded
+	}
+	if ended.Before(started) {
+		started = ended
+	}
+	item.StartedAt = format(started)
+	item.EndedAt = format(ended)
 }
 
 func connectionPresenceKey(userID int64, deviceIDHash string, credentialEpoch int64, sourceIP, network string) string {
@@ -426,7 +513,10 @@ func (t *RateLimitTracker) DrainConnectionAuditSnapshot() ConnectionAuditDrain {
 	nowTime := t.timeNow().UTC()
 	now := nowTime.Format(time.RFC3339Nano)
 	started := t.auditWindowStart
-	if started.IsZero() {
+	if started.IsZero() || started.After(nowTime) {
+		// The logical clock may step slightly backwards. Collapse the window
+		// instead of emitting collection_ended_at < collection_started_at,
+		// which Controller rejects for the whole batch.
 		started = nowTime
 	}
 	drain := ConnectionAuditDrain{CollectionGeneration: t.auditGeneration, BucketCapacity: maxConnectionAuditBuckets, DroppedBucketCount: t.auditDropped, CollectionStartedAt: started.Format(time.RFC3339Nano), CollectionEndedAt: now}
@@ -444,6 +534,7 @@ func (t *RateLimitTracker) DrainConnectionAuditSnapshot() ConnectionAuditDrain {
 			if item.EndedAt == "" {
 				item.EndedAt = now
 			}
+			normalizeAuditItemWindow(&item, started, nowTime)
 			items = append(items, item)
 		}
 		if bucket.active == 0 {

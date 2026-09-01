@@ -136,6 +136,9 @@ type Runner struct {
 	interactiveNonces          map[string]time.Time
 	controlMu                  sync.Mutex
 	controlSend                func(payload any, wait bool) error
+	agentRestartScheduled      atomic.Bool
+	controllerLinkMu           sync.Mutex
+	controllerLink             controllerLinkDiagnostics
 }
 
 const (
@@ -600,6 +603,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		}
 		lived := time.Since(started)
 		authFailure := isAuthReconnectError(err)
+		link := r.recordControllerLinkClosed(time.Now().UTC(), lived, err)
 		if lived >= 60*time.Second {
 			failures = 0
 			firstAfterDrop = true
@@ -610,7 +614,8 @@ func (r *Runner) Run(ctx context.Context) error {
 		delay := reconnectDelay(cfg.AgentID, cfg.ControllerURL, max(0, failures-1), firstAfterDrop, authFailure)
 		firstAfterDrop = false
 		if err != nil && (failures <= 1 || failures%20 == 0 || authFailure) {
-			log.Printf("controller connection failed: attempt=%d next_retry=%s error=%v", failures, delay, err)
+			log.Printf("controller connection failed: attempt=%d class=%s http_status=%d close_code=%d connected_ms=%d reconnects=%d consecutive_failures=%d next_retry=%s detail=%q",
+				failures, link.DisconnectClass, link.HandshakeHTTPStatus, link.WebSocketCloseCode, link.LastConnectedDurationMS, link.ReconnectCount, link.ConsecutiveFailures, delay, link.DisconnectDetail)
 		}
 		select {
 		case <-ctx.Done():
@@ -640,10 +645,11 @@ func (r *Runner) connect(ctx context.Context) error {
 	}
 	header := http.Header{"Authorization": []string{"Bearer " + cfg.AgentToken}, "X-Agent-ID": []string{cfg.AgentID}}
 	dialer := websocket.Dialer{ReadBufferSize: 1024, WriteBufferSize: 1024, EnableCompression: false, HandshakeTimeout: 10 * time.Second, TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, Time: time.Now}}
-	conn, _, err := dialer.DialContext(ctx, url, header)
+	conn, handshakeResponse, err := dialer.DialContext(ctx, url, header)
 	if err != nil {
-		return err
+		return newControllerHandshakeError(err, handshakeResponse)
 	}
+	r.recordControllerLinkConnected(time.Now().UTC())
 	log.Printf("controller connection established: server_id=%d remote=%s", cfg.ServerID, conn.RemoteAddr())
 	defer conn.Close()
 	connectionCtx, cancelConnection := context.WithCancel(ctx)
@@ -1264,7 +1270,27 @@ func (r *Runner) updateAgentBinary(payloadJSON string) (map[string]any, error) {
 	return result, nil
 }
 
+// scheduleAgentRestart arms a one-shot restart of this Agent. The transient
+// systemd unit is named after the process, so a second call inside the same
+// process would collide with a timer that has not been collected yet. One
+// scheduled restart per process is also the correct behaviour: queueing several
+// would restart the Agent repeatedly after a single update.
 func (r *Runner) scheduleAgentRestart() error {
+	return r.scheduleAgentRestartWith(scheduleAgentRestartCommand)
+}
+
+func (r *Runner) scheduleAgentRestartWith(schedule func() error) error {
+	if !r.agentRestartScheduled.CompareAndSwap(false, true) {
+		return nil
+	}
+	err := schedule()
+	if err != nil {
+		r.agentRestartScheduled.Store(false)
+	}
+	return err
+}
+
+func scheduleAgentRestartCommand() error {
 	switch detectServiceManager() {
 	case "systemd":
 		unit := fmt.Sprintf("oboard-agent-restart-%d", os.Getpid())
@@ -1959,9 +1985,37 @@ func (r *Runner) applyCoreConfigUnlocked(version int64, config string) (map[stri
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return result, err
 	}
+	ctx := context.Background()
+	// A deployment is only converged when the process that serves traffic runs
+	// the desired operational configuration. Matching bytes on disk are not
+	// evidence of that, so the running kernel is asked directly and restarted
+	// when it turns out to be stale.
+	recoverRuntimeDrift := func(check coreRuntimeCheck) (map[string]any, error) {
+		log.Printf("core runtime drift: loaded=%s desired=%s; restarting %s", check.LoadedDigest, check.DesiredDigest, r.coreService())
+		recovered, err := r.restartCoreForRuntimeDrift(ctx, []byte(config))
+		recovered.annotate(result)
+		// The recovery is reported as a drift even when it succeeded, so the
+		// task result records that the kernel had to be brought back.
+		result["runtime_drift"] = true
+		result["runtime_drift_recovered"] = err == nil && !recovered.drift()
+		if err != nil {
+			result["reload_strategy"] = "runtime_drift_restart_failed"
+			return result, fmt.Errorf("restart core after runtime drift: %w", err)
+		}
+		if recovered.drift() {
+			result["reload_strategy"] = "runtime_drift_restart_failed"
+			return result, fmt.Errorf("core still runs configuration %s after restart, expected %s", recovered.LoadedDigest, recovered.DesiredDigest)
+		}
+		return finishOperationalApply("core restarted after runtime configuration drift", "runtime_drift_restart", false)
+	}
 	if len(previousConfig) > 0 && bytes.Equal(bytes.TrimSpace(previousConfig), bytes.TrimSpace([]byte(config))) {
 		result["validated"] = true
 		result["unchanged"] = true
+		check := r.checkCoreRuntimeConfig(ctx, []byte(config))
+		check.annotate(result)
+		if check.drift() {
+			return recoverRuntimeDrift(check)
+		}
 		return finishOperationalApply("core config already active", "unchanged", false)
 	}
 	if len(previousConfig) > 0 {
@@ -1991,6 +2045,14 @@ func (r *Runner) applyCoreConfigUnlocked(version int64, config string) (map[stri
 		return result, metadataErr
 	}
 	if metadataOnly {
+		// Runtime policy is pushed into the live process, so it must not be
+		// used to skip a restart while that process still runs an older
+		// operational configuration.
+		check := r.checkCoreRuntimeConfig(ctx, []byte(config))
+		check.annotate(result)
+		if check.drift() {
+			return recoverRuntimeDrift(check)
+		}
 		policies, err := embeddedCoreTrafficPolicies([]byte(config))
 		if err != nil {
 			if restoreErr := restoreCoreConfigFile(current, previousConfig); restoreErr != nil {
@@ -2086,6 +2148,11 @@ func (r *Runner) applyCoreConfigUnlocked(version int64, config string) (map[stri
 						rollbackForwards()
 						return result, fmt.Errorf("persist forward handoff: %w", err)
 					}
+					check := r.awaitCoreRuntimeConfig(ctx, []byte(config), r.coreRuntimeVerifyWindow())
+					check.annotate(result)
+					if check.drift() {
+						return recoverRuntimeDrift(check)
+					}
 					return finishOperationalApply("config applied with hot reload", "hot_reload", true)
 				}
 				result["reload_error"] = "core service stopped after reload"
@@ -2116,6 +2183,12 @@ func (r *Runner) applyCoreConfigUnlocked(version int64, config string) (map[stri
 		rollbackForwards()
 		return result, fmt.Errorf("persist forward handoff: %w", err)
 	}
+	check := r.awaitCoreRuntimeConfig(ctx, []byte(config), r.coreRuntimeVerifyWindow())
+	check.annotate(result)
+	if check.drift() {
+		result["reload_strategy"] = "restart_verification_failed"
+		return result, fmt.Errorf("core still runs configuration %s after restart, expected %s", check.LoadedDigest, check.DesiredDigest)
+	}
 	return finishOperationalApply("config applied with restart fallback", "restart_fallback", false)
 }
 
@@ -2127,48 +2200,6 @@ func restoreCoreConfigFile(path string, previous []byte) error {
 		return err
 	}
 	return nil
-}
-
-func coreRuntimeMetadataOnlyChange(previous, next []byte) (bool, error) {
-	if len(previous) == 0 || len(next) == 0 {
-		return false, nil
-	}
-	strip := func(raw []byte) ([]byte, error) {
-		var root map[string]json.RawMessage
-		if err := json.Unmarshal(raw, &root); err != nil {
-			return nil, err
-		}
-		if rawMetadata, ok := root["_oboard"]; ok {
-			var metadata map[string]json.RawMessage
-			if err := json.Unmarshal(rawMetadata, &metadata); err != nil {
-				return nil, err
-			}
-			delete(metadata, "rate_limits")
-			delete(metadata, "connection_audit")
-			if len(metadata) == 0 {
-				delete(root, "_oboard")
-			} else {
-				encoded, err := json.Marshal(metadata)
-				if err != nil {
-					return nil, err
-				}
-				root["_oboard"] = encoded
-			}
-		}
-		return json.Marshal(root)
-	}
-	previousOperational, err := strip(previous)
-	if err != nil {
-		return false, err
-	}
-	nextOperational, err := strip(next)
-	if err != nil {
-		return false, err
-	}
-	if !bytes.Equal(previousOperational, nextOperational) {
-		return false, nil
-	}
-	return !bytes.Equal(bytes.TrimSpace(previous), bytes.TrimSpace(next)), nil
 }
 
 func embeddedCoreTrafficPolicies(config []byte) (map[string]interface{}, error) {

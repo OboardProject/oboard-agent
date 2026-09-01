@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"net/netip"
@@ -92,7 +93,17 @@ type connectionAuditLocalState struct {
 }
 
 type connectionAuditReportResponse struct {
-	Accepted []string `json:"accepted_report_ids"`
+	Accepted  []string                         `json:"accepted_report_ids"`
+	Discarded []connectionAuditDiscardedReport `json:"discarded_reports"`
+}
+
+// connectionAuditDiscardedReport names a report Controller will never accept.
+// Its ID is also present in accepted_report_ids, so the pending record is
+// removed by the ordinary path; this list exists so the reason is visible in
+// Agent logs instead of a silent, endlessly retried batch failure.
+type connectionAuditDiscardedReport struct {
+	ReportID string `json:"report_id"`
+	Reason   string `json:"reason"`
 }
 
 type agentAuditBucket struct {
@@ -603,9 +614,15 @@ func (r *Runner) reportPendingConnectionAudits(ctx context.Context, state *conne
 	if err := r.postControllerJSON(ctx, "/api/v1/agent/connection-reports", map[string]any{"items": state.Pending[:limit]}, &resp, true); err != nil {
 		return err
 	}
-	accepted := make(map[string]struct{}, len(resp.Accepted))
+	if len(resp.Discarded) > 0 {
+		log.Printf("connection audit: controller discarded %d report(s), first report=%s reason=%s", len(resp.Discarded), resp.Discarded[0].ReportID, resp.Discarded[0].Reason)
+	}
+	accepted := make(map[string]struct{}, len(resp.Accepted)+len(resp.Discarded))
 	for _, id := range resp.Accepted {
 		accepted[id] = struct{}{}
+	}
+	for _, item := range resp.Discarded {
+		accepted[item.ReportID] = struct{}{}
 	}
 	remaining := state.Pending[:0]
 	for _, report := range state.Pending {

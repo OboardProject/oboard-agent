@@ -14,18 +14,33 @@ const (
 	coreWatchdogStableReset = 2 * time.Minute
 )
 
+const (
+	coreWatchdogStateRunning            = "running"
+	coreWatchdogStateRuntimeDrift       = "runtime_drift"
+	coreWatchdogStateRuntimeUnreachable = "runtime_unreachable"
+	coreWatchdogStateRecovering         = "recovering"
+	coreWatchdogStateWaitingForConfig   = "waiting_for_config"
+	coreWatchdogStateBackoff            = "backoff"
+)
+
 type coreWatchdogStatus struct {
-	Service        string    `json:"service"`
-	State          string    `json:"state"`
-	RestartCount   int       `json:"restart_count"`
-	Consecutive    int       `json:"consecutive_restarts"`
-	LastCheckedAt  time.Time `json:"last_checked_at"`
-	LastRestartAt  time.Time `json:"last_restart_at,omitempty"`
-	NextAttemptAt  time.Time `json:"next_attempt_at,omitempty"`
-	StableSince    time.Time `json:"stable_since,omitempty"`
-	LastError      string    `json:"last_error,omitempty"`
-	ConfigPath     string    `json:"config_path"`
-	RecoveryAction string    `json:"recovery_action,omitempty"`
+	Service             string    `json:"service"`
+	State               string    `json:"state"`
+	RestartCount        int       `json:"restart_count"`
+	Consecutive         int       `json:"consecutive_restarts"`
+	LastCheckedAt       time.Time `json:"last_checked_at"`
+	LastRestartAt       time.Time `json:"last_restart_at,omitempty"`
+	NextAttemptAt       time.Time `json:"next_attempt_at,omitempty"`
+	StableSince         time.Time `json:"stable_since,omitempty"`
+	LastError           string    `json:"last_error,omitempty"`
+	ConfigPath          string    `json:"config_path"`
+	RecoveryAction      string    `json:"recovery_action,omitempty"`
+	DesiredDigest       string    `json:"desired_digest,omitempty"`
+	LoadedDigest        string    `json:"loaded_digest,omitempty"`
+	RuntimeVerified     bool      `json:"runtime_verified"`
+	RuntimeVerification string    `json:"runtime_verification,omitempty"`
+	LastRuntimeCheckAt  time.Time `json:"last_runtime_check_at,omitempty"`
+	LastRestartReason   string    `json:"last_restart_reason,omitempty"`
 }
 
 func coreWatchdogBackoff(consecutive int) time.Duration {
@@ -58,15 +73,25 @@ func (r *Runner) startCoreWatchdog(ctx context.Context) {
 	}
 }
 
+// runCoreWatchdogCheck escalates from "is the unit alive" to "does the living
+// process serve the configuration on disk". A kernel that is active but stuck
+// on an older configuration is a silent outage, so it is treated as a recovery
+// case rather than as a healthy service.
 func (r *Runner) runCoreWatchdogCheck(ctx context.Context, status *coreWatchdogStatus, now time.Time) {
 	if ctx.Err() != nil || !r.managedRestartEnabled() {
 		return
 	}
 	status.Service = r.coreService()
 	status.LastCheckedAt = now
-	if info, err := os.Stat(status.ConfigPath); err != nil || info.Size() == 0 {
-		status.State = "waiting_for_config"
+	// #nosec G304 -- ConfigPath is a fixed file below the Agent's configured state directory.
+	desired, readErr := os.ReadFile(status.ConfigPath)
+	if readErr != nil || len(desired) == 0 {
+		status.State = coreWatchdogStateWaitingForConfig
 		status.LastError = ""
+		status.DesiredDigest = ""
+		status.LoadedDigest = ""
+		status.RuntimeVerified = false
+		status.RuntimeVerification = ""
 		r.writeCoreWatchdogStatus(*status)
 		return
 	}
@@ -74,8 +99,29 @@ func (r *Runner) runCoreWatchdogCheck(ctx context.Context, status *coreWatchdogS
 	r.coreLifecycleMu.Lock()
 	defer r.coreLifecycleMu.Unlock()
 	if err := r.coreServiceActive(); err == nil {
-		wasRunning := status.State == "running"
-		status.State = "running"
+		wasRunning := status.State == coreWatchdogStateRunning
+		check := r.checkCoreRuntimeConfig(ctx, desired)
+		status.LastRuntimeCheckAt = now
+		status.DesiredDigest = check.DesiredDigest
+		status.LoadedDigest = check.LoadedDigest
+		status.RuntimeVerified = check.verified()
+		status.RuntimeVerification = check.Verification
+		if check.drift() {
+			r.recoverCoreRuntimeDrift(ctx, status, desired, now)
+			return
+		}
+		if check.Verification == coreRuntimeVerificationUnavailable {
+			// The unit is alive but its local API is not answering. Report it
+			// instead of restarting: a restart cannot fix a socket the Agent
+			// simply cannot reach, and an unnecessary restart drops sessions.
+			status.State = coreWatchdogStateRuntimeUnreachable
+			if check.Err != nil {
+				status.LastError = check.Err.Error()
+			}
+			r.writeCoreWatchdogStatus(*status)
+			return
+		}
+		status.State = coreWatchdogStateRunning
 		status.LastError = ""
 		if status.StableSince.IsZero() {
 			status.StableSince = now
@@ -92,7 +138,7 @@ func (r *Runner) runCoreWatchdogCheck(ctx context.Context, status *coreWatchdogS
 	}
 	status.StableSince = time.Time{}
 	if !status.NextAttemptAt.IsZero() && now.Before(status.NextAttemptAt) {
-		status.State = "backoff"
+		status.State = coreWatchdogStateBackoff
 		r.writeCoreWatchdogStatus(*status)
 		return
 	}
@@ -106,12 +152,40 @@ func (r *Runner) runCoreWatchdogCheck(ctx context.Context, status *coreWatchdogS
 		r.writeCoreWatchdogStatus(*status)
 		return
 	}
-	status.State = "restarting"
+	r.restartCoreFromWatchdog(ctx, status, desired, now, "service_stopped")
+}
+
+// recoverCoreRuntimeDrift restarts a kernel that is running but has diverged
+// from the configuration on disk.
+func (r *Runner) recoverCoreRuntimeDrift(ctx context.Context, status *coreWatchdogStatus, desired []byte, now time.Time) {
+	if !status.NextAttemptAt.IsZero() && now.Before(status.NextAttemptAt) {
+		status.State = coreWatchdogStateBackoff
+		r.writeCoreWatchdogStatus(*status)
+		return
+	}
+	status.State = coreWatchdogStateRuntimeDrift
+	status.StableSince = time.Time{}
+	status.Consecutive++
+	if err := validateSingBox(r.coreBinary(), status.ConfigPath, r.commandTimeout()); err != nil {
+		status.State = "invalid_config"
+		status.LastError = err.Error()
+		status.NextAttemptAt = now.Add(2 * time.Minute)
+		log.Printf("core watchdog: refusing to restart %s with invalid config: %v", status.Service, err)
+		r.writeCoreWatchdogStatus(*status)
+		return
+	}
+	log.Printf("core watchdog: %s runs configuration %s but %s is desired; restarting", status.Service, status.LoadedDigest, status.DesiredDigest)
+	r.restartCoreFromWatchdog(ctx, status, desired, now, "runtime_drift")
+}
+
+func (r *Runner) restartCoreFromWatchdog(ctx context.Context, status *coreWatchdogStatus, desired []byte, now time.Time, reason string) {
+	status.State = coreWatchdogStateRecovering
 	status.RecoveryAction = "managed_restart"
+	status.LastRestartReason = reason
 	status.LastRestartAt = now
 	status.RestartCount++
 	r.writeCoreWatchdogStatus(*status)
-	log.Printf("core watchdog: %s is stopped; starting automatic recovery", status.Service)
+	log.Printf("core watchdog: starting automatic recovery of %s reason=%s", status.Service, reason)
 	if err := r.restartCore(); err != nil {
 		status.State = "restart_failed"
 		status.LastError = err.Error()
@@ -128,12 +202,26 @@ func (r *Runner) runCoreWatchdogCheck(ctx context.Context, status *coreWatchdogS
 		r.writeCoreWatchdogStatus(*status)
 		return
 	}
+	check := r.awaitCoreRuntimeConfig(ctx, desired, r.coreRuntimeVerifyWindow())
+	status.LastRuntimeCheckAt = time.Now().UTC()
+	status.DesiredDigest = check.DesiredDigest
+	status.LoadedDigest = check.LoadedDigest
+	status.RuntimeVerified = check.verified()
+	status.RuntimeVerification = check.Verification
+	if check.drift() {
+		status.State = coreWatchdogStateRuntimeDrift
+		status.LastError = "core still runs an older configuration after restart"
+		status.NextAttemptAt = now.Add(coreWatchdogBackoff(status.Consecutive + 1))
+		log.Printf("core watchdog: %s still runs %s after restart, expected %s", status.Service, check.LoadedDigest, check.DesiredDigest)
+		r.writeCoreWatchdogStatus(*status)
+		return
+	}
 	status.State = "recovered"
 	status.LastError = ""
 	status.StableSince = time.Now().UTC()
 	_ = r.configureCoreClock(ctx)
 	status.NextAttemptAt = now.Add(coreWatchdogBackoff(status.Consecutive + 1))
-	log.Printf("core watchdog: %s recovered successfully", status.Service)
+	log.Printf("core watchdog: %s recovered successfully reason=%s", status.Service, reason)
 	r.writeCoreWatchdogStatus(*status)
 }
 

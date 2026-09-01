@@ -596,7 +596,9 @@ Agent behavior:
 - Compare every non-empty requested config with local active state even when a
   deployment supplied `config_changed=false`; repair local absence or drift.
 - Return `reload_strategy=unchanged` without validation or reload when the
-  requested config exactly matches the active file.
+  requested config exactly matches the active file **and** the running core
+  reports the same operational configuration digest. Matching bytes on disk are
+  not proof of convergence on their own.
 - Validate candidate config with `oboard-sb -check`.
 - Reject stale or conflicting task versions before requesting managed assets.
 - Request only uncached managed asset revisions, verify certificate and routing
@@ -606,6 +608,14 @@ Agent behavior:
 - Atomically replace active config.
 - When only the `_oboard` runtime policy block changed, update the local policy
   API and return `reload_strategy=runtime_policy_only` without reloading core.
+  This shortcut applies only when the running core already serves the desired
+  operational configuration; a runtime policy update must never mask a core that
+  is still running older operational state.
+- Verify convergence against the running core after every reload or restart. On
+  a mismatch, restart the core once and verify again; a core that still reports
+  a different operational digest fails the task. A deployment reported as
+  succeeded therefore means the running `oboard-sb` has converged, not only that
+  the file was written.
 - `_oboard.connection_audit.enabled` is emitted only for servers where
   connection auditing is enabled. The core does not allocate audit buckets when
   it is false; disabling the runtime setting clears existing buckets.
@@ -648,9 +658,63 @@ Result shape:
   "reload_strategy": "hot_reload",
   "managed_assets_changed": false,
   "connection_draining": true,
+  "runtime_verified": true,
+  "runtime_verification": "verified",
+  "runtime_drift": false,
+  "runtime_loaded_digest": "sha256-hex",
+  "runtime_desired_digest": "sha256-hex",
   "connection_note": "hot reload is attempted first; existing connections should be preserved when supported by the running core/service"
 }
 ```
+
+`reload_strategy` values are `unchanged`, `runtime_policy_only`, `hot_reload`,
+`restart_fallback`, `runtime_drift_restart`, plus the failure markers
+`validation_failed`, `metadata_compare_failed`, `runtime_policy_parse_failed`,
+`runtime_policy_sync_failed`, `forward_handoff_failed`, `restart_required`,
+`restart_verification_failed`, `runtime_drift_restart_failed`, and `rollback`.
+
+`runtime_verification` is `verified` when the core answered with its loaded
+digest, `unsupported` when the core does not advertise
+`runtime_config_digest_v1`, and `unavailable` when the local API could not be
+reached. Only `verified` plus a differing digest counts as drift; an
+unsupported or unreachable core keeps the previous file-only behaviour so Agent
+and kernel can be upgraded independently.
+
+#### Kernel runtime configuration identity
+
+`oboard-sb` advertises `runtime_config_digest_v1` and serves the Agent-only
+local endpoint:
+
+```text
+GET /runtime/status
+```
+
+```json
+{
+  "operational_config_sha256": "sha256-hex",
+  "started_at": "2026-09-02T00:00:00Z",
+  "pid": 1234,
+  "generation": 1
+}
+```
+
+It returns identity only; configuration content, credentials, and file paths
+never leave the kernel. `operational_config_sha256` is the SHA-256 of the
+canonical JSON form of the loaded configuration with the runtime-only members
+`_oboard.rate_limits` and `_oboard.connection_audit` removed (an emptied
+`_oboard` object is dropped entirely). Agent applies the identical
+normalization, so both sides derive the same digest from the same bytes
+regardless of key order or formatting. This is the same rule that decides
+whether a change is `runtime_policy_only`.
+
+Agent persists the resulting convergence state in `core-watchdog.json`
+(`desired_digest`, `loaded_digest`, `runtime_verified`,
+`last_runtime_check_at`, `last_restart_reason`). The core watchdog states are
+`running`, `runtime_drift`, `runtime_unreachable`, `recovering`,
+`waiting_for_config`, `backoff`, plus the existing `invalid_config`,
+`restart_failed`, `crashed_after_restart`, and `recovered` markers. The watchdog
+and ordinary deployments share `coreLifecycleMu`, so a watchdog restart and a
+deployment can never run at the same time.
 
 ### Deployment step: `time_check`
 
@@ -1488,6 +1552,20 @@ Controller verifies:
 - user is active;
 - user is allowed on that inbound.
 
+Ownership failures stay request-level: a report naming another server's inbound
+or proxy path, and a user that is not authorized on the inbound, return `403`
+for the whole request. Controller cannot tell a removed binding apart from a
+claim for access the user never had, so that boundary is never downgraded.
+
+Reports whose accounting subject no longer exists are terminal for that single
+report instead of failing the batch. Controller answers `200` and returns the
+report with `status=rejected` and a `reason` of `user_deleted`, `user_inactive`,
+`inbound_deleted`, `inbound_disabled`, or `path_removed`. Those IDs are not
+listed in `accepted_report_ids`, and the bytes are never billed. Agent deletes
+the pending report on a terminal reason without entering counter recovery,
+because local counters remain consistent. Stream observations whose user is
+gone are skipped rather than failing the accounting batch they travel with.
+
 The response returns `stream_checkpoints`, `accepted_reports`, and
 `accepted_report_ids`, plus runtime policies only for users whose first
 authentication/decryption point is that server. Downstream shared
@@ -1586,6 +1664,43 @@ the source IP, counters, coverage bounds and timestamps, active user, authorized
 inbound, and transparent-path accounting location. `report_id` is stable and
 insertion is idempotent. The response returns
 `accepted_report_ids`; the Agent keeps at most 200 items in one delivery batch.
+
+A single malformed item does not poison the batch. Data-shape failures are
+terminal for that one report: Controller answers `200`, lists the report under
+`discarded_reports` with a stable machine-readable `reason`, and repeats its ID
+in `accepted_report_ids` so an Agent that does not read the new field still
+drops the pending record.
+
+```json
+{
+  "ok": true,
+  "accepted_report_ids": ["agent-a-connection-1", "agent-a-connection-2"],
+  "discarded_reports": [
+    { "report_id": "agent-a-connection-2", "reason": "invalid_payload_window" }
+  ]
+}
+```
+
+Reason codes are `invalid_identity`, `invalid_device_identity`,
+`invalid_source_ip`, `invalid_source_geo_code`, `invalid_network`,
+`invalid_destination`, `invalid_destination_port`, `invalid_counters`,
+`invalid_probe_state`, `invalid_collection_coverage`, `empty_report`,
+`invalid_started_at`, `invalid_ended_at`, `time_outside_accepted_range`,
+`invalid_collection_started_at`, `invalid_collection_ended_at`,
+`event_outside_collection_window`, `invalid_payload_window`,
+`inconsistent_payload_coverage`, `missing_inbound`, and `invalid_path_id`.
+
+The whole request still fails when the envelope itself is unusable or a
+security boundary is crossed: a missing or oversized `report_id` returns `400`,
+and a report about another server's inbound or proxy path returns `403`.
+
+Kernel drains guarantee
+`collection_started_at <= started_at <= payload_first_at <= payload_last_at <=
+ended_at <= collection_ended_at` for every emitted item. A connection that
+outlives a drain keeps recording payload into the window that just reset, so
+the window end always follows the last payload; the logical clock may step
+backwards, and the drain collapses the window rather than emitting an inverted
+one.
 
 Collection is opt-in per server and defaults off. While off, Agent does not
 poll the core drain endpoint, does not create `connection-audit-state.json`,
