@@ -1545,6 +1545,7 @@ func (r *Runner) runNetworkDiagnostics(payloadJSON string) map[string]any {
 		files["oboard_sb_log"] = readDiagnosticTail(filepath.Join("/var/log", r.coreService()+".log"), 80)
 	}
 	result["files"] = files
+	result["ssh_inbounds"] = r.currentSSHDiagnostics()
 	return result
 }
 

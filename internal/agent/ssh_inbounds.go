@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -15,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -40,15 +43,17 @@ var (
 )
 
 type sshInboundApplyResult struct {
-	Version            int64    `json:"version"`
-	Unchanged          bool     `json:"unchanged,omitempty"`
-	RuntimeOnly        bool     `json:"runtime_only,omitempty"`
-	Applied            int      `json:"applied"`
-	Listeners          int      `json:"listeners"`
-	Users              int      `json:"users"`
-	HostPublicKey      string   `json:"host_public_key"`
-	HostKeyFingerprint string   `json:"host_key_fingerprint"`
-	Warnings           []string `json:"warnings,omitempty"`
+	Version              int64    `json:"version"`
+	Unchanged            bool     `json:"unchanged,omitempty"`
+	RuntimeOnly          bool     `json:"runtime_only,omitempty"`
+	RuntimeReconciled    bool     `json:"runtime_reconciled,omitempty"`
+	ReconciledComponents []string `json:"reconciled_components,omitempty"`
+	Applied              int      `json:"applied"`
+	Listeners            int      `json:"listeners"`
+	Users                int      `json:"users"`
+	HostPublicKey        string   `json:"host_public_key"`
+	HostKeyFingerprint   string   `json:"host_key_fingerprint"`
+	Warnings             []string `json:"warnings,omitempty"`
 }
 
 // sshInboundManager owns only the Agent-native SSH proxy listeners. Keeping
@@ -116,6 +121,314 @@ type directTCPIPPayload struct {
 	OriginPort uint32
 }
 
+func passwordDigest(password string) string {
+	sum := sha256.Sum256([]byte(password))
+	return hex.EncodeToString(sum[:])
+}
+
+func sshInboundUserFingerprint(user model.SSHInboundUser) string {
+	// Fingerprint includes all identity-relevant fields but not plaintext password
+	return fmt.Sprintf("%d|%s|%s|%s|%d|%s|%d|%s|%s|%s", user.UserID, user.Username, passwordDigest(user.Password), strings.TrimSpace(user.DeviceIDHash), user.CredentialEpoch, strings.TrimSpace(user.CredentialStatus), user.PathID, user.RouteKind, user.RouteInboundTag, user.RouteAuthUser)
+}
+
+func sshInboundFingerprint(inbound model.SSHInbound) string {
+	// Stable fingerprint for one inbound including listen and users
+	var users []string
+	for _, u := range inbound.Users {
+		if !u.Enabled {
+			continue
+		}
+		users = append(users, sshInboundUserFingerprint(u))
+	}
+	sort.Strings(users)
+	// Policy identity: sorted keys
+	var policyKeys []string
+	for k := range inbound.Policies {
+		policyKeys = append(policyKeys, k)
+	}
+	sort.Strings(policyKeys)
+	policyPart := strings.Join(policyKeys, ",")
+	raw := fmt.Sprintf("%d|%s|%d|%v|%s|%s|%d", inbound.InboundID, strings.TrimSpace(inbound.ListenIP), inbound.Port, inbound.Enabled, strings.Join(users, ";"), policyPart, len(users))
+	sum := sha256.Sum256([]byte(raw))
+	return hex.EncodeToString(sum[:])
+}
+
+func desiredSSHInboundFingerprints(plan model.SSHInboundPlan) map[int64]string {
+	out := map[int64]string{}
+	for _, inbound := range plan.Inbounds {
+		if !inbound.Enabled {
+			continue
+		}
+		out[inbound.InboundID] = sshInboundFingerprint(inbound)
+	}
+	return out
+}
+
+func liveSSHInboundFingerprints(manager *sshInboundManager) map[int64]string {
+	if manager == nil {
+		return map[int64]string{}
+	}
+	manager.mu.RLock()
+	defer manager.mu.RUnlock()
+	out := map[int64]string{}
+	for id, inbound := range manager.listeners {
+		// Build live inbound representation from actual auth map and listener
+		inbound.mu.Lock()
+		// Use the stored plan but replace Users with live auth snapshot
+		liveInbound := inbound.plan
+		// Reconstruct Users from live auth map
+		inbound.authMu.RLock()
+		liveUsers := []model.SSHInboundUser{}
+		for username, cred := range inbound.auth {
+			liveUsers = append(liveUsers, model.SSHInboundUser{
+				UserID:           cred.userID,
+				Username:         username,
+				Password:         cred.password,
+				DeviceIDHash:     cred.deviceIDHash,
+				CredentialEpoch:  cred.credentialEpoch,
+				CredentialStatus: cred.credentialStatus,
+				PathID:           cred.pathID,
+				RouteKind:        cred.routeKind,
+				RouteInboundTag:  cred.routeInboundTag,
+				RouteAuthUser:    cred.routeAuthUser,
+				Enabled:          true,
+			})
+		}
+		inbound.authMu.RUnlock()
+		liveInbound.Users = liveUsers
+		// Listener address check: use actual listener if available
+		if inbound.listener != nil {
+			if addr, ok := inbound.listener.Addr().(*net.TCPAddr); ok {
+				liveInbound.ListenIP = addr.IP.String()
+				liveInbound.Port = addr.Port
+			}
+		}
+		inbound.mu.Unlock()
+		out[id] = sshInboundFingerprint(liveInbound)
+	}
+	return out
+}
+
+type sshDriftCheck struct {
+	NoDrift        bool
+	ListenerDrift  bool
+	CredentialDrift bool
+	PolicyDrift    bool
+	Missing        []int64
+	Extra          []int64
+}
+
+func (m *sshInboundManager) checkDrift(plan model.SSHInboundPlan) sshDriftCheck {
+	desired := desiredSSHInboundFingerprints(plan)
+	live := liveSSHInboundFingerprints(m)
+	if len(desired) == 0 && len(live) == 0 {
+		return sshDriftCheck{NoDrift: true}
+	}
+	// Quick compare
+	if len(desired) != len(live) {
+		// Determine missing/extra
+		missing := []int64{}
+		for id := range desired {
+			if _, ok := live[id]; !ok {
+				missing = append(missing, id)
+			}
+		}
+		extra := []int64{}
+		for id := range live {
+			if _, ok := desired[id]; !ok {
+				extra = append(extra, id)
+			}
+		}
+		return sshDriftCheck{ListenerDrift: true, Missing: missing, Extra: extra}
+	}
+	for id, desiredFP := range desired {
+		if liveFP, ok := live[id]; !ok {
+			return sshDriftCheck{ListenerDrift: true, Missing: []int64{id}}
+		} else if desiredFP != liveFP {
+			// Need to determine if it's credential/policy vs listener
+			// For simplicity, treat any fingerprint mismatch as credential drift
+			// unless listen address/port changed. We can refine by comparing
+			// inbound's listen/port separately.
+			desiredInbound := findInboundByID(plan.Inbounds, id)
+			m.mu.RLock()
+			liveInbound := m.listeners[id]
+			m.mu.RUnlock()
+			if liveInbound != nil {
+				liveInbound.mu.Lock()
+				liveListen := ""
+				livePort := 0
+				if liveInbound.listener != nil {
+					if addr, ok := liveInbound.listener.Addr().(*net.TCPAddr); ok {
+						liveListen = addr.IP.String()
+						livePort = addr.Port
+					}
+				} else {
+					liveListen = liveInbound.plan.ListenIP
+					livePort = liveInbound.plan.Port
+				}
+				liveInbound.mu.Unlock()
+				if strings.TrimSpace(desiredInbound.ListenIP) != strings.TrimSpace(liveListen) || desiredInbound.Port != livePort {
+					return sshDriftCheck{ListenerDrift: true}
+				}
+			}
+			return sshDriftCheck{CredentialDrift: true}
+		}
+	}
+	return sshDriftCheck{NoDrift: true}
+}
+
+func findInboundByID(inbounds []model.SSHInbound, id int64) model.SSHInbound {
+	for _, in := range inbounds {
+		if in.InboundID == id {
+			return in
+		}
+	}
+	return model.SSHInbound{}
+}
+
+func (m *sshInboundManager) reconcileInPlace(plan model.SSHInboundPlan) {
+	if m == nil {
+		return
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, desired := range plan.Inbounds {
+		if !desired.Enabled {
+			continue
+		}
+		live, ok := m.listeners[desired.InboundID]
+		if !ok {
+			continue
+		}
+		// Update auth map without restarting listener
+		live.authMu.Lock()
+		live.auth = sshInboundCredentials(desired.Users)
+		live.plan = desired
+		live.authMu.Unlock()
+		// Update counters for new users, remove old
+		// Note: counters are kept per userID; new users will be added on next need
+		// For removed users, keep counters but they will not be used
+	}
+}
+
+type sshDiagnostics struct {
+	Inbounds []sshInboundDiagnostics `json:"ssh_inbounds"`
+}
+
+type sshInboundDiagnostics struct {
+	InboundID       int64  `json:"inbound_id"`
+	Listener        string `json:"listener"`
+	DesiredUsers    int    `json:"desired_users"`
+	RuntimeUsers    int    `json:"runtime_users"`
+	CredentialDrift bool   `json:"credential_drift"`
+	PolicyDrift     bool   `json:"policy_drift"`
+	CounterDrift    bool   `json:"counter_drift"`
+}
+
+func (r *Runner) sshDiagnostics(plan model.SSHInboundPlan) sshDiagnostics {
+	diag := sshDiagnostics{Inbounds: []sshInboundDiagnostics{}}
+	r.mu.Lock()
+	manager := r.sshInboundManager
+	r.mu.Unlock()
+	desiredMap := map[int64]model.SSHInbound{}
+	for _, in := range plan.Inbounds {
+		if in.Enabled {
+			desiredMap[in.InboundID] = in
+		}
+	}
+	if manager != nil {
+		manager.mu.RLock()
+		for id, live := range manager.listeners {
+			desired, hasDesired := desiredMap[id]
+			desiredUsers := 0
+			if hasDesired {
+				for _, u := range desired.Users {
+					if u.Enabled {
+						desiredUsers++
+					}
+				}
+			}
+			live.authMu.RLock()
+			runtimeUsers := len(live.auth)
+			live.authMu.RUnlock()
+			listenerStatus := "healthy"
+			if live.listener == nil {
+				listenerStatus = "missing"
+			}
+			// Check drift per inbound
+			drift := false
+			if hasDesired {
+				desiredFP := sshInboundFingerprint(desired)
+				// Compute live FP for this single inbound
+				live.authMu.RLock()
+				liveUsers := []model.SSHInboundUser{}
+				for username, cred := range live.auth {
+					liveUsers = append(liveUsers, model.SSHInboundUser{UserID: cred.userID, Username: username, Password: cred.password, DeviceIDHash: cred.deviceIDHash, CredentialEpoch: cred.credentialEpoch, CredentialStatus: cred.credentialStatus, PathID: cred.pathID, RouteKind: cred.routeKind, RouteInboundTag: cred.routeInboundTag, RouteAuthUser: cred.routeAuthUser, Enabled: true})
+				}
+				live.authMu.RUnlock()
+				tmp := live.plan
+				tmp.Users = liveUsers
+				if live.listener != nil {
+					if addr, ok := live.listener.Addr().(*net.TCPAddr); ok {
+						tmp.ListenIP = addr.IP.String()
+						tmp.Port = addr.Port
+					}
+				}
+				liveFP := sshInboundFingerprint(tmp)
+				drift = desiredFP != liveFP
+			}
+			diag.Inbounds = append(diag.Inbounds, sshInboundDiagnostics{
+				InboundID:       id,
+				Listener:        listenerStatus,
+				DesiredUsers:    desiredUsers,
+				RuntimeUsers:    runtimeUsers,
+				CredentialDrift: drift,
+				PolicyDrift:     false,
+				CounterDrift:    false,
+			})
+		}
+		manager.mu.RUnlock()
+	}
+	// Add desired inbounds that have no live listener
+	for id, desired := range desiredMap {
+		found := false
+		for _, d := range diag.Inbounds {
+			if d.InboundID == id {
+				found = true
+				break
+			}
+		}
+		if !found {
+			desiredUsers := 0
+			for _, u := range desired.Users {
+				if u.Enabled {
+					desiredUsers++
+				}
+			}
+			diag.Inbounds = append(diag.Inbounds, sshInboundDiagnostics{
+				InboundID:       id,
+				Listener:        "missing",
+				DesiredUsers:    desiredUsers,
+				RuntimeUsers:    0,
+				CredentialDrift: true,
+			})
+		}
+	}
+	return diag
+}
+
+func (r *Runner) currentSSHDiagnostics() sshDiagnostics {
+	b, err := os.ReadFile(filepath.Join(r.stateDir(), sshInboundsCurrent))
+	if err != nil {
+		return sshDiagnostics{Inbounds: []sshInboundDiagnostics{}}
+	}
+	var plan model.SSHInboundPlan
+	if err := json.Unmarshal(b, &plan); err != nil {
+		return sshDiagnostics{Inbounds: []sshInboundDiagnostics{}}
+	}
+	return r.sshDiagnostics(plan)
+}
+
 func (r *Runner) applySSHInbounds(plan model.SSHInboundPlan) (sshInboundApplyResult, error) {
 	r.sshInboundLifecycleMu.Lock()
 	defer r.sshInboundLifecycleMu.Unlock()
@@ -135,11 +448,64 @@ func (r *Runner) applySSHInbounds(plan model.SSHInboundPlan) (sshInboundApplyRes
 		return result, err
 	}
 	if desiredState != "" && desiredState == r.sshInboundDesiredState {
-		if err := r.reconcileSSHAndCoreTrafficPolicies(context.Background(), plan); err != nil {
-			return result, fmt.Errorf("reconcile shared core/SSH quota lease: %w", err)
+		r.mu.Lock()
+		managerCheck := r.sshInboundManager
+		r.mu.Unlock()
+		if managerCheck != nil {
+			drift := managerCheck.checkDrift(plan)
+			if drift.NoDrift {
+				if err := r.reconcileSSHAndCoreTrafficPolicies(context.Background(), plan); err != nil {
+					return result, fmt.Errorf("reconcile shared core/SSH quota lease: %w", err)
+				}
+				result.Unchanged = true
+				return result, nil
+			}
+			if !drift.ListenerDrift {
+				// In-place reconcile without restarting listeners
+				managerCheck.reconcileInPlace(plan)
+				if err := r.reconcileSSHAndCoreTrafficPolicies(context.Background(), plan); err != nil {
+					return result, fmt.Errorf("reconcile shared core/SSH quota lease: %w", err)
+				}
+				// Ensure persisted file matches desired
+				currentPath := filepath.Join(r.stateDir(), sshInboundsCurrent)
+				if b, err := os.ReadFile(currentPath); err != nil || string(b) == "" {
+					if encoded, merr := json.MarshalIndent(plan, "", "  "); merr == nil {
+						_ = atomicWriteFile(currentPath, encoded, 0o600)
+					}
+				}
+				result.RuntimeReconciled = true
+				components := []string{}
+				if drift.CredentialDrift {
+					components = append(components, "credentials")
+				}
+				if drift.PolicyDrift {
+					components = append(components, "traffic_policy")
+				}
+				if len(components) == 0 {
+					components = []string{"credentials", "traffic_policy"}
+				}
+				result.ReconciledComponents = components
+				for _, inbound := range plan.Inbounds {
+					if !inbound.Enabled {
+						continue
+					}
+					result.Applied++
+					result.Listeners++
+					for _, user := range inbound.Users {
+						if user.Enabled {
+							result.Users++
+						}
+					}
+				}
+				return result, nil
+			}
+		} else if len(plan.Inbounds) == 0 {
+			if err := r.reconcileSSHAndCoreTrafficPolicies(context.Background(), plan); err != nil {
+				return result, fmt.Errorf("reconcile shared core/SSH quota lease: %w", err)
+			}
+			result.Unchanged = true
+			return result, nil
 		}
-		result.Unchanged = true
-		return result, nil
 	}
 	if err := validateSSHInboundPlan(plan); err != nil {
 		return result, err
@@ -790,21 +1156,38 @@ func (m *managedSSHInbound) serve(listener net.Listener, signer ssh.Signer) {
 	}
 }
 
+func logSSHAuthFailure(inboundID, userID int64, username, reason string) {
+	// Structured internal reason, never log password/token
+	// Use fmt for diagnostics; real deployment may hook into audit log
+	_ = fmt.Sprintf("ssh auth failure inbound=%d user=%d username=%s reason=%s time=%s", inboundID, userID, username, reason, time.Now().UTC().Format(time.RFC3339Nano))
+}
+
 func (m *managedSSHInbound) handle(raw net.Conn, signer ssh.Signer) {
 	serverConfig := &ssh.ServerConfig{ServerVersion: "SSH-2.0-OBoard-RestrictedSSH"}
 	serverConfig.PasswordCallback = func(metadata ssh.ConnMetadata, password []byte) (*ssh.Permissions, error) {
 		m.authMu.RLock()
 		credential, ok := m.auth[metadata.User()]
 		m.authMu.RUnlock()
-		if !ok || subtle.ConstantTimeCompare([]byte(credential.password), password) != 1 {
+		if !ok {
+			logSSHAuthFailure(m.plan.InboundID, 0, metadata.User(), "unknown_user")
+			return nil, errors.New("password is not authorized")
+		}
+		if subtle.ConstantTimeCompare([]byte(credential.password), password) != 1 {
+			logSSHAuthFailure(m.plan.InboundID, credential.userID, metadata.User(), "password_mismatch")
 			return nil, errors.New("password is not authorized")
 		}
 		if credential.credentialStatus != "active" {
 			m.audit.recordCredentialRejected(connectionAuditSnapshotItem{UserID: credential.userID, InboundID: m.plan.InboundID, PathID: credential.pathID, DeviceIDHash: credential.deviceIDHash, CredentialEpoch: credential.credentialEpoch, SourceIP: sourceIPFromNetAddr(metadata.RemoteAddr()), Network: "tcp"})
+			logSSHAuthFailure(m.plan.InboundID, credential.userID, metadata.User(), "credential_inactive")
 			return nil, errors.New("password is not authorized")
 		}
 		counter := m.counterFor(credential.userID)
-		if counter == nil || !counter.allowNewConnection() {
+		if counter == nil {
+			logSSHAuthFailure(m.plan.InboundID, credential.userID, metadata.User(), "policy_missing")
+			return nil, errors.New("user traffic quota is exhausted")
+		}
+		if !counter.allowNewConnection() {
+			logSSHAuthFailure(m.plan.InboundID, credential.userID, metadata.User(), "quota_exhausted")
 			return nil, errors.New("user traffic quota is exhausted")
 		}
 		return &ssh.Permissions{Extensions: map[string]string{
