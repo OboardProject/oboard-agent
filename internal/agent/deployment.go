@@ -29,16 +29,22 @@ func (r *Runner) executeDeploymentTask(payload model.DeploymentTaskPayload) (str
 	if err != nil {
 		return "failed", jsonResult("encode deployment version state: " + err.Error())
 	}
-	replay, err := r.checkAppliedVersion(model.AgentTaskTypeApplyDeployment, payload.Version, payloadBytes)
+	verdict, applied, err := r.checkAppliedVersion(model.AgentTaskTypeApplyDeployment, payload.Version, payloadBytes)
 	if err != nil {
 		return "failed", jsonMap(map[string]any{"message": "deployment rejected", "version": payload.Version, "error": err.Error()})
+	}
+	// A newer configuration already runs here, so this payload describes a past
+	// intent. Skipping is the correct outcome and must be reported as success:
+	// the Controller reconciles from the applied version reported back.
+	if verdict == appliedVersionSuperseded {
+		return "succeeded", jsonMap(supersededVersionResult(model.AgentTaskTypeApplyDeployment, payload.Version, applied))
 	}
 	ctx := context.Background()
 	// The replay response reports every step as already applied from local
 	// version state alone. That is only truthful while the running kernel still
 	// serves the recorded configuration, so a drifted kernel gets the full
 	// deployment instead, which restarts it.
-	if replay && r.coreRuntimeConverged(ctx) {
+	if verdict == appliedVersionReplay && r.coreRuntimeConverged(ctx) {
 		return r.deploymentReplayResponse(payload)
 	}
 	steps := make([]deploymentStepResult, 0, 12+len(payload.WARPRequests))

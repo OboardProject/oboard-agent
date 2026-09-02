@@ -1061,7 +1061,7 @@ func TestEmbeddedCoreTrafficPoliciesUseUserIdentity(t *testing.T) {
 	}
 }
 
-func TestApplyCoreConfigRejectsRollbackAndPersistsVersion(t *testing.T) {
+func TestApplyCoreConfigSkipsRollbackAndPersistsVersion(t *testing.T) {
 	dir := t.TempDir()
 	cfg := Config{StateDir: dir, CoreBinary: filepath.Join(dir, "missing-sb"), ReloadCommand: "none", RestartCommand: "none", ResourceProfile: "large"}
 	r := New(cfg)
@@ -1069,9 +1069,8 @@ func TestApplyCoreConfigRejectsRollbackAndPersistsVersion(t *testing.T) {
 	if _, err := r.applyCoreConfigTask(20, model.ApplyCoreConfigTaskPayload{Config: newConfig}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := r.applyCoreConfigTask(19, model.ApplyCoreConfigTaskPayload{Config: `{"log":{"level":"debug"}}`}); err == nil || !strings.Contains(err.Error(), "older") {
-		t.Fatalf("older config was not rejected: %v", err)
-	}
+	stale, err := r.applyCoreConfigTask(19, model.ApplyCoreConfigTaskPayload{Config: `{"log":{"level":"debug"}}`})
+	requireSuperseded(t, stale, err, 20)
 	current, err := os.ReadFile(filepath.Join(dir, "sing-box.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -1081,9 +1080,10 @@ func TestApplyCoreConfigRejectsRollbackAndPersistsVersion(t *testing.T) {
 	}
 
 	restarted := New(cfg)
-	if _, err := restarted.applyCoreConfigTask(19, model.ApplyCoreConfigTaskPayload{Config: `{"log":{"level":"error"}}`}); err == nil || !strings.Contains(err.Error(), "older") {
-		t.Fatalf("version rollback after restart was not rejected: %v", err)
-	}
+	// The watermark survives a restart, so the rollback is still skipped rather
+	// than applied — the guard lives on disk, not in process memory.
+	afterRestart, err := restarted.applyCoreConfigTask(19, model.ApplyCoreConfigTaskPayload{Config: `{"log":{"level":"error"}}`})
+	requireSuperseded(t, afterRestart, err, 20)
 	result, err := restarted.applyCoreConfigTask(20, model.ApplyCoreConfigTaskPayload{Config: newConfig})
 	if err != nil || result["idempotent_replay"] != true {
 		t.Fatalf("same-version replay was not idempotent: result=%#v err=%v", result, err)
@@ -1109,9 +1109,8 @@ func TestFamilySelectorCoreConfigUsesPersistentVersionGate(t *testing.T) {
 	if _, err := restarted.applyCoreConfigTask(30, model.ApplyCoreConfigTaskPayload{Config: strings.Replace(familyConfig, "prefer_ipv4", "prefer_ipv6", 1)}); err == nil || !strings.Contains(err.Error(), "different content") {
 		t.Fatalf("family-selector same-version replacement was accepted: %v", err)
 	}
-	if _, err := restarted.applyCoreConfigTask(29, model.ApplyCoreConfigTaskPayload{Config: familyConfig}); err == nil || !strings.Contains(err.Error(), "older") {
-		t.Fatalf("family-selector rollback was accepted: %v", err)
-	}
+	rollback, err := restarted.applyCoreConfigTask(29, model.ApplyCoreConfigTaskPayload{Config: familyConfig})
+	requireSuperseded(t, rollback, err, 30)
 }
 
 func TestDeploymentVersionGateCoversUnchangedConfigPlans(t *testing.T) {
@@ -1123,13 +1122,11 @@ func TestDeploymentVersionGateCoversUnchangedConfigPlans(t *testing.T) {
 	if status, result := r.executeDeploymentTask(payload(30)); status != "succeeded" {
 		t.Fatalf("new deployment failed: %s", result)
 	}
-	if status, result := r.executeDeploymentTask(payload(29)); status != "failed" || !strings.Contains(result, "older") {
-		t.Fatalf("older deployment was not rejected: status=%s result=%s", status, result)
-	}
+	status, result := r.executeDeploymentTask(payload(29))
+	requireSupersededTaskResult(t, status, result, 30)
 	restarted := New(Config{StateDir: dir, ReloadCommand: "none", RestartCommand: "none", ResourceProfile: "large"})
-	if status, result := restarted.executeDeploymentTask(payload(29)); status != "failed" || !strings.Contains(result, "older") {
-		t.Fatalf("persisted deployment gate failed: status=%s result=%s", status, result)
-	}
+	status, result = restarted.executeDeploymentTask(payload(29))
+	requireSupersededTaskResult(t, status, result, 30)
 }
 
 func TestTaskServerIdentityMustMatchEnrollment(t *testing.T) {

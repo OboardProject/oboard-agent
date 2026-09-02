@@ -146,9 +146,10 @@ func TestApplyCoreConfigTaskSynchronizesAssetsAfterVersionGate(t *testing.T) {
 	}
 	stale := payload
 	stale.Assets = []model.ManagedAssetReference{{Kind: "certificate", ID: 7, Revision: managedCertificateRevision(fullchain, []byte("private-key-2"))}}
-	if _, err := runner.applyCoreConfigTask(41, stale); err == nil || !strings.Contains(err.Error(), "older") {
-		t.Fatalf("stale task was not rejected before asset sync: %v", err)
-	}
+	staleResult, err := runner.applyCoreConfigTask(41, stale)
+	requireSuperseded(t, staleResult, err, 42)
+	// The decisive property: a skipped task touches nothing. Syncing or pruning
+	// against its stale asset list would delete files the current config needs.
 	if requests.Load() != 1 {
 		t.Fatalf("stale task requested assets: requests=%d", requests.Load())
 	}

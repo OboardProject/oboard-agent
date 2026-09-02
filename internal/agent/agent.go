@@ -1955,14 +1955,21 @@ func (r *Runner) applyCoreConfigTask(version int64, payload model.ApplyCoreConfi
 	if err != nil {
 		return map[string]any{"message": "config payload rejected", "version": version}, err
 	}
-	replay, err := r.checkAppliedVersion(model.AgentTaskTypeApplyCoreConfig, version, payloadBytes)
+	verdict, applied, err := r.checkAppliedVersion(model.AgentTaskTypeApplyCoreConfig, version, payloadBytes)
 	if err != nil {
 		return map[string]any{"message": "config apply rejected", "version": version}, err
+	}
+	// A newer configuration already runs here, so this task describes a past
+	// intent and is skipped as a success. Managed assets are deliberately left
+	// alone: pruning against a stale asset list would delete files the newer
+	// configuration still references.
+	if verdict == appliedVersionSuperseded {
+		return supersededVersionResult(model.AgentTaskTypeApplyCoreConfig, version, applied), nil
 	}
 	// A replay may only be answered from local bookkeeping when the running
 	// kernel actually serves what was recorded. Otherwise fall through to the
 	// full apply, which re-verifies the runtime and restarts a drifted kernel.
-	if replay && r.coreRuntimeConverged(context.Background()) {
+	if verdict == appliedVersionReplay && r.coreRuntimeConverged(context.Background()) {
 		if err := r.cleanupManagedAssets(payload.Assets); err != nil {
 			return map[string]any{"message": "managed asset cleanup failed", "version": version, "idempotent_replay": true, "reload_strategy": "unchanged"}, err
 		}
