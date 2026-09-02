@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -18,6 +19,8 @@ const (
 	coreWatchdogStateRunning            = "running"
 	coreWatchdogStateRuntimeDrift       = "runtime_drift"
 	coreWatchdogStateRuntimeUnreachable = "runtime_unreachable"
+	coreWatchdogStateBinaryDrift        = "binary_drift"
+	coreWatchdogStateBinaryStale        = "binary_stale"
 	coreWatchdogStateRecovering         = "recovering"
 	coreWatchdogStateWaitingForConfig   = "waiting_for_config"
 	coreWatchdogStateBackoff            = "backoff"
@@ -41,6 +44,19 @@ type coreWatchdogStatus struct {
 	RuntimeVerification string    `json:"runtime_verification,omitempty"`
 	LastRuntimeCheckAt  time.Time `json:"last_runtime_check_at,omitempty"`
 	LastRestartReason   string    `json:"last_restart_reason,omitempty"`
+	BuildState          string    `json:"build_state,omitempty"`
+	RunningBuild        string    `json:"running_build,omitempty"`
+	InstalledBuild      string    `json:"installed_build,omitempty"`
+	// BinaryRecoveryBuild latches the installed build a restart was already
+	// attempted for, so a kernel that refuses to come up on it is reported
+	// once instead of restarted on every backoff window.
+	BinaryRecoveryBuild string `json:"binary_recovery_build,omitempty"`
+}
+
+func (s *coreWatchdogStatus) applyBuildIdentity(check coreRuntimeCheck) {
+	s.BuildState = check.buildState()
+	s.RunningBuild = check.RunningBuild.String()
+	s.InstalledBuild = check.InstalledBuild.String()
 }
 
 func coreWatchdogBackoff(consecutive int) time.Duration {
@@ -92,6 +108,9 @@ func (r *Runner) runCoreWatchdogCheck(ctx context.Context, status *coreWatchdogS
 		status.LoadedDigest = ""
 		status.RuntimeVerified = false
 		status.RuntimeVerification = ""
+		status.BuildState = ""
+		status.RunningBuild = ""
+		status.InstalledBuild = ""
 		r.writeCoreWatchdogStatus(*status)
 		return
 	}
@@ -106,6 +125,7 @@ func (r *Runner) runCoreWatchdogCheck(ctx context.Context, status *coreWatchdogS
 		status.LoadedDigest = check.LoadedDigest
 		status.RuntimeVerified = check.verified()
 		status.RuntimeVerification = check.Verification
+		status.applyBuildIdentity(check)
 		if check.drift() {
 			r.recoverCoreRuntimeDrift(ctx, status, desired, now)
 			return
@@ -120,6 +140,15 @@ func (r *Runner) runCoreWatchdogCheck(ctx context.Context, status *coreWatchdogS
 			}
 			r.writeCoreWatchdogStatus(*status)
 			return
+		}
+		if check.binaryDrift() {
+			r.recoverCoreBinaryDrift(ctx, status, desired, now, check)
+			return
+		}
+		if check.BuildState == coreBuildStateCurrent {
+			// The installed build is serving traffic, so a future replacement
+			// gets a fresh recovery attempt.
+			status.BinaryRecoveryBuild = ""
 		}
 		status.State = coreWatchdogStateRunning
 		status.LastError = ""
@@ -178,6 +207,47 @@ func (r *Runner) recoverCoreRuntimeDrift(ctx context.Context, status *coreWatchd
 	r.restartCoreFromWatchdog(ctx, status, desired, now, "runtime_drift")
 }
 
+// recoverCoreBinaryDrift restarts a kernel whose process is older than the
+// executable installed on disk. Installing a release replaces the file by
+// rename and leaves every running process on its original inode, so without
+// this the node keeps serving the pre-upgrade build indefinitely while both the
+// configuration digest and the reported version look correct.
+//
+// Recovery is attempted once per installed build. A restart that does not clear
+// the drift means the process is pinned by something outside Agent — a unit
+// file pointing at another path, or a manually started kernel — and repeating
+// it every backoff window would drop sessions forever without converging.
+func (r *Runner) recoverCoreBinaryDrift(ctx context.Context, status *coreWatchdogStatus, desired []byte, now time.Time, check coreRuntimeCheck) {
+	installed := check.InstalledBuild.String()
+	if status.BinaryRecoveryBuild != "" && status.BinaryRecoveryBuild == installed {
+		status.State = coreWatchdogStateBinaryStale
+		status.LastError = fmt.Sprintf("core still runs %s; installed build %s is not being picked up by %s", check.RunningBuild.String(), installed, status.Service)
+		r.writeCoreWatchdogStatus(*status)
+		return
+	}
+	if !status.NextAttemptAt.IsZero() && now.Before(status.NextAttemptAt) {
+		status.State = coreWatchdogStateBackoff
+		r.writeCoreWatchdogStatus(*status)
+		return
+	}
+	status.State = coreWatchdogStateBinaryDrift
+	status.StableSince = time.Time{}
+	status.Consecutive++
+	if err := validateSingBox(r.coreBinary(), status.ConfigPath, r.commandTimeout()); err != nil {
+		// The installed kernel cannot run what is deployed. Restarting would
+		// turn a stale-but-serving node into an outage.
+		status.State = "invalid_config"
+		status.LastError = err.Error()
+		status.NextAttemptAt = now.Add(2 * time.Minute)
+		log.Printf("core watchdog: refusing to restart %s onto the installed build with invalid config: %v", status.Service, err)
+		r.writeCoreWatchdogStatus(*status)
+		return
+	}
+	status.BinaryRecoveryBuild = installed
+	log.Printf("core watchdog: %s runs %s but %s is installed; restarting", status.Service, check.RunningBuild.String(), installed)
+	r.restartCoreFromWatchdog(ctx, status, desired, now, "binary_drift")
+}
+
 func (r *Runner) restartCoreFromWatchdog(ctx context.Context, status *coreWatchdogStatus, desired []byte, now time.Time, reason string) {
 	status.State = coreWatchdogStateRecovering
 	status.RecoveryAction = "managed_restart"
@@ -202,17 +272,26 @@ func (r *Runner) restartCoreFromWatchdog(ctx context.Context, status *coreWatchd
 		r.writeCoreWatchdogStatus(*status)
 		return
 	}
-	check := r.awaitCoreRuntimeConfig(ctx, desired, r.coreRuntimeVerifyWindow())
+	check := r.awaitCoreRuntimeActivation(ctx, desired, r.coreRuntimeVerifyWindow())
 	status.LastRuntimeCheckAt = time.Now().UTC()
 	status.DesiredDigest = check.DesiredDigest
 	status.LoadedDigest = check.LoadedDigest
 	status.RuntimeVerified = check.verified()
 	status.RuntimeVerification = check.Verification
+	status.applyBuildIdentity(check)
 	if check.drift() {
 		status.State = coreWatchdogStateRuntimeDrift
 		status.LastError = "core still runs an older configuration after restart"
 		status.NextAttemptAt = now.Add(coreWatchdogBackoff(status.Consecutive + 1))
 		log.Printf("core watchdog: %s still runs %s after restart, expected %s", status.Service, check.LoadedDigest, check.DesiredDigest)
+		r.writeCoreWatchdogStatus(*status)
+		return
+	}
+	if check.binaryDrift() {
+		status.State = coreWatchdogStateBinaryStale
+		status.LastError = "core still runs the previous build after restart"
+		status.NextAttemptAt = now.Add(coreWatchdogBackoff(status.Consecutive + 1))
+		log.Printf("core watchdog: %s still runs %s after restart, expected %s", status.Service, check.RunningBuild.String(), check.InstalledBuild.String())
 		r.writeCoreWatchdogStatus(*status)
 		return
 	}

@@ -34,6 +34,12 @@ type fakeCoreKernel struct {
 	runtimeSupported bool
 	policyPushes     int
 	client           *http.Client
+	// loadedBuild is the executable this process was started from. It only
+	// changes on boot, the same way a replaced binary only takes effect on the
+	// next restart. An empty value stands for a kernel that predates
+	// coreRuntimeBuildIdentityCapability.
+	loadedBuild  string
+	installBuild string
 }
 
 func newFakeCoreKernel(t *testing.T, configPath string, runtimeSupported bool) *fakeCoreKernel {
@@ -69,12 +75,17 @@ func newFakeCoreKernel(t *testing.T, configPath string, runtimeSupported bool) *
 		}
 		kernel.mu.Lock()
 		defer kernel.mu.Unlock()
-		_ = json.NewEncoder(w).Encode(map[string]any{
+		payload := map[string]any{
 			"operational_config_sha256": kernel.loadedDigest,
 			"started_at":                "2026-09-02T00:00:00Z",
 			"pid":                       4242,
 			"generation":                kernel.generation,
-		})
+		}
+		if kernel.loadedBuild != "" {
+			payload["version"] = "0.0.1"
+			payload["build"] = kernel.loadedBuild
+		}
+		_ = json.NewEncoder(w).Encode(payload)
 	})
 	mux.HandleFunc("/traffic/snapshot", func(w http.ResponseWriter, _ *http.Request) {
 		kernel.bootIfArmed()
@@ -110,7 +121,8 @@ func (k *fakeCoreKernel) bootIfArmed() {
 	}
 }
 
-// boot reloads the configuration from disk, the way a restarted kernel does.
+// boot reloads the configuration from disk and adopts the installed build, the
+// way a restarted kernel does.
 func (k *fakeCoreKernel) boot() {
 	raw, err := os.ReadFile(k.configPath)
 	if err != nil {
@@ -123,8 +135,28 @@ func (k *fakeCoreKernel) boot() {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	k.loadedDigest = digest
+	if k.installBuild != "" {
+		k.loadedBuild = k.installBuild
+	}
 	k.generation++
 	k.boots++
+}
+
+// reportBuild makes the kernel identify itself the way a build that supports
+// coreRuntimeBuildIdentityCapability does.
+func (k *fakeCoreKernel) reportBuild(running string) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.loadedBuild = running
+	k.installBuild = running
+}
+
+// stageBuild is the state an upgrade leaves behind: a new executable on disk
+// that the still-running process has not been restarted onto.
+func (k *fakeCoreKernel) stageBuild(installed string) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.installBuild = installed
 }
 
 func (k *fakeCoreKernel) digest() string {
@@ -153,9 +185,35 @@ const (
 
 func newRuntimeTestRunner(t *testing.T, dir string, kernel *fakeCoreKernel) *Runner {
 	t.Helper()
-	r := New(Config{StateDir: dir, CoreBinary: filepath.Join(dir, "missing-sb"), ReloadCommand: "none", RestartCommand: "none", ResourceProfile: "large"})
+	return newRuntimeTestRunnerWithCore(t, dir, kernel, filepath.Join(dir, "missing-sb"))
+}
+
+func newRuntimeTestRunnerWithCore(t *testing.T, dir string, kernel *fakeCoreKernel, coreBinary string) *Runner {
+	t.Helper()
+	r := New(Config{StateDir: dir, CoreBinary: coreBinary, ReloadCommand: "none", RestartCommand: "none", ResourceProfile: "large"})
 	r.coreClient = kernel.client
 	return r
+}
+
+// writeFakeCoreBinary installs an executable that answers -version the way
+// oboard-sb does. Rewriting it stands for a release replacing the file, which
+// never touches a process that is already running.
+func writeFakeCoreBinary(t *testing.T, dir, build string) string {
+	t.Helper()
+	path := filepath.Join(dir, "oboard-sb")
+	script := "#!/bin/sh\ncat <<'OBOARDEOF'\n" +
+		`{"name":"oboard-sb","version":"0.0.1","build":"` + build + `","commit":""}` +
+		"\nOBOARDEOF\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil { // #nosec G306 -- test fixture must be executable
+		t.Fatal(err)
+	}
+	// A replaced binary always looks newer; make that explicit so the identity
+	// cache cannot serve a stale fingerprint within the same clock second.
+	stamp := time.Now().Add(time.Duration(len(build)) * time.Second)
+	if err := os.Chtimes(path, stamp, stamp); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
 
 // writeCoreConfig persists a configuration in the canonical form Agent itself

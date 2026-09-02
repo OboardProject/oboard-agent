@@ -113,6 +113,8 @@ type Runner struct {
 	monitoringMode             string
 	coreBinaryCache            string
 	coreServiceCache           string
+	coreBinaryIdentityMu       sync.Mutex
+	coreBinaryIdentity         coreBinaryIdentityCache
 	builtinForwardStops        map[int64]func()
 	forwardProbeRules          []model.PortForward
 	lastForwardProbe           map[int64]time.Time
@@ -831,7 +833,7 @@ func (r *Runner) connect(ctx context.Context) error {
 					cancelConnection()
 					return
 				}
-				if item.task.Type == "update_agent" && status == "succeeded" {
+				if item.task.Type == "update_agent" && agentUpdateInstalled(status, result) {
 					if err := r.scheduleAgentRestart(); err != nil {
 						log.Printf("schedule agent restart after update: %v", err)
 						cancelConnection()
@@ -1258,16 +1260,50 @@ func (r *Runner) updateAgentBinary(payloadJSON string) (map[string]any, error) {
 		"github_repo":    repo,
 		"before_agent":   beforeAgent,
 		"before_core":    beforeCore,
+		"installed":      false,
 		"restart":        "after_result_acknowledged",
 	}
 	if err != nil {
 		result["message"] = "agent update failed"
 		return result, err
 	}
+	result["installed"] = true
 	result["release_version"] = manifest.Version
 	result["release_build"] = manifest.Build
 	result["release_commit"] = manifest.Commit
+
+	// Installing the release only replaced files. The Agent restarts itself
+	// once the Controller has acknowledged this result, but nothing else would
+	// ever restart the kernel: without this step the old oboard-sb process
+	// keeps serving traffic on its original inode indefinitely.
+	afterCore := strings.TrimSpace(commandText(3*time.Second, r.coreBinary(), "-version"))
+	result["after_core"] = afterCore
+	activation, activationErr := r.activateInstalledCore(context.Background(), afterCore != beforeCore)
+	for key, value := range activation {
+		result[key] = value
+	}
+	if activationErr != nil {
+		result["message"] = "agent update installed but the new kernel was not activated"
+		return result, activationErr
+	}
 	return result, nil
+}
+
+// agentUpdateInstalled reports whether an update task replaced the binaries on
+// disk. Activating the new kernel can fail after a successful install, and this
+// Agent still has to restart onto its own new executable in that case, so the
+// task status alone is not the right gate.
+func agentUpdateInstalled(status, result string) bool {
+	if status == "succeeded" {
+		return true
+	}
+	var payload struct {
+		Installed bool `json:"installed"`
+	}
+	if json.Unmarshal([]byte(result), &payload) != nil {
+		return false
+	}
+	return payload.Installed
 }
 
 // scheduleAgentRestart arms a one-shot restart of this Agent. The transient
@@ -1923,7 +1959,10 @@ func (r *Runner) applyCoreConfigTask(version int64, payload model.ApplyCoreConfi
 	if err != nil {
 		return map[string]any{"message": "config apply rejected", "version": version}, err
 	}
-	if replay {
+	// A replay may only be answered from local bookkeeping when the running
+	// kernel actually serves what was recorded. Otherwise fall through to the
+	// full apply, which re-verifies the runtime and restarts a drifted kernel.
+	if replay && r.coreRuntimeConverged(context.Background()) {
 		if err := r.cleanupManagedAssets(payload.Assets); err != nil {
 			return map[string]any{"message": "managed asset cleanup failed", "version": version, "idempotent_replay": true, "reload_strategy": "unchanged"}, err
 		}
@@ -2630,7 +2669,7 @@ func (r *Runner) Probe(force bool) model.HealthReport {
 	kernelCapabilities := lastKernelCapabilities
 	refreshCore := force || lastCoreVersion == "" || lastCoreVersionAt.IsZero() || now.Sub(lastCoreVersionAt) >= publicInterval
 	if refreshCore {
-		coreVersion, kernelCapabilities = singBoxIdentity(r.coreBinary(), r.commandTimeout())
+		coreVersion, kernelCapabilities = r.coreIdentity()
 		r.mu.Lock()
 		r.lastCoreVersion = coreVersion
 		r.lastKernelCapabilities = append([]string(nil), kernelCapabilities...)

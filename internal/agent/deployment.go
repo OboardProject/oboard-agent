@@ -33,10 +33,14 @@ func (r *Runner) executeDeploymentTask(payload model.DeploymentTaskPayload) (str
 	if err != nil {
 		return "failed", jsonMap(map[string]any{"message": "deployment rejected", "version": payload.Version, "error": err.Error()})
 	}
-	if replay {
+	ctx := context.Background()
+	// The replay response reports every step as already applied from local
+	// version state alone. That is only truthful while the running kernel still
+	// serves the recorded configuration, so a drifted kernel gets the full
+	// deployment instead, which restarts it.
+	if replay && r.coreRuntimeConverged(ctx) {
 		return r.deploymentReplayResponse(payload)
 	}
-	ctx := context.Background()
 	steps := make([]deploymentStepResult, 0, 12+len(payload.WARPRequests))
 	criticalFailures := 0
 	warnings := 0

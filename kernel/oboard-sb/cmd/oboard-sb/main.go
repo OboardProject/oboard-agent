@@ -21,7 +21,7 @@ import (
 	C "github.com/sagernet/sing-box/constant"
 )
 
-var kernelCapabilities = []string{"trusted_forward_v1", "outbound_egress_probe_v1", "outbound_relay_v1", "route_relay_v1", "runtime_clock_v1", "connection_presence_v1", "family_selector_v1", "traffic_ledger", "runtime_config_digest_v1"}
+var kernelCapabilities = []string{"trusted_forward_v1", "outbound_egress_probe_v1", "outbound_relay_v1", "route_relay_v1", "runtime_clock_v1", "connection_presence_v1", "family_selector_v1", "traffic_ledger", "runtime_config_digest_v1", "runtime_build_identity_v1"}
 
 // runtimeConfigState is the payload-free identity of the configuration this
 // process actually loaded. Agent compares it with the desired configuration so
@@ -248,8 +248,14 @@ func serveHealth(ctx context.Context, listen string, instance *box.Box, tracker 
 }
 
 // registerRuntimeStatusHandler exposes the identity of the configuration this
-// process loaded. It returns a digest only; configuration content, credentials,
-// and file paths never leave the kernel.
+// process loaded and of the executable it was started from. It returns digests
+// and build identifiers only; configuration content, credentials, and file
+// paths never leave the kernel.
+//
+// The build identity is what makes an upgrade verifiable. Replacing the binary
+// on disk does not touch the running process, so Agent has to be able to ask
+// which build is actually serving traffic instead of inferring it from the file
+// it just installed.
 func registerRuntimeStatusHandler(mux *http.ServeMux, runtimeConfig runtimeConfigState) {
 	mux.HandleFunc("/runtime/status", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -262,6 +268,9 @@ func registerRuntimeStatusHandler(mux *http.ServeMux, runtimeConfig runtimeConfi
 			"started_at":                runtimeConfig.StartedAt.Format(time.RFC3339Nano),
 			"pid":                       os.Getpid(),
 			"generation":                runtimeConfig.Generation,
+			"version":                   version.Version,
+			"build":                     version.Build,
+			"commit":                    version.Commit,
 		})
 	})
 }
