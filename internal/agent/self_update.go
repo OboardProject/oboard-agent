@@ -48,15 +48,31 @@ type signedReleaseTargets struct {
 	Core  string
 }
 
-func (r *Runner) signedReleaseTargets() (signedReleaseTargets, error) {
-	agentPath, err := os.Executable()
+// deletedExecutableSuffix is what Linux appends to /proc/self/exe once the
+// running executable has been unlinked. An Agent that installed an update but
+// has not restarted onto it yet reads its own path in this form, and rejecting
+// that path would leave the stale process unable to install the update again.
+const deletedExecutableSuffix = " (deleted)"
+
+// osExecutable is a seam for tests. Production always resolves /proc/self/exe.
+var osExecutable = os.Executable
+
+func selfExecutablePath() (string, error) {
+	path, err := osExecutable()
 	if err != nil {
-		return signedReleaseTargets{}, err
+		return "", err
 	}
-	if resolved, err := filepath.EvalSymlinks(agentPath); err == nil {
-		agentPath = resolved
+	if _, statErr := os.Lstat(path); statErr != nil && strings.HasSuffix(path, deletedExecutableSuffix) {
+		path = strings.TrimSuffix(path, deletedExecutableSuffix)
 	}
-	agentPath, err = filepath.Abs(agentPath)
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		path = resolved
+	}
+	return filepath.Abs(path)
+}
+
+func (r *Runner) signedReleaseTargets() (signedReleaseTargets, error) {
+	agentPath, err := selfExecutablePath()
 	if err != nil {
 		return signedReleaseTargets{}, err
 	}

@@ -139,6 +139,7 @@ type Runner struct {
 	controlMu                  sync.Mutex
 	controlSend                func(payload any, wait bool) error
 	agentRestartScheduled      atomic.Bool
+	agentRestartCommand        func() error
 	controllerLinkMu           sync.Mutex
 	controllerLink             controllerLinkDiagnostics
 }
@@ -576,6 +577,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	r.logStartupSummary(cfg)
 	r.applyLowMemorySocketTuning()
 	r.reconcileUpdateArtifacts()
+	r.reconcileInstalledAgentBuild()
 	if err := r.restoreManagedPortForwardsOnStartup(); err != nil {
 		log.Printf("restore managed port forwards: %v", err)
 	}
@@ -822,6 +824,18 @@ func (r *Runner) connect(ctx context.Context) error {
 					return
 				}
 				status, result := r.ExecuteAgentTask(item.task)
+				if item.task.Type == "update_agent" && agentUpdateInstalled(status, result) {
+					// The executable has already been replaced. Reporting the
+					// result first keeps the Controller informed, but the link
+					// is at its most fragile right after an update, and losing
+					// it below must not leave this process running from the
+					// unlinked inode with no restart armed.
+					defer func() {
+						if err := r.scheduleAgentRestart(); err != nil {
+							log.Printf("restart agent onto the installed build: %v", err)
+						}
+					}()
+				}
 				health := r.Probe(false)
 				if err := r.ReportTaskResult(ctx, item.task.ID, status, result, &health); err != nil {
 					log.Printf("report task %d result: %v", item.task.ID, err)
@@ -1312,6 +1326,9 @@ func agentUpdateInstalled(status, result string) bool {
 // scheduled restart per process is also the correct behaviour: queueing several
 // would restart the Agent repeatedly after a single update.
 func (r *Runner) scheduleAgentRestart() error {
+	if schedule := r.agentRestartCommand; schedule != nil {
+		return r.scheduleAgentRestartWith(schedule)
+	}
 	return r.scheduleAgentRestartWith(scheduleAgentRestartCommand)
 }
 
