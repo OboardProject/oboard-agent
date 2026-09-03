@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"net/netip"
@@ -26,6 +25,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/OboardProject/oboard-agent/internal/core"
+	"github.com/OboardProject/oboard-agent/internal/logging"
 	"github.com/OboardProject/oboard-agent/internal/model"
 	"github.com/OboardProject/oboard-agent/internal/security"
 	"github.com/OboardProject/oboard-agent/internal/version"
@@ -46,6 +46,8 @@ type Config struct {
 	RestartCommand          string                   `json:"restart_command"`
 	TimeSyncCommand         string                   `json:"time_sync_command"`
 	TimeCorrectionMode      model.TimeCorrectionMode `json:"time_correction_mode"`
+	LogLevel                string                   `json:"log_level"`
+	LogLevelExpiresAt       string                   `json:"log_level_expires_at,omitempty"`
 	LogMaxMB                int                      `json:"log_max_mb"`
 	LogBackups              int                      `json:"log_backups"`
 	CoreLogMaxMB            int                      `json:"core_log_max_mb"`
@@ -80,6 +82,10 @@ type Runner struct {
 	coreLifecycleMu            sync.Mutex
 	forwardLifecycleMu         sync.Mutex
 	logMu                      sync.Mutex
+	trafficHealthMu            sync.Mutex
+	trafficReportFailures      int
+	trafficReportFailingSince  time.Time
+	trafficReportLastLoggedAt  time.Time
 	logDir                     string
 	logMaintenanceEvery        time.Duration
 	trafficState               trafficLocalState
@@ -115,7 +121,6 @@ type Runner struct {
 	coreServiceCache           string
 	coreBinaryIdentityMu       sync.Mutex
 	coreBinaryIdentity         coreBinaryIdentityCache
-	builtinForwardStops        map[int64]func()
 	forwardProbeRules          []model.PortForward
 	lastForwardProbe           map[int64]time.Time
 	clock                      *runtimeClock
@@ -160,9 +165,10 @@ func New(cfg Config) *Runner {
 	if profile == StorageProfileAuto {
 		profile = detectStorageProfile(cfg.StateDir, StorageProfileAuto)
 	}
-	runner := &Runner{coreClient: unixHTTPClient(coreAPISocket), builtinForwardStops: map[int64]func(){}, lastForwardProbe: map[int64]time.Time{}, resources: resources, tuning: tuning, hostInfo: detectHostStaticInfo(), logDir: "/var/log", logMaintenanceEvery: logMaintenanceIntervalForProfile(profile), monitoringMode: "lightweight", metricReportWake: make(chan struct{}, 1), connectionAudit: newConnectionAuditAccumulator(cfg.ConnectionAuditEnabled), clock: clock}
+	runner := &Runner{coreClient: unixHTTPClient(coreAPISocket), lastForwardProbe: map[int64]time.Time{}, resources: resources, tuning: tuning, hostInfo: detectHostStaticInfo(), logDir: "/var/log", logMaintenanceEvery: logMaintenanceIntervalForProfile(profile), monitoringMode: "lightweight", metricReportWake: make(chan struct{}, 1), connectionAudit: newConnectionAuditAccumulator(cfg.ConnectionAuditEnabled), clock: clock}
 	runner.client = &http.Client{Timeout: 20 * time.Second, Transport: runner.lowOverheadTransport()}
 	runner.storeConfig(cfg)
+	runner.refreshLogLevel()
 	return runner
 }
 
@@ -216,6 +222,14 @@ func (cfg Config) Validate() error {
 	}
 	if cfg.CoreLogBackups < 0 || cfg.CoreLogBackups > 20 {
 		return fmt.Errorf("core_log_backups must be between 0 and 20")
+	}
+	if _, ok := logging.ParseLevel(cfg.LogLevel); !ok {
+		return fmt.Errorf("log_level must be trace, debug, info, warn, or error")
+	}
+	if cfg.LogLevelExpiresAt != "" {
+		if _, err := time.Parse(logLevelExpiryLayout, cfg.LogLevelExpiresAt); err != nil {
+			return fmt.Errorf("log_level_expires_at must be an RFC 3339 timestamp")
+		}
 	}
 	return nil
 }
@@ -361,6 +375,7 @@ func normalizeConfig(cfg Config) Config {
 			cfg.CoreLogBackups = defCoreBackups
 		}
 	}
+	cfg = normalizeLogLevelPolicy(cfg, time.Now())
 	cfg.UpdateSource = strings.ToLower(strings.TrimSpace(cfg.UpdateSource))
 	if cfg.UpdateRepo = strings.TrimSpace(cfg.UpdateRepo); cfg.UpdateRepo == "" {
 		cfg.UpdateRepo = defaultUpdateRepo
@@ -579,16 +594,16 @@ func (r *Runner) Run(ctx context.Context) error {
 	r.reconcileUpdateArtifacts()
 	r.reconcileInstalledAgentBuild()
 	if err := r.restoreManagedPortForwardsOnStartup(); err != nil {
-		log.Printf("restore managed port forwards: %v", err)
+		logging.Errorf("restore managed port forwards: %v", err)
 	}
 	if err := r.restoreManagedTunnelsOnStartup(); err != nil {
-		log.Printf("restore managed tunnels: %v", err)
+		logging.Errorf("restore managed tunnels: %v", err)
 	}
 	if err := r.restoreManagedSSHInboundsOnStartup(); err != nil {
-		log.Printf("restore managed SSH inbounds: %v", err)
+		logging.Errorf("restore managed SSH inbounds: %v", err)
 	}
 	if err := r.restoreTrafficRuntimePolicies(ctx); err != nil {
-		log.Printf("restore traffic runtime policies: %v", err)
+		logging.Errorf("restore traffic runtime policies: %v", err)
 	}
 	r.startLogMaintenance(ctx)
 	r.startTrafficLoop(ctx)
@@ -618,7 +633,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		delay := reconnectDelay(cfg.AgentID, cfg.ControllerURL, max(0, failures-1), firstAfterDrop, authFailure)
 		firstAfterDrop = false
 		if err != nil && (failures <= 1 || failures%20 == 0 || authFailure) {
-			log.Printf("controller connection failed: attempt=%d class=%s http_status=%d close_code=%d connected_ms=%d reconnects=%d consecutive_failures=%d next_retry=%s detail=%q",
+			logging.Warnf("controller connection failed: attempt=%d class=%s http_status=%d close_code=%d connected_ms=%d reconnects=%d consecutive_failures=%d next_retry=%s detail=%q",
 				failures, link.DisconnectClass, link.HandshakeHTTPStatus, link.WebSocketCloseCode, link.LastConnectedDurationMS, link.ReconnectCount, link.ConsecutiveFailures, delay, link.DisconnectDetail)
 		}
 		select {
@@ -638,7 +653,7 @@ func (r *Runner) logStartupSummary(cfg Config) {
 	if coreService == "" {
 		coreService = "oboard-sb"
 	}
-	log.Printf("agent starting version=%s server_id=%d controller=%s state_dir=%s core_binary=%s core_service=%s update_source=%s update_repo=%s monitoring=%s", version.String(), cfg.ServerID, displayControllerURL(cfg.ControllerURL), cfg.StateDir, coreBinary, coreService, cfg.UpdateSource, cfg.UpdateRepo, r.monitoringMode)
+	logging.Infof("agent starting version=%s server_id=%d controller=%s state_dir=%s core_binary=%s core_service=%s update_source=%s update_repo=%s monitoring=%s", version.String(), cfg.ServerID, displayControllerURL(cfg.ControllerURL), cfg.StateDir, coreBinary, coreService, cfg.UpdateSource, cfg.UpdateRepo, r.monitoringMode)
 }
 
 func (r *Runner) connect(ctx context.Context) error {
@@ -654,7 +669,7 @@ func (r *Runner) connect(ctx context.Context) error {
 		return newControllerHandshakeError(err, handshakeResponse)
 	}
 	r.recordControllerLinkConnected(time.Now().UTC())
-	log.Printf("controller connection established: server_id=%d remote=%s", cfg.ServerID, conn.RemoteAddr())
+	logging.Infof("controller connection established: server_id=%d remote=%s", cfg.ServerID, conn.RemoteAddr())
 	defer conn.Close()
 	connectionCtx, cancelConnection := context.WithCancel(ctx)
 	defer cancelConnection()
@@ -832,31 +847,31 @@ func (r *Runner) connect(ctx context.Context) error {
 					// unlinked inode with no restart armed.
 					defer func() {
 						if err := r.scheduleAgentRestart(); err != nil {
-							log.Printf("restart agent onto the installed build: %v", err)
+							logging.Errorf("restart agent onto the installed build: %v", err)
 						}
 					}()
 				}
 				health := r.Probe(false)
 				if err := r.ReportTaskResult(ctx, item.task.ID, status, result, &health); err != nil {
-					log.Printf("report task %d result: %v", item.task.ID, err)
+					logging.Errorf("report task %d result: %v", item.task.ID, err)
 					cancelConnection()
 					return
 				}
 				if err := writeMessage(map[string]any{"type": "task_ack", "task_id": item.task.ID}, true); err != nil {
-					log.Printf("acknowledge task %d: %v", item.task.ID, err)
+					logging.Errorf("acknowledge task %d: %v", item.task.ID, err)
 					cancelConnection()
 					return
 				}
 				if item.task.Type == "update_agent" && agentUpdateInstalled(status, result) {
 					if err := r.scheduleAgentRestart(); err != nil {
-						log.Printf("schedule agent restart after update: %v", err)
+						logging.Errorf("schedule agent restart after update: %v", err)
 						cancelConnection()
 						return
 					}
 				}
 				if item.task.Type == model.AgentTaskTypeUninstallAgent && status == "succeeded" {
 					if err := r.finalizeAgentUninstall(); err != nil {
-						log.Printf("schedule agent uninstall finalizer: %v", err)
+						logging.Errorf("schedule agent uninstall finalizer: %v", err)
 					}
 				}
 			}
@@ -917,7 +932,7 @@ func (r *Runner) connect(ctx context.Context) error {
 			case <-connectionCtx.Done():
 				return connectionCtx.Err()
 			default:
-				log.Printf("ignoring task %d because the single task worker is busy", typed.Task.ID)
+				logging.Warnf("ignoring task %d because the single task worker is busy", typed.Task.ID)
 			}
 		case "heartbeat":
 			r.setMonitoringPolicy(typed.MonitoringMode)
@@ -933,11 +948,11 @@ func (r *Runner) connect(ctx context.Context) error {
 		case "interactive_prepare":
 			var env model.InteractivePrepareEnvelope
 			if err := json.Unmarshal(data, &env); err != nil {
-				log.Printf("interactive_prepare decode failed: %v", err)
+				logging.Warnf("interactive_prepare decode failed: %v", err)
 				continue
 			}
 			if err := r.handleInteractivePrepare(env); err != nil {
-				log.Printf("interactive_prepare rejected session=%s: %v", env.SessionID, err)
+				logging.Warnf("interactive_prepare rejected session=%s: %v", env.SessionID, err)
 			}
 		case "interactive_close":
 			if typed.SessionID != "" {
@@ -974,7 +989,7 @@ func (r *Runner) bindServerIdentity(serverID int64) error {
 	if cfg.ServerID == serverID {
 		return nil
 	}
-	log.Printf("agent identity bound: server_id=%d", serverID)
+	logging.Infof("agent identity bound: server_id=%d", serverID)
 	cfg.ServerID = serverID
 	if strings.TrimSpace(cfg.ConfigPath) != "" {
 		if err := SaveConfig(cfg.ConfigPath, cfg); err != nil {
@@ -1015,7 +1030,7 @@ func (r *Runner) verifyTaskSignature(task model.AgentTask, signature string) boo
 func (r *Runner) ExecuteAgentTask(task model.AgentTask) (string, string) {
 	started := time.Now()
 	status, result := r.executeAgentTask(task)
-	log.Printf("task id=%d type=%s version=%d result=%s duration_ms=%d", task.ID, task.Type, task.ConfigVersion, status, time.Since(started).Milliseconds())
+	logging.Infof("task id=%d type=%s version=%d result=%s duration_ms=%d", task.ID, task.Type, task.ConfigVersion, status, time.Since(started).Milliseconds())
 	return status, result
 }
 
@@ -1412,6 +1427,15 @@ func (r *Runner) updateAgentConfig(patch Config, fields map[string]json.RawMessa
 	if normalizeTimeCorrectionMode(patch.TimeCorrectionMode) != "" {
 		next.TimeCorrectionMode = normalizeTimeCorrectionMode(patch.TimeCorrectionMode)
 	}
+	if _, ok := fields["log_level"]; ok {
+		next.LogLevel = strings.TrimSpace(patch.LogLevel)
+		// A level change always restarts the verbose deadline: reusing the old
+		// one would let a second debug request inherit an expiry that has
+		// almost run out, or none at all.
+		next.LogLevelExpiresAt = strings.TrimSpace(patch.LogLevelExpiresAt)
+	} else if _, ok := fields["log_level_expires_at"]; ok {
+		next.LogLevelExpiresAt = strings.TrimSpace(patch.LogLevelExpiresAt)
+	}
 	if _, ok := fields["log_max_mb"]; ok {
 		next.LogMaxMB = patch.LogMaxMB
 		next.LogMaxMBSet = true
@@ -1501,7 +1525,11 @@ func (r *Runner) updateAgentConfig(patch Config, fields map[string]json.RawMessa
 		_ = os.Remove(r.connectionAuditStatePath())
 		r.connectionAuditMu.Unlock()
 	}
-	logSettingsChanged := current.LogMaxMB != next.LogMaxMB || current.LogBackups != next.LogBackups || current.CoreLogMaxMB != next.CoreLogMaxMB || current.CoreLogBackups != next.CoreLogBackups || current.StorageProfile != next.StorageProfile || current.ResourceProfile != next.ResourceProfile
+	if current.LogLevel != next.LogLevel || current.LogLevelExpiresAt != next.LogLevelExpiresAt {
+		level := r.refreshLogLevel()
+		logging.Warnf("agent log level set to %s expires_at=%q", level, r.Config().LogLevelExpiresAt)
+	}
+	logSettingsChanged := current.LogMaxMB != next.LogMaxMB || current.LogBackups != next.LogBackups || current.CoreLogMaxMB != next.CoreLogMaxMB || current.CoreLogBackups != next.CoreLogBackups || current.StorageProfile != next.StorageProfile || current.ResourceProfile != next.ResourceProfile || current.LogLevel != next.LogLevel
 	if logSettingsChanged {
 		// Refresh interval from new profile
 		if profile := storageProfileFromConfig(next); profile != "" {
@@ -1586,6 +1614,7 @@ func (r *Runner) runNetworkDiagnostics(payloadJSON string) map[string]any {
 		"sing_box_config":       readDiagnosticFile(filepath.Join(r.stateDir(), "sing-box.json")),
 		"core_watchdog":         readDiagnosticFile(filepath.Join(r.stateDir(), "core-watchdog.json")),
 		"socket_tuning":         readDiagnosticFile(filepath.Join(r.stateDir(), "socket-tuning.json")),
+		"traffic_sync":          r.trafficSyncDiagnostics(),
 		"cgroup_memory_events":  readDiagnosticFile("/sys/fs/cgroup/memory.events"),
 		"cgroup_memory_current": readDiagnosticFile("/sys/fs/cgroup/memory.current"),
 		"cgroup_memory_peak":    readDiagnosticFile("/sys/fs/cgroup/memory.peak"),
@@ -1593,11 +1622,14 @@ func (r *Runner) runNetworkDiagnostics(payloadJSON string) map[string]any {
 		"socket_memory_v4":      readDiagnosticFile("/proc/net/sockstat"),
 		"socket_memory_v6":      readDiagnosticFile("/proc/net/sockstat6"),
 	}
-	if serviceManager() == "openrc" {
-		files["oboard_agent_log"] = readDiagnosticTail("/var/log/oboard-agent.log", 80)
-		files["oboard_sb_log"] = readDiagnosticTail(filepath.Join("/var/log", r.coreService()+".log"), 80)
-	}
+	// The service log files are the only place either process writes its own
+	// diagnostics: both units redirect stdout and stderr there, so the systemd
+	// journal carries lifecycle lines only. Attach them on every service
+	// manager, not just OpenRC.
+	files["oboard_agent_log"] = readDiagnosticTail("/var/log/oboard-agent.log", 80)
+	files["oboard_sb_log"] = readDiagnosticTail(filepath.Join("/var/log", r.coreService()+".log"), 80)
 	result["files"] = files
+	result["log_policy"] = r.logPolicySummary()
 	result["ssh_inbounds"] = r.currentSSHDiagnostics()
 	return result
 }
@@ -2055,7 +2087,7 @@ func (r *Runner) applyCoreConfigUnlocked(version int64, config string) (map[stri
 	// evidence of that, so the running kernel is asked directly and restarted
 	// when it turns out to be stale.
 	recoverRuntimeDrift := func(check coreRuntimeCheck) (map[string]any, error) {
-		log.Printf("core runtime drift: loaded=%s desired=%s; restarting %s", check.LoadedDigest, check.DesiredDigest, r.coreService())
+		logging.Warnf("core runtime drift: loaded=%s desired=%s; restarting %s", check.LoadedDigest, check.DesiredDigest, r.coreService())
 		recovered, err := r.restartCoreForRuntimeDrift(ctx, []byte(config))
 		recovered.annotate(result)
 		// The recovery is reported as a drift even when it succeeded, so the
@@ -2387,16 +2419,6 @@ func inboundListenResources(raw []byte) map[string]struct{} {
 	}
 	var cfg struct {
 		Inbounds []map[string]any `json:"inbounds"`
-		OBoard   struct {
-			TrustedForward struct {
-				Receivers []struct {
-					ID         string `json:"id"`
-					Network    string `json:"network"`
-					Listen     string `json:"listen"`
-					ListenPort int    `json:"listen_port"`
-				} `json:"receivers"`
-			} `json:"trusted_forward"`
-		} `json:"_oboard"`
 	}
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		return resources
@@ -2411,15 +2433,6 @@ func inboundListenResources(raw []byte) map[string]struct{} {
 			continue
 		}
 		resources[fmt.Sprintf("%s/%s/%s:%s", fmt.Sprint(inbound["tag"]), fmt.Sprint(inbound["type"]), listen, port)] = struct{}{}
-	}
-	for _, receiver := range cfg.OBoard.TrustedForward.Receivers {
-		listen := strings.TrimSpace(receiver.Listen)
-		if listen == "" {
-			listen = "0.0.0.0"
-		}
-		if receiver.ListenPort > 0 {
-			resources[fmt.Sprintf("%s/trusted-forward-%s/%s:%d", receiver.ID, receiver.Network, listen, receiver.ListenPort)] = struct{}{}
-		}
 	}
 	return resources
 }

@@ -217,16 +217,15 @@ func (c *managementConsole) serviceStatus(service string) string {
 func (c *managementConsole) printLogs(service string) {
 	fmt.Fprintf(c.out, "最近 %d 行 %s 日志\n", managementLogLines, service)
 	fmt.Fprintln(c.out, "----------------------------------------")
-	var output string
-	var err error
-	if c.manager == "systemd" {
+	// Both units redirect stdout and stderr into /var/log/<service>.log, so
+	// journald only ever holds systemd's own lifecycle lines. Reading the file
+	// first is what actually shows the service's diagnostics; journalctl stays
+	// as the fallback for hosts whose unit was replaced by hand.
+	output, err := c.logFileContent(service)
+	if strings.TrimSpace(output) == "" && c.manager == "systemd" {
 		if _, lookupErr := exec.LookPath("journalctl"); lookupErr == nil {
 			output, err = commandOutput(15*time.Second, "journalctl", "-u", service, "-n", fmt.Sprint(managementLogLines), "--no-pager")
-		} else {
-			output, err = c.logFileContent(service)
 		}
-	} else {
-		output, err = c.logFileContent(service)
 	}
 	output = strings.TrimSpace(scrubDiagnosticOutput(output))
 	if output != "" {

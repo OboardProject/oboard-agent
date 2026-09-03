@@ -6,12 +6,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"log"
 	"os"
 	"path/filepath"
 	"sort"
 	"time"
 
+	"github.com/OboardProject/oboard-agent/internal/logging"
 	"github.com/OboardProject/oboard-agent/internal/model"
 )
 
@@ -39,13 +39,13 @@ func (r *Runner) loadMetricReportStateLocked() {
 	data, err := os.ReadFile(r.metricReportStatePath())
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
-			log.Printf("read metric report queue: %v", err)
+			logging.Errorf("read metric report queue: %v", err)
 		}
 		return
 	}
 	var state metricReportLocalState
 	if err := json.Unmarshal(data, &state); err != nil {
-		log.Printf("invalid metric report queue: %v", err)
+		logging.Errorf("invalid metric report queue: %v", err)
 		return
 	}
 	r.metricReportState = state
@@ -184,7 +184,7 @@ func (r *Runner) collectMetricReport(now time.Time) error {
 		return err
 	}
 	if dropped > 0 {
-		log.Printf("metric report queue pruned: dropped=%d pending_limit=%d", dropped, metricReportMaxPending)
+		logging.Warnf("metric report queue pruned: dropped=%d pending_limit=%d", dropped, metricReportMaxPending)
 	}
 	return nil
 }
@@ -199,7 +199,7 @@ func (r *Runner) startMetricReportLoop(ctx context.Context) {
 				return
 			case now := <-ticker.C:
 				if err := r.collectMetricReport(now.UTC()); err != nil {
-					log.Printf("queue metric report: %v", err)
+					logging.Errorf("queue metric report: %v", err)
 				}
 			}
 		}

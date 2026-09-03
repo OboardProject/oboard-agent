@@ -6,12 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/OboardProject/oboard-agent/internal/logging"
 	"github.com/OboardProject/oboard-agent/internal/model"
 )
 
@@ -44,9 +44,11 @@ func (r *Runner) managedLogs() []managedLog {
 	if coreService == "" {
 		coreService = "oboard-sb"
 	}
+	agentMax, agentBackups := applyLogTotalBudget(int64(cfg.LogMaxMB)<<20, cfg.LogBackups, agentLogTotalBudgetBytes)
+	coreMax, coreBackups := applyLogTotalBudget(int64(cfg.CoreLogMaxMB)<<20, cfg.CoreLogBackups, coreLogTotalBudgetBytes)
 	return []managedLog{
-		{Service: "agent", Path: r.serviceLogPath("oboard-agent"), MaxBytes: int64(cfg.LogMaxMB) << 20, Backups: cfg.LogBackups},
-		{Service: "core", Path: r.serviceLogPath(coreService), MaxBytes: int64(cfg.CoreLogMaxMB) << 20, Backups: cfg.CoreLogBackups},
+		{Service: "agent", Path: r.serviceLogPath("oboard-agent"), MaxBytes: agentMax, Backups: agentBackups},
+		{Service: "core", Path: r.serviceLogPath(coreService), MaxBytes: coreMax, Backups: coreBackups},
 	}
 }
 
@@ -60,20 +62,36 @@ func (r *Runner) serviceLogPath(service string) string {
 
 func (r *Runner) logPolicySummary() map[string]any {
 	cfg := r.Config()
-	return map[string]any{
-		"agent": map[string]any{"max_mb": cfg.LogMaxMB, "backups": cfg.LogBackups, "path": r.serviceLogPath("oboard-agent")},
-		"core":  map[string]any{"max_mb": cfg.CoreLogMaxMB, "backups": cfg.CoreLogBackups, "path": r.serviceLogPath(r.coreService())},
+	summary := map[string]any{
+		"level":            logging.CurrentLevel().String(),
+		"configured_level": cfg.LogLevel,
 	}
+	if cfg.LogLevelExpiresAt != "" {
+		summary["level_expires_at"] = cfg.LogLevelExpiresAt
+	}
+	for _, policy := range r.managedLogs() {
+		summary[policy.Service] = map[string]any{
+			"max_mb":   policy.MaxBytes >> 20,
+			"backups":  policy.Backups,
+			"path":     policy.Path,
+			"budget_b": logTotalBudgetFor(policy.Service),
+		}
+	}
+	return summary
+}
+
+func logTotalBudgetFor(service string) int64 {
+	if service == "core" {
+		return coreLogTotalBudgetBytes
+	}
+	return agentLogTotalBudgetBytes
 }
 
 func (r *Runner) startLogMaintenance(ctx context.Context) {
 	r.enforceLogLimits(false)
 	r.enforceEmergencyDiskCleanup()
 	go func() {
-		interval := r.logMaintenanceEvery
-		if interval <= 0 {
-			interval = logMaintenanceInterval
-		}
+		interval := r.logMaintenanceInterval()
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		// Light statfs pressure check runs less frequently than log rotation.
@@ -84,13 +102,20 @@ func (r *Runner) startLogMaintenance(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				// Refresh interval from current storage profile dynamically.
+				// A verbose level that has outlived its deadline is retired
+				// here, before the sweep, so the tightened cadence and the
+				// level itself relax together.
+				r.refreshLogLevel()
+				// Refresh cadence from the current storage profile and level.
+				// The base interval stays a local: writing the Runner field
+				// here would race the configuration-update path that owns it.
+				base := r.logMaintenanceEvery
 				if cur := r.storageProfile(); cur != "" {
-					next := logMaintenanceIntervalForProfile(cur)
-					if next != interval {
-						interval = next
-						ticker.Reset(interval)
-					}
+					base = logMaintenanceIntervalForProfile(cur)
+				}
+				if next := verboseAwareInterval(base); next != interval {
+					interval = next
+					ticker.Reset(interval)
 				}
 				r.enforceLogLimits(false)
 			case <-pressureTicker.C:
@@ -131,7 +156,7 @@ func (r *Runner) enforceLogLimits(force bool) []LogFileState {
 			} else {
 				state.Rotated = true
 				state.SizeBytes = 0
-				log.Printf("log rotated service=%s path=%s max_bytes=%d backups=%d", policy.Service, policy.Path, policy.MaxBytes, policy.Backups)
+				logging.Infof("log rotated service=%s path=%s max_bytes=%d backups=%d", policy.Service, policy.Path, policy.MaxBytes, policy.Backups)
 			}
 		}
 		items = append(items, state)
@@ -285,7 +310,7 @@ func (r *Runner) manageLogs(payloadJSON string) (map[string]any, error) {
 			state.Error = err.Error()
 			failures = append(failures, policy.Service+": "+err.Error())
 		} else {
-			log.Printf("log %s service=%s path=%s", payload.Action, policy.Service, policy.Path)
+			logging.Infof("log %s service=%s path=%s", payload.Action, policy.Service, policy.Path)
 		}
 		states = append(states, state)
 	}

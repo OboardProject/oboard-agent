@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"math"
 	"net"
 	"net/netip"
@@ -17,6 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/OboardProject/oboard-agent/internal/logging"
 	"github.com/OboardProject/oboard-agent/internal/model"
 	"golang.org/x/net/icmp"
 	"golang.org/x/net/ipv4"
@@ -362,13 +362,13 @@ func (r *Runner) loadLatencyProbeStateLocked() {
 	data, err := os.ReadFile(r.latencyProbeStatePath())
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
-			log.Printf("读取延迟测试本地状态失败: %v", err)
+			logging.Errorf("读取延迟测试本地状态失败: %v", err)
 		}
 		return
 	}
 	var state latencyProbeLocalState
 	if err := json.Unmarshal(data, &state); err != nil {
-		log.Printf("延迟测试本地状态无效: %v", err)
+		logging.Errorf("延迟测试本地状态无效: %v", err)
 		return
 	}
 	r.latencyProbeState = state
@@ -471,7 +471,7 @@ func (r *Runner) runLatencyProbeIfDue(ctx context.Context, now time.Time) {
 	if err := r.persistLatencyProbeStateLocked(); err != nil {
 		r.latencyProbeState.LastRunAt = previousRunAt
 		r.latencyProbeMu.Unlock()
-		log.Printf("保存延迟测试执行时间失败: %v", err)
+		logging.Errorf("保存延迟测试执行时间失败: %v", err)
 		return
 	}
 	r.latencyProbeMu.Unlock()
@@ -481,7 +481,7 @@ func (r *Runner) runLatencyProbeIfDue(ctx context.Context, now time.Time) {
 		return
 	}
 	if err := r.queueLatencyProbeReport(report, now); err != nil {
-		log.Printf("保存延迟测试待补报结果失败: %v", err)
+		logging.Errorf("保存延迟测试待补报结果失败: %v", err)
 	}
 }
 

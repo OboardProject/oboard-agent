@@ -1,13 +1,14 @@
 package agent
 
 import (
-	"log"
 	"os"
 	"runtime"
 	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/OboardProject/oboard-agent/internal/logging"
 )
 
 type ResourceProfile string
@@ -131,7 +132,7 @@ func ApplyRuntimeTuning(info ResourceInfo) RuntimeTuning {
 	if os.Getenv("GOMEMLIMIT") == "" {
 		debug.SetMemoryLimit(tuning.MemoryLimitBytes)
 	}
-	log.Printf("agent resource profile=%s virtualization=%s container=%t effective_memory=%d gomaxprocs=%d gogc=%d gomemlimit=%d", info.Profile, info.Virtualization, info.Container, info.EffectiveMemoryBytes, runtime.GOMAXPROCS(0), tuning.GCPercent, tuning.MemoryLimitBytes)
+	logging.Infof("agent resource profile=%s virtualization=%s container=%t effective_memory=%d gomaxprocs=%d gogc=%d gomemlimit=%d", info.Profile, info.Virtualization, info.Container, info.EffectiveMemoryBytes, runtime.GOMAXPROCS(0), tuning.GCPercent, tuning.MemoryLimitBytes)
 	return tuning
 }
 

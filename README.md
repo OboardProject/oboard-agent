@@ -9,7 +9,7 @@ OBoard is the node-side Agent for connecting to the Controller, applying configu
 - **One-command Controller enrollment**: register with a one-time token, authenticate with an Agent identity and bearer token, and use the WebSocket task channel with reconnection and task retries
 - **Signed deployment**: receive and verify signed Controller tasks, atomically apply configuration, update Agent/kernel assets, and restore or repair drifted desired state on startup
 - **Slim proxy kernel**: built-in `oboard-sb` with VLESS/Reality, Hysteria2, AnyTLS, Shadowsocks, SOCKS5, Mieru, and WireGuard endpoints
-- **Networking**: proxy paths, tunnels, Realm/nft port forwarding, transparent forwarding, restricted SSH services, and UDP over TCP
+- **Networking**: proxy paths, tunnels, Realm port forwarding, transparent forwarding, restricted SSH services, and UDP over TCP
 - **Adaptive resources**: select a runtime profile from physical memory and cgroup effective memory to keep resources available for the data plane and reduce OOM risk on small nodes
 - **Local operations**: use `obag` for status, start, stop, restart, Agent/kernel logs, and Controller connectivity checks
 - **Probes and diagnostics**: automated tasks for inbounds, port forwards, egress IP, MTU, DNS, time, log collection, and certificate issuance with HTTP-01

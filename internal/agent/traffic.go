@@ -204,7 +204,11 @@ func (r *Runner) startTrafficLoop(ctx context.Context) {
 		ticker := time.NewTicker(r.resources.TrafficReportInterval())
 		defer ticker.Stop()
 		for {
-			_ = r.collectAndReportTraffic(loopCtx)
+			// A failed cycle means the Controller returned no policies, so no
+			// lease was renewed. Swallowing that error is how a node goes
+			// quiet: it keeps serving until every user's current lease is
+			// spent, then refuses connections with nothing recorded anywhere.
+			r.noteTrafficReportOutcome(r.collectAndReportTraffic(loopCtx))
 			if r.Config().ConnectionAuditEnabled {
 				_ = r.collectAndReportConnectionAudits(loopCtx)
 			}
@@ -516,6 +520,12 @@ func (r *Runner) reportTrafficLedger(ctx context.Context, state *trafficLocalSta
 	}
 	var resp trafficReportResponse
 	if err := r.postControllerJSON(ctx, "/api/v1/agent/traffic-reports", req, &resp, true); err != nil {
+		// Sync status is otherwise only written on success, which leaves a
+		// stalled Agent advertising the "healthy" it recorded before the
+		// outage began. Record the failure so the state file dates it.
+		state.Sync.Status = trafficStatusStale
+		state.Sync.LastError = err.Error()
+		_ = r.saveTrafficState(*state)
 		return err
 	}
 	applyTrafficLedgerResponse(state, resp)
@@ -900,7 +910,13 @@ func applyTrafficLedgerResponse(state *trafficLocalState, resp trafficReportResp
 // unauthorized user/inbound pair with 403 instead of a per-report rejection.
 func terminalTrafficRejectionReason(reason string) bool {
 	switch strings.TrimSpace(reason) {
-	case "user_deleted", "user_inactive", "binding_removed", "inbound_deleted", "inbound_disabled", "path_removed":
+	case "user_deleted", "user_inactive", "binding_removed", "inbound_deleted", "inbound_disabled", "path_removed",
+		// The Controller will never account a report for a pair it does not
+		// authorize. Retrying one is what turned a single stale report into a
+		// batch that could never drain, stalling lease renewal for every user
+		// on the server, so these are dropped locally like any other terminal
+		// outcome.
+		"unauthorized", "forbidden":
 		return true
 	default:
 		return false

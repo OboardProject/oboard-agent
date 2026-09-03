@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -15,6 +14,7 @@ import (
 	"github.com/creack/pty"
 	"github.com/gorilla/websocket"
 
+	"github.com/OboardProject/oboard-agent/internal/logging"
 	"github.com/OboardProject/oboard-agent/internal/model"
 	"github.com/OboardProject/oboard-agent/internal/security"
 	"github.com/OboardProject/oboard-agent/internal/terminal"
@@ -176,7 +176,7 @@ func (r *Runner) reportInteractiveFailed(sessionID, reason, detail string) {
 	if strings.TrimSpace(sessionID) == "" || strings.TrimSpace(reason) == "" {
 		return
 	}
-	log.Printf("interactive failed session=%s reason=%s detail=%s", sessionID, reason, detail)
+	logging.Warnf("interactive failed session=%s reason=%s detail=%s", sessionID, reason, detail)
 	payload := map[string]any{
 		"type": "interactive_failed", "session_id": sessionID, "reason": reason, "ts": time.Now().UTC(),
 	}
@@ -227,7 +227,7 @@ func (r *Runner) runTerminalSession(env model.InteractivePrepareEnvelope, cols, 
 		r.reportInteractiveFailed(env.SessionID, reason, err.Error())
 		return
 	}
-	log.Printf("terminal session started session=%s uid=%d username=%s shell=%s mode=%s cwd=%s rows=%d cols=%d",
+	logging.Infof("terminal session started session=%s uid=%d username=%s shell=%s mode=%s cwd=%s rows=%d cols=%d",
 		env.SessionID, spec.UID, spec.Username, spec.Shell, spec.Mode, spec.WorkDir, rows, cols)
 	wsURL, err := security.ControllerInteractiveWebSocketURL(r.Config().ControllerURL, env.SessionID, version.IsDev(), r.Config().AllowInsecureController)
 	if err != nil {
@@ -352,7 +352,7 @@ func (r *Runner) closeTerminalSession(sessionID, reason string) {
 	if session.cmd != nil && session.cmd.ProcessState != nil {
 		exitCode = session.cmd.ProcessState.ExitCode()
 	}
-	log.Printf("interactive session closed session=%s reason=%s uid=%d username=%s shell=%s mode=%s cwd=%s exit_code=%d",
+	logging.Infof("interactive session closed session=%s reason=%s uid=%d username=%s shell=%s mode=%s cwd=%s exit_code=%d",
 		sessionID, reason, session.spec.UID, session.spec.Username, session.spec.Shell, session.spec.Mode, session.spec.WorkDir, exitCode)
 }
 

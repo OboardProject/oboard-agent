@@ -4,10 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/OboardProject/oboard-agent/internal/logging"
 )
 
 const (
@@ -177,7 +178,7 @@ func (r *Runner) runCoreWatchdogCheck(ctx context.Context, status *coreWatchdogS
 		status.State = "invalid_config"
 		status.LastError = err.Error()
 		status.NextAttemptAt = now.Add(2 * time.Minute)
-		log.Printf("core watchdog: refusing to restart %s with invalid config: %v", status.Service, err)
+		logging.Errorf("core watchdog: refusing to restart %s with invalid config: %v", status.Service, err)
 		r.writeCoreWatchdogStatus(*status)
 		return
 	}
@@ -199,11 +200,11 @@ func (r *Runner) recoverCoreRuntimeDrift(ctx context.Context, status *coreWatchd
 		status.State = "invalid_config"
 		status.LastError = err.Error()
 		status.NextAttemptAt = now.Add(2 * time.Minute)
-		log.Printf("core watchdog: refusing to restart %s with invalid config: %v", status.Service, err)
+		logging.Errorf("core watchdog: refusing to restart %s with invalid config: %v", status.Service, err)
 		r.writeCoreWatchdogStatus(*status)
 		return
 	}
-	log.Printf("core watchdog: %s runs configuration %s but %s is desired; restarting", status.Service, status.LoadedDigest, status.DesiredDigest)
+	logging.Warnf("core watchdog: %s runs configuration %s but %s is desired; restarting", status.Service, status.LoadedDigest, status.DesiredDigest)
 	r.restartCoreFromWatchdog(ctx, status, desired, now, "runtime_drift")
 }
 
@@ -239,12 +240,12 @@ func (r *Runner) recoverCoreBinaryDrift(ctx context.Context, status *coreWatchdo
 		status.State = "invalid_config"
 		status.LastError = err.Error()
 		status.NextAttemptAt = now.Add(2 * time.Minute)
-		log.Printf("core watchdog: refusing to restart %s onto the installed build with invalid config: %v", status.Service, err)
+		logging.Errorf("core watchdog: refusing to restart %s onto the installed build with invalid config: %v", status.Service, err)
 		r.writeCoreWatchdogStatus(*status)
 		return
 	}
 	status.BinaryRecoveryBuild = installed
-	log.Printf("core watchdog: %s runs %s but %s is installed; restarting", status.Service, check.RunningBuild.String(), installed)
+	logging.Warnf("core watchdog: %s runs %s but %s is installed; restarting", status.Service, check.RunningBuild.String(), installed)
 	r.restartCoreFromWatchdog(ctx, status, desired, now, "binary_drift")
 }
 
@@ -255,12 +256,12 @@ func (r *Runner) restartCoreFromWatchdog(ctx context.Context, status *coreWatchd
 	status.LastRestartAt = now
 	status.RestartCount++
 	r.writeCoreWatchdogStatus(*status)
-	log.Printf("core watchdog: starting automatic recovery of %s reason=%s", status.Service, reason)
+	logging.Warnf("core watchdog: starting automatic recovery of %s reason=%s", status.Service, reason)
 	if err := r.restartCore(); err != nil {
 		status.State = "restart_failed"
 		status.LastError = err.Error()
 		status.NextAttemptAt = now.Add(coreWatchdogBackoff(status.Consecutive + 1))
-		log.Printf("core watchdog: restart %s failed: %v", status.Service, err)
+		logging.Errorf("core watchdog: restart %s failed: %v", status.Service, err)
 		r.writeCoreWatchdogStatus(*status)
 		return
 	}
@@ -268,7 +269,7 @@ func (r *Runner) restartCoreFromWatchdog(ctx context.Context, status *coreWatchd
 		status.State = "crashed_after_restart"
 		status.LastError = err.Error()
 		status.NextAttemptAt = now.Add(coreWatchdogBackoff(status.Consecutive + 1))
-		log.Printf("core watchdog: %s did not remain running after restart: %v", status.Service, err)
+		logging.Errorf("core watchdog: %s did not remain running after restart: %v", status.Service, err)
 		r.writeCoreWatchdogStatus(*status)
 		return
 	}
@@ -283,7 +284,7 @@ func (r *Runner) restartCoreFromWatchdog(ctx context.Context, status *coreWatchd
 		status.State = coreWatchdogStateRuntimeDrift
 		status.LastError = "core still runs an older configuration after restart"
 		status.NextAttemptAt = now.Add(coreWatchdogBackoff(status.Consecutive + 1))
-		log.Printf("core watchdog: %s still runs %s after restart, expected %s", status.Service, check.LoadedDigest, check.DesiredDigest)
+		logging.Errorf("core watchdog: %s still runs %s after restart, expected %s", status.Service, check.LoadedDigest, check.DesiredDigest)
 		r.writeCoreWatchdogStatus(*status)
 		return
 	}
@@ -291,7 +292,7 @@ func (r *Runner) restartCoreFromWatchdog(ctx context.Context, status *coreWatchd
 		status.State = coreWatchdogStateBinaryStale
 		status.LastError = "core still runs the previous build after restart"
 		status.NextAttemptAt = now.Add(coreWatchdogBackoff(status.Consecutive + 1))
-		log.Printf("core watchdog: %s still runs %s after restart, expected %s", status.Service, check.RunningBuild.String(), check.InstalledBuild.String())
+		logging.Errorf("core watchdog: %s still runs %s after restart, expected %s", status.Service, check.RunningBuild.String(), check.InstalledBuild.String())
 		r.writeCoreWatchdogStatus(*status)
 		return
 	}
@@ -300,7 +301,7 @@ func (r *Runner) restartCoreFromWatchdog(ctx context.Context, status *coreWatchd
 	status.StableSince = time.Now().UTC()
 	_ = r.configureCoreClock(ctx)
 	status.NextAttemptAt = now.Add(coreWatchdogBackoff(status.Consecutive + 1))
-	log.Printf("core watchdog: %s recovered successfully reason=%s", status.Service, reason)
+	logging.Infof("core watchdog: %s recovered successfully reason=%s", status.Service, reason)
 	r.writeCoreWatchdogStatus(*status)
 }
 

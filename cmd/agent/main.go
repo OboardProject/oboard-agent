@@ -12,6 +12,7 @@ import (
 	"syscall"
 
 	"github.com/OboardProject/oboard-agent/internal/agent"
+	"github.com/OboardProject/oboard-agent/internal/logging"
 	"github.com/OboardProject/oboard-agent/internal/model"
 	"github.com/OboardProject/oboard-agent/internal/version"
 )
@@ -159,7 +160,7 @@ func main() {
 		if err := runner.Enroll(ctx, enrollToken); err != nil {
 			log.Fatal(err)
 		}
-		log.Printf("agent enrolled and config saved to %s", *configPath)
+		logging.Infof("agent enrolled and config saved to %s", *configPath)
 		if *enrollOnly {
 			return
 		}

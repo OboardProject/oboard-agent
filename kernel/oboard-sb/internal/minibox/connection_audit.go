@@ -113,8 +113,8 @@ func (t *RateLimitTracker) FamilySelectorSelected(ctx context.Context, selectorT
 	if state == nil || state.currentConfig().policy.UserID <= 0 {
 		return
 	}
-	sourceAddr, _, sourceOK := t.trustedAuditSource(*metadata)
-	if !sourceOK {
+	sourceAddr := metadata.Source.Addr.Unmap()
+	if !sourceAddr.IsValid() {
 		return
 	}
 	destination := strings.TrimSpace(metadata.Destination.AddrString())
@@ -152,8 +152,8 @@ func (t *RateLimitTracker) recordConnectionStart(state *runtimeState, metadata a
 	if policy.UserID <= 0 {
 		return ""
 	}
-	sourceAddr, trustedSource, sourceOK := t.trustedAuditSource(metadata)
-	if !sourceOK {
+	sourceAddr := metadata.Source.Addr.Unmap()
+	if !sourceAddr.IsValid() {
 		return ""
 	}
 	sourceIP := sourceAddr.String()
@@ -185,9 +185,6 @@ func (t *RateLimitTracker) recordConnectionStart(state *runtimeState, metadata a
 		}
 	}
 	sourceGeoCode := strings.ToUpper(strings.TrimSpace(metadata.SourceGeoIPCode))
-	if trustedSource {
-		sourceGeoCode = ""
-	}
 	if len(sourceGeoCode) != 2 {
 		sourceGeoCode = ""
 	}

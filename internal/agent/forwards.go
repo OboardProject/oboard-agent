@@ -2,12 +2,9 @@ package agent
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/netip"
 	"os"
@@ -17,7 +14,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/OboardProject/oboard-agent/internal/core"
@@ -30,8 +26,6 @@ const (
 	realmConfigFile      = "realm.toml"
 	realmPIDFile         = "realm.pid"
 	realmLogFile         = "realm.log"
-	nftConfigFile        = "nftables-oboard.nft"
-	nftTableName         = "oboard_forward"
 )
 
 type forwardApplyResult struct {
@@ -39,9 +33,6 @@ type forwardApplyResult struct {
 	Unchanged    bool              `json:"unchanged,omitempty"`
 	Applied      int               `json:"applied"`
 	RealmRules   int               `json:"realm_rules"`
-	NFTRules     int               `json:"nft_rules"`
-	BuiltinRules int               `json:"builtin_rules"`
-	TrustedRules int               `json:"trusted_rules"`
 	Capabilities map[string]bool   `json:"capabilities"`
 	Warnings     []string          `json:"warnings,omitempty"`
 	Backends     map[string]string `json:"backends,omitempty"`
@@ -246,15 +237,6 @@ func inboundListenEndpoints(raw []byte) []inboundListenEndpoint {
 	}
 	var cfg struct {
 		Inbounds []map[string]any `json:"inbounds"`
-		OBoard   struct {
-			TrustedForward struct {
-				Receivers []struct {
-					Listen     string `json:"listen"`
-					ListenPort int    `json:"listen_port"`
-					Network    string `json:"network"`
-				} `json:"receivers"`
-			} `json:"trusted_forward"`
-		} `json:"_oboard"`
 	}
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		return nil
@@ -283,22 +265,6 @@ func inboundListenEndpoints(raw []byte) []inboundListenEndpoint {
 			}
 		default:
 			endpoint.TCP = true
-		}
-		endpoints = append(endpoints, endpoint)
-	}
-	for _, receiver := range cfg.OBoard.TrustedForward.Receivers {
-		if receiver.ListenPort <= 0 {
-			continue
-		}
-		endpoint := inboundListenEndpoint{Address: normalizeForwardListenAddress(receiver.Listen), Port: receiver.ListenPort}
-		switch receiver.Network {
-		case string(model.ForwardProtocolTCP):
-			endpoint.TCP = true
-		case string(model.ForwardProtocolUDP):
-			endpoint.UDP = true
-		default:
-			endpoint.TCP = true
-			endpoint.UDP = true
 		}
 		endpoints = append(endpoints, endpoint)
 	}
@@ -404,36 +370,12 @@ func (r *Runner) applyResolvedForwards(rules []forwardRule, result *forwardApply
 		}
 		return rules[i].Priority < rules[j].Priority
 	})
-	realmRules := make([]forwardRule, 0)
-	nftRules := make([]forwardRule, 0)
-	builtinRules := make([]forwardRule, 0)
-	for _, rule := range rules {
-		if rule.TrustedForward != nil && result != nil {
-			result.TrustedRules++
-		}
-		switch rule.ResolvedBackend {
-		case model.ForwardBackendRealm:
-			realmRules = append(realmRules, rule)
-		case model.ForwardBackendNFT:
-			nftRules = append(nftRules, rule)
-		case model.ForwardBackendBuiltin:
-			builtinRules = append(builtinRules, rule)
-		}
-	}
-	if err := r.applyBuiltinForwards(builtinRules); err != nil {
-		return err
-	}
-	if err := r.applyRealmForwards(realmRules); err != nil {
-		return err
-	}
-	if err := r.applyNFTForwards(nftRules, result); err != nil {
+	if err := r.applyRealmForwards(rules); err != nil {
 		return err
 	}
 	if result != nil {
 		result.Applied = len(rules)
-		result.RealmRules = len(realmRules)
-		result.NFTRules = len(nftRules)
-		result.BuiltinRules = len(builtinRules)
+		result.RealmRules = len(rules)
 	}
 	r.setForwardProbeRules(rules)
 	return nil
@@ -443,39 +385,14 @@ func resolveForwardBackends(rules []model.PortForward, caps map[string]bool) ([]
 	out := make([]forwardRule, 0, len(rules))
 	for _, rule := range rules {
 		backend := rule.Backend
-		if rule.TrustedForward != nil {
-			if _, err := trustedForwardKey(rule.TrustedForward); err != nil {
-				return nil, fmt.Errorf("port forward %q: %w", rule.Name, err)
-			}
-			backend = model.ForwardBackendBuiltin
+		if backend == "" {
+			backend = model.ForwardBackendRealm
 		}
-		if backend == "" || backend == model.ForwardBackendAuto {
-			switch {
-			case caps["realm"]:
-				backend = model.ForwardBackendRealm
-			case caps["nft"]:
-				backend = model.ForwardBackendNFT
-			case caps["builtin"]:
-				backend = model.ForwardBackendBuiltin
-			default:
-				return nil, fmt.Errorf("port forward %q has backend=auto but no supported backend was detected", rule.Name)
-			}
-		}
-		switch backend {
-		case model.ForwardBackendRealm:
-			if !caps["realm"] {
-				return nil, fmt.Errorf("port forward %q requires realm but realm binary was not found", rule.Name)
-			}
-		case model.ForwardBackendNFT:
-			if !caps["nft"] {
-				return nil, fmt.Errorf("port forward %q requires nft but Linux nftables/root capability is unavailable", rule.Name)
-			}
-		case model.ForwardBackendBuiltin:
-			if rule.Protocol != model.ForwardProtocolTCP && rule.Protocol != model.ForwardProtocolUDP && rule.Protocol != model.ForwardProtocolTCPUDP {
-				return nil, fmt.Errorf("builtin backend does not support protocol %q for rule %q", rule.Protocol, rule.Name)
-			}
-		default:
+		if backend != model.ForwardBackendRealm {
 			return nil, fmt.Errorf("unsupported forward backend %q", backend)
+		}
+		if !caps["realm"] {
+			return nil, fmt.Errorf("port forward %q requires realm but realm binary was not found", rule.Name)
 		}
 		out = append(out, forwardRule{PortForward: rule, ResolvedBackend: backend})
 	}
@@ -484,294 +401,12 @@ func resolveForwardBackends(rules []model.PortForward, caps map[string]bool) ([]
 
 func detectForwardCapabilities() map[string]bool {
 	_, realmErr := exec.LookPath("realm")
-	_, nftErr := exec.LookPath("nft")
 	root := runningAsRoot()
 	return map[string]bool{
-		"realm":              realmErr == nil,
-		"nft":                runtime.GOOS == "linux" && nftErr == nil && root,
-		"builtin":            true,
-		"trusted_forward_v1": true,
-		"linux":              runtime.GOOS == "linux",
-		"root":               root,
+		"realm": realmErr == nil,
+		"linux": runtime.GOOS == "linux",
+		"root":  root,
 	}
-}
-
-func (r *Runner) applyBuiltinForwards(rules []forwardRule) error {
-	r.mu.Lock()
-	old := r.builtinForwardStops
-	r.builtinForwardStops = map[int64]func(){}
-	r.mu.Unlock()
-	for _, stop := range old {
-		stop()
-	}
-	for _, rule := range rules {
-		stop, err := r.startBuiltinForward(rule)
-		if err != nil {
-			return err
-		}
-		r.mu.Lock()
-		r.builtinForwardStops[rule.ID] = stop
-		r.mu.Unlock()
-	}
-	return nil
-}
-
-func (r *Runner) startBuiltinForward(rule forwardRule) (func(), error) {
-	stops := make([]func(), 0, 2)
-	if rule.Protocol == model.ForwardProtocolTCP || rule.Protocol == model.ForwardProtocolTCPUDP {
-		stop, err := r.startBuiltinTCPForward(rule)
-		if err != nil {
-			return nil, err
-		}
-		stops = append(stops, stop)
-	}
-	if rule.Protocol == model.ForwardProtocolUDP || rule.Protocol == model.ForwardProtocolTCPUDP {
-		stop, err := r.startBuiltinUDPForward(rule)
-		if err != nil {
-			for _, closeForward := range stops {
-				closeForward()
-			}
-			return nil, err
-		}
-		stops = append(stops, stop)
-	}
-	var once sync.Once
-	return func() {
-		once.Do(func() {
-			for _, stop := range stops {
-				stop()
-			}
-		})
-	}, nil
-}
-
-func (r *Runner) startBuiltinTCPForward(rule forwardRule) (func(), error) {
-	listenIP := strings.TrimSpace(rule.ListenIP)
-	if listenIP == "" {
-		listenIP = "0.0.0.0"
-	}
-	ln, err := net.Listen("tcp", net.JoinHostPort(listenIP, fmt.Sprint(rule.ListenPort)))
-	if err != nil {
-		return nil, err
-	}
-	stop := func() { _ = ln.Close() }
-	go func() {
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			go r.handleBuiltinForwardConn(conn, rule)
-		}
-	}()
-	return stop, nil
-}
-
-type builtinUDPSession struct {
-	conn      *net.UDPConn
-	client    *net.UDPAddr
-	lastSeen  time.Time
-	sessionID [8]byte
-	counter   uint32
-}
-
-func (r *Runner) startBuiltinUDPForward(rule forwardRule) (func(), error) {
-	listenIP := strings.TrimSpace(rule.ListenIP)
-	if listenIP == "" {
-		listenIP = "0.0.0.0"
-	}
-	listenAddr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(listenIP, fmt.Sprint(rule.ListenPort)))
-	if err != nil {
-		return nil, err
-	}
-	targetAddr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(rule.TargetAddress, fmt.Sprint(rule.TargetPort)))
-	if err != nil {
-		return nil, err
-	}
-	listener, err := net.ListenUDP("udp", listenAddr)
-	if err != nil {
-		return nil, err
-	}
-	const maxSessions = 4096
-	const idleTimeout = 2 * time.Minute
-	var mu sync.Mutex
-	sessions := map[string]*builtinUDPSession{}
-	closed := false
-	closeSession := func(key string, session *builtinUDPSession) {
-		if current := sessions[key]; current == session {
-			delete(sessions, key)
-		}
-		_ = session.conn.Close()
-	}
-	startSession := func(client *net.UDPAddr) (*builtinUDPSession, error) {
-		conn, err := net.DialUDP("udp", nil, targetAddr)
-		if err != nil {
-			return nil, err
-		}
-		session := &builtinUDPSession{conn: conn, client: client, lastSeen: time.Now()}
-		if rule.TrustedForward != nil {
-			if _, err := rand.Read(session.sessionID[:]); err != nil {
-				_ = conn.Close()
-				return nil, err
-			}
-		}
-		key := client.String()
-		go func() {
-			buf := make([]byte, 64*1024)
-			for {
-				n, err := conn.Read(buf)
-				if err != nil {
-					return
-				}
-				if _, err := listener.WriteToUDP(buf[:n], client); err != nil {
-					return
-				}
-				mu.Lock()
-				if current := sessions[key]; current == session {
-					current.lastSeen = time.Now()
-				}
-				mu.Unlock()
-			}
-		}()
-		return session, nil
-	}
-	go func() {
-		buf := make([]byte, 64*1024)
-		for {
-			n, client, err := listener.ReadFromUDP(buf)
-			if err != nil {
-				return
-			}
-			key := client.String()
-			mu.Lock()
-			session := sessions[key]
-			if session == nil && !closed && len(sessions) < maxSessions {
-				session, err = startSession(client)
-				if err == nil {
-					sessions[key] = session
-				}
-			}
-			if session != nil {
-				session.lastSeen = time.Now()
-				if rule.TrustedForward != nil {
-					session.counter++
-					if session.counter == 0 {
-						closeSession(key, session)
-						session = nil
-					}
-				}
-			}
-			counter := uint32(0)
-			if session != nil {
-				counter = session.counter
-			}
-			mu.Unlock()
-			if err == nil && session != nil {
-				payload := buf[:n]
-				if rule.TrustedForward != nil {
-					source, sourceErr := trustedForwardSource(client)
-					if sourceErr != nil {
-						continue
-					}
-					payload, err = encodeTrustedForwardUDPAt(rule.TrustedForward, source, session.sessionID, counter, payload, trustedForwardUDPData, r.clock.Now())
-					if err != nil {
-						continue
-					}
-				}
-				_, _ = session.conn.Write(payload)
-			}
-		}
-	}()
-	go func() {
-		ticker := time.NewTicker(30 * time.Second)
-		defer ticker.Stop()
-		for range ticker.C {
-			mu.Lock()
-			if closed {
-				mu.Unlock()
-				return
-			}
-			now := time.Now()
-			for key, session := range sessions {
-				if now.Sub(session.lastSeen) > idleTimeout {
-					closeSession(key, session)
-				}
-			}
-			mu.Unlock()
-		}
-	}()
-	var once sync.Once
-	return func() {
-		once.Do(func() {
-			_ = listener.Close()
-			mu.Lock()
-			closed = true
-			for key, session := range sessions {
-				closeSession(key, session)
-			}
-			mu.Unlock()
-		})
-	}, nil
-}
-
-func (r *Runner) handleBuiltinForwardConn(src net.Conn, rule forwardRule) {
-	defer src.Close()
-	var trustedPreface []byte
-	if rule.TrustedForward != nil {
-		_ = src.SetReadDeadline(time.Now().Add(5 * time.Second))
-		first := make([]byte, trustedForwardTCPFirstBytes)
-		n, err := src.Read(first)
-		_ = src.SetReadDeadline(time.Time{})
-		if err != nil || n == 0 {
-			return
-		}
-		source, err := trustedForwardSource(src.RemoteAddr())
-		if err != nil {
-			return
-		}
-		trustedPreface, err = encodeTrustedForwardTCPAt(rule.TrustedForward, source, first[:n], trustedForwardTCPData, r.clock.Now())
-		if err != nil {
-			return
-		}
-	}
-	start := time.Now()
-	target := net.JoinHostPort(rule.TargetAddress, fmt.Sprint(rule.TargetPort))
-	dst, err := net.DialTimeout("tcp", target, 5*time.Second)
-	latency := time.Since(start)
-	if shouldSample(rule.SampleRate) {
-		details := marshalForwardProbeDetails(rule.PortForward, map[string]any{"kind": "passive_target_connect", "target": target})
-		res := model.PortForwardProbeResult{PortForwardID: rule.ID, Mode: "sampled", Available: err == nil, LatencyMS: latency.Milliseconds(), SampleCount: 1, ResultJSON: details}
-		if err != nil {
-			res.Error = err.Error()
-		}
-		go r.reportForwardProbe(context.Background(), res)
-	}
-	if err != nil {
-		return
-	}
-	defer dst.Close()
-	if len(trustedPreface) > 0 {
-		if err := writeTrustedForward(dst, trustedPreface); err != nil {
-			return
-		}
-	}
-	go func() { _, _ = io.Copy(dst, src); _ = dst.Close() }()
-	_, _ = io.Copy(src, dst)
-}
-
-func shouldSample(rate float64) bool {
-	if rate <= 0 {
-		return false
-	}
-	if rate >= 1 {
-		return true
-	}
-	var raw [8]byte
-	if _, err := rand.Read(raw[:]); err != nil {
-		return false
-	}
-	value := binary.BigEndian.Uint64(raw[:]) >> 11
-	return float64(value)/float64(uint64(1)<<53) < rate
 }
 
 func (r *Runner) setForwardProbeRules(rules []forwardRule) {
@@ -860,9 +495,6 @@ func (r *Runner) probeForward(rule model.PortForward, mode string) model.PortFor
 }
 
 func probeForwardAt(rule model.PortForward, mode string, now func() time.Time) model.PortForwardProbeResult {
-	if rule.TrustedForward != nil {
-		return probeTrustedForwardAt(rule, mode, now)
-	}
 	res := model.PortForwardProbeResult{PortForwardID: rule.ID, Mode: mode, ResultJSON: "{}"}
 	if rule.Protocol == model.ForwardProtocolUDP {
 		listenerOK, listenerErr := udpPortBound(rule.ListenIP, rule.ListenPort)
@@ -1134,115 +766,4 @@ func generateRealmConfig(rules []forwardRule) (string, error) {
 		b.WriteString(fmt.Sprintf("remote = %q\n\n", net.JoinHostPort(rule.TargetAddress, fmt.Sprint(rule.TargetPort))))
 	}
 	return b.String(), nil
-}
-
-func (r *Runner) applyNFTForwards(rules []forwardRule, result *forwardApplyResult) error {
-	if runtime.GOOS != "linux" {
-		if len(rules) == 0 {
-			return nil
-		}
-		return errors.New("nft backend is only supported on Linux")
-	}
-	if len(rules) == 0 {
-		_ = runCommand(r.commandTimeout(), "nft", "delete", "table", "inet", nftTableName)
-		return nil
-	}
-	if result != nil && !linuxIPForwardEnabled() {
-		result.Warnings = append(result.Warnings, "Linux ip_forward is disabled; nft DNAT rules may not forward routed traffic until sysctl net.ipv4.ip_forward=1 is enabled")
-	}
-	config, err := generateNFTConfig(rules)
-	if err != nil {
-		return err
-	}
-	path := filepath.Join(r.stateDir(), nftConfigFile)
-	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
-		return err
-	}
-	_ = runCommand(r.commandTimeout(), "nft", "delete", "table", "inet", nftTableName)
-	return runCommand(r.commandTimeout(), "nft", "-f", path)
-}
-
-func generateNFTConfig(rules []forwardRule) (string, error) {
-	var b strings.Builder
-	b.WriteString("#!/usr/sbin/nft -f\n")
-	b.WriteString("# Generated by OBoard Agent. It owns only table inet oboard_forward.\n")
-	b.WriteString("table inet ")
-	b.WriteString(nftTableName)
-	b.WriteString(" {\n")
-	b.WriteString("  chain prerouting {\n")
-	b.WriteString("    type nat hook prerouting priority dstnat; policy accept;\n")
-	for _, rule := range rules {
-		lines, err := nftRuleLines(rule)
-		if err != nil {
-			return "", err
-		}
-		for _, line := range lines {
-			b.WriteString("    ")
-			b.WriteString(line)
-			b.WriteByte('\n')
-		}
-	}
-	b.WriteString("  }\n")
-	b.WriteString("  chain postrouting {\n")
-	b.WriteString("    type nat hook postrouting priority srcnat; policy accept;\n")
-	b.WriteString("    masquerade\n")
-	b.WriteString("  }\n")
-	b.WriteString("}\n")
-	return b.String(), nil
-}
-
-func nftRuleLines(rule forwardRule) ([]string, error) {
-	target, err := netip.ParseAddr(strings.Trim(rule.TargetAddress, "[]"))
-	if err != nil {
-		return nil, fmt.Errorf("nft backend requires target_address to be an IP address for rule %q: %w", rule.Name, err)
-	}
-	family := "ip"
-	if target.Is6() {
-		family = "ip6"
-	}
-	daddr := ""
-	if listenValue := strings.TrimSpace(rule.ListenIP); listenValue != "" {
-		listen, err := netip.ParseAddr(strings.Trim(listenValue, "[]"))
-		if err != nil {
-			return nil, fmt.Errorf("invalid nft listen_ip for rule %q: %w", rule.Name, err)
-		}
-		// Wildcard listens match both families: inet-table DNAT translates
-		// between families, so one rule without daddr serves IPv4 and IPv6.
-		// Specific listens keep the same-family requirement because nft
-		// rejects a family daddr match combined with an other-family DNAT.
-		if !listen.IsUnspecified() {
-			if listen.Is6() != target.Is6() {
-				return nil, fmt.Errorf("nft listen_ip and target_address IP family differ for rule %q", rule.Name)
-			}
-			daddr = fmt.Sprintf("%s daddr %s ", family, listen.String())
-		}
-	}
-	var protocols []string
-	switch rule.Protocol {
-	case model.ForwardProtocolTCP:
-		protocols = []string{"tcp"}
-	case model.ForwardProtocolUDP:
-		protocols = []string{"udp"}
-	case model.ForwardProtocolTCPUDP:
-		protocols = []string{"tcp", "udp"}
-	default:
-		return nil, fmt.Errorf("unsupported forward protocol %q", rule.Protocol)
-	}
-	out := make([]string, 0, len(protocols))
-	for _, proto := range protocols {
-		out = append(out, fmt.Sprintf("%s%s dport %d dnat %s to %s", daddr, proto, rule.ListenPort, family, nftDNATTarget(target, rule.TargetPort)))
-	}
-	return out, nil
-}
-
-func nftDNATTarget(addr netip.Addr, port int) string {
-	if addr.Is6() {
-		return fmt.Sprintf("[%s]:%d", addr.String(), port)
-	}
-	return fmt.Sprintf("%s:%d", addr.String(), port)
-}
-
-func linuxIPForwardEnabled() bool {
-	b, err := os.ReadFile("/proc/sys/net/ipv4/ip_forward")
-	return err == nil && strings.TrimSpace(string(b)) == "1"
 }

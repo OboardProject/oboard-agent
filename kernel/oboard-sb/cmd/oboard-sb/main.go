@@ -21,7 +21,7 @@ import (
 	C "github.com/sagernet/sing-box/constant"
 )
 
-var kernelCapabilities = []string{"trusted_forward_v1", "outbound_egress_probe_v1", "outbound_relay_v1", "route_relay_v1", "runtime_clock_v1", "connection_presence_v1", "family_selector_v1", "traffic_ledger", "runtime_config_digest_v1", "runtime_build_identity_v1"}
+var kernelCapabilities = []string{"outbound_egress_probe_v1", "outbound_relay_v1", "route_relay_v1", "runtime_clock_v1", "connection_presence_v1", "family_selector_v1", "traffic_ledger", "runtime_config_digest_v1", "runtime_build_identity_v1"}
 
 // runtimeConfigState is the payload-free identity of the configuration this
 // process actually loaded. Agent compares it with the desired configuration so
@@ -108,13 +108,7 @@ func main() {
 	if err := b.Start(); err != nil {
 		log.Fatal(err)
 	}
-	trustedForward, err := minibox.StartTrustedForwardReceivers(ctx, runtimeMetadata.TrustedForward, tracker)
-	if err != nil {
-		_ = b.Close()
-		log.Fatal(err)
-	}
 	<-ctx.Done()
-	_ = trustedForward.Close()
 	if err := b.Close(); err != nil {
 		log.Println(err)
 	}

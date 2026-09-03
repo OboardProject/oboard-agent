@@ -814,54 +814,25 @@ Payload is `PortForwardPlan`:
       "target_address": "203.0.113.20",
       "target_port": 443,
       "protocol": "tcp",
-      "backend": "auto",
+      "backend": "realm",
       "probe_mode": "periodic",
       "probe_interval_seconds": 300,
-      "sample_rate": 0,
       "priority": 100,
       "config_json": "{}",
-      "trusted_forward": {
-        "version": 1,
-        "receiver_id": "proxy-path-7-step-9",
-        "key": "base64-encoded-32-byte-key",
-        "max_clock_skew_seconds": 120
-      },
       "enabled": true
     }
   ]
 }
 ```
 
-Agent backend selection:
-
-- `realm`: requires `realm` binary.
-- `nft`: Linux + root + `nft` binary.
-- `builtin`: built-in TCP and UDP forwarder.
-- `auto`: chooses `realm`, then `nft`, then `builtin`.
+`backend` accepts only `realm`; an empty value normalizes to `realm`. The
+source server must provide the `realm` binary, and a rule whose server does not
+have it fails the task instead of falling back to another implementation.
 
 `target_server_id` is optional metadata for a Controller-managed destination.
 When it is omitted, `target_address` contains the explicit external IP or
 hostname. Agent forwarding and probing always use the resolved
 `target_address:target_port` pair.
-
-`trusted_forward` is Controller-internal desired state and appears only on the
-first derived forwarding rule of a transparent proxy-path prefix. It is never
-accepted from the independent port-forward API or returned by public
-proxy-path projections. A trusted rule always uses the builtin backend.
-
-Trusted-forward v1 authenticates source metadata without decrypting the user
-protocol. A TCP connection starts with `OBTF`, version/type, Unix timestamp,
-random nonce, source IP/port, the first protocol bytes, and a 16-byte truncated
-HMAC-SHA256; later TCP bytes remain the original encrypted protocol stream.
-Every UDP datagram carries `OBU`, version/type, timestamp, session ID, monotonic
-counter, source IP/port, payload, and a 12-byte truncated HMAC-SHA256. The
-processing kernel rejects invalid keys, expired timestamps, repeated TCP
-nonces, repeated/out-of-order UDP counters, unknown versions, and unframed
-traffic. There is no legacy fallback.
-
-The key is present only in signed task payloads and is scrubbed from task/API
-views. Authenticated TCP/UDP probe frames use the same envelope and require an
-`OBTF-ACK-1` response from the receiver.
 
 Result shape:
 
@@ -870,12 +841,9 @@ Result shape:
   "message": "port forwards applied",
   "version": 1783278569,
   "applied": 1,
-  "realm_rules": 0,
-  "nft_rules": 0,
-  "builtin_rules": 1,
-  "trusted_rules": 1,
-  "capabilities": { "realm": false, "nft": true, "builtin": true, "trusted_forward_v1": true, "linux": true, "root": true },
-  "backends": { "2": "builtin" }
+  "realm_rules": 1,
+  "capabilities": { "realm": true, "linux": true, "root": true },
+  "backends": { "2": "realm" }
 }
 ```
 

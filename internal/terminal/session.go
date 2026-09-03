@@ -2,9 +2,10 @@ package terminal
 
 import (
 	"fmt"
-	"log"
 	"os"
 	"strings"
+
+	"github.com/OboardProject/oboard-agent/internal/logging"
 )
 
 type Mode string
@@ -189,5 +190,5 @@ func logHomeFallback(home string) {
 	if home == "" {
 		home = "(empty)"
 	}
-	log.Printf("terminal home unavailable, fallback to / path=%s", home)
+	logging.Warnf("terminal home unavailable, fallback to / path=%s", home)
 }

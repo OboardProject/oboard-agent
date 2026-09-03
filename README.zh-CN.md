@@ -8,7 +8,7 @@ OBoard-Agent 是一个负责与 Oboard 面板主控通信、配置 Oboard-sb 内
 
 - **一键接入**：通过一次性令牌注册，支持 WebSocket 通信、断线重连与任务重试
 - **代理内核**：内置 `oboard-sb` 内核，支持 VLESS、Hysteria2、AnyTLS、Shadowsocks、SOCKS5、Mieru 与 WireGuard 端点，并支持基于独立 sshd 实现的 SSH 代理支持。
-- **组网能力**：支持 WG/SSH 隧道、Realm / nft 端口转发、链式代理
+- **组网能力**：支持 WG/SSH 隧道、Realm 端口转发、链式代理
 - **资源自适应**：根据内存自动调整策略，优先保证稳定性并兼具性能，降低 OOM 风险
 - **本地运维**：提供 `obag` 查看状态、启动、停止、重启、查看 Agent / 内核日志并检查与主控的连通性
 - **探测与诊断**：支持入站、端口转发、出口 IP、MTU、DNS、时间、日志采集与证书等自动化任务

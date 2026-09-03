@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net"
 	"net/http"
 	"net/netip"
@@ -16,6 +15,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/OboardProject/oboard-agent/internal/logging"
 )
 
 const (
@@ -615,7 +616,7 @@ func (r *Runner) reportPendingConnectionAudits(ctx context.Context, state *conne
 		return err
 	}
 	if len(resp.Discarded) > 0 {
-		log.Printf("connection audit: controller discarded %d report(s), first report=%s reason=%s", len(resp.Discarded), resp.Discarded[0].ReportID, resp.Discarded[0].Reason)
+		logging.Warnf("connection audit: controller discarded %d report(s), first report=%s reason=%s", len(resp.Discarded), resp.Discarded[0].ReportID, resp.Discarded[0].Reason)
 	}
 	accepted := make(map[string]struct{}, len(resp.Accepted)+len(resp.Discarded))
 	for _, id := range resp.Accepted {

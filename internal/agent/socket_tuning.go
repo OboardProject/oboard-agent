@@ -3,12 +3,13 @@ package agent
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 	"runtime"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/OboardProject/oboard-agent/internal/logging"
 )
 
 const (
@@ -141,7 +142,7 @@ func (r *Runner) applyLowMemorySocketTuning() {
 			status.State = "permission_denied"
 			status.Error = err.Error()
 			status.RequiresHostTuning = true
-			log.Printf("socket tuning: cannot cap %s; configure it on the host: %v", item.path, err)
+			logging.Warnf("socket tuning: cannot cap %s; configure it on the host: %v", item.path, err)
 			r.writeSocketTuningStatus(status)
 			return
 		}
@@ -149,7 +150,7 @@ func (r *Runner) applyLowMemorySocketTuning() {
 	}
 	if applied {
 		status.State = "applied"
-		log.Printf("socket tuning: capped TCP auto-tuning buffers at %d bytes for low-memory node", capBytes)
+		logging.Infof("socket tuning: capped TCP auto-tuning buffers at %d bytes for low-memory node", capBytes)
 	} else {
 		status.State = "already_safe"
 	}

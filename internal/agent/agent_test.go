@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -1244,123 +1243,22 @@ func TestGenerateRealmConfig(t *testing.T) {
 	}
 }
 
-func TestGenerateNFTConfig(t *testing.T) {
-	rules := []forwardRule{{PortForward: model.PortForward{ID: 1, Name: "a-to-b", ListenPort: 443, TargetAddress: "203.0.113.2", TargetPort: 8443, Protocol: model.ForwardProtocolTCPUDP}, ResolvedBackend: model.ForwardBackendNFT}}
-	config, err := generateNFTConfig(rules)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, want := range []string{"table inet oboard_forward", "tcp dport 443 dnat ip to 203.0.113.2:8443", "udp dport 443 dnat ip to 203.0.113.2:8443", "masquerade"} {
-		if !strings.Contains(config, want) {
-			t.Fatalf("nft config missing %q:\n%s", want, config)
-		}
-	}
-	if strings.Contains(config, "daddr") {
-		t.Fatalf("wildcard listen must not emit a daddr match:\n%s", config)
-	}
-}
-
-func TestNftRuleLinesWildcardAndSpecificListen(t *testing.T) {
-	for _, tc := range []struct {
-		name        string
-		listenIP    string
-		target      string
-		wantLine    string
-		wantNoDaddr bool
-		wantError   string
-	}{
-		{name: "v6 wildcard with v4 target", listenIP: "::", target: "203.0.113.2", wantLine: "tcp dport 443 dnat ip to 203.0.113.2:8443", wantNoDaddr: true},
-		{name: "empty wildcard with v6 target", listenIP: "", target: "2001:db8::2", wantLine: "tcp dport 443 dnat ip6 to [2001:db8::2]:8443", wantNoDaddr: true},
-		{name: "specific v4 listen with v4 target", listenIP: "192.0.2.10", target: "203.0.113.2", wantLine: "ip daddr 192.0.2.10 tcp dport 443 dnat ip to 203.0.113.2:8443"},
-		{name: "specific v6 listen with v6 target", listenIP: "2001:db8::9", target: "2001:db8::2", wantLine: "ip6 daddr 2001:db8::9 tcp dport 443 dnat ip6 to [2001:db8::2]:8443"},
-		{name: "specific v4 listen with v6 target rejected", listenIP: "192.0.2.10", target: "2001:db8::2", wantError: "IP family differ"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			lines, err := nftRuleLines(forwardRule{PortForward: model.PortForward{ID: 1, Name: "rule", ListenIP: tc.listenIP, ListenPort: 443, TargetAddress: tc.target, TargetPort: 8443, Protocol: model.ForwardProtocolTCP}})
-			if tc.wantError != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.wantError) {
-					t.Fatalf("error = %v, want %q", err, tc.wantError)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(lines) != 1 || lines[0] != tc.wantLine {
-				t.Fatalf("lines = %#v, want %q", lines, tc.wantLine)
-			}
-			if tc.wantNoDaddr && strings.Contains(lines[0], "daddr") {
-				t.Fatalf("wildcard listen emitted daddr: %q", lines[0])
-			}
-		})
-	}
-}
-
 func TestResolveForwardBackends(t *testing.T) {
-	rules := []model.PortForward{{ID: 1, Name: "auto", Backend: model.ForwardBackendAuto}}
-	resolved, err := resolveForwardBackends(rules, map[string]bool{"realm": true, "nft": true})
+	rules := []model.PortForward{{ID: 1, Name: "unset", Backend: ""}, {ID: 2, Name: "realm", Backend: model.ForwardBackendRealm}}
+	resolved, err := resolveForwardBackends(rules, map[string]bool{"realm": true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resolved[0].ResolvedBackend != model.ForwardBackendRealm {
-		t.Fatalf("auto backend = %s, want realm", resolved[0].ResolvedBackend)
+	for _, rule := range resolved {
+		if rule.ResolvedBackend != model.ForwardBackendRealm {
+			t.Fatalf("rule %d backend = %s, want realm", rule.ID, rule.ResolvedBackend)
+		}
 	}
 	if _, err := resolveForwardBackends(rules, map[string]bool{}); err == nil {
-		t.Fatal("expected auto backend without capabilities to fail")
+		t.Fatal("expected a rule to fail when realm is unavailable")
 	}
-	for _, protocol := range []model.ForwardProtocol{model.ForwardProtocolTCP, model.ForwardProtocolUDP, model.ForwardProtocolTCPUDP} {
-		resolved, err := resolveForwardBackends([]model.PortForward{{ID: 2, Name: "builtin", Protocol: protocol, Backend: model.ForwardBackendBuiltin}}, map[string]bool{"builtin": true})
-		if err != nil || resolved[0].ResolvedBackend != model.ForwardBackendBuiltin {
-			t.Fatalf("builtin protocol %s: resolved=%#v err=%v", protocol, resolved, err)
-		}
-	}
-}
-
-func TestBuiltinUDPForwardPreservesSessionTraffic(t *testing.T) {
-	target, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer target.Close()
-	go func() {
-		buf := make([]byte, 2048)
-		for {
-			n, addr, err := target.ReadFromUDP(buf)
-			if err != nil {
-				return
-			}
-			_, _ = target.WriteToUDP(append([]byte("echo:"), buf[:n]...), addr)
-		}
-	}()
-
-	portProbe, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
-	if err != nil {
-		t.Fatal(err)
-	}
-	listenPort := portProbe.LocalAddr().(*net.UDPAddr).Port
-	_ = portProbe.Close()
-	r := New(Config{StateDir: t.TempDir()})
-	stop, err := r.startBuiltinForward(forwardRule{PortForward: model.PortForward{ID: 9, Name: "udp", ListenIP: "127.0.0.1", ListenPort: listenPort, TargetAddress: "127.0.0.1", TargetPort: target.LocalAddr().(*net.UDPAddr).Port, Protocol: model.ForwardProtocolUDP}, ResolvedBackend: model.ForwardBackendBuiltin})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer stop()
-	client, err := net.DialUDP("udp", nil, &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: listenPort})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer client.Close()
-	_ = client.SetDeadline(time.Now().Add(2 * time.Second))
-	if _, err := client.Write([]byte("hello")); err != nil {
-		t.Fatal(err)
-	}
-	buf := make([]byte, 64)
-	n, err := client.Read(buf)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := string(buf[:n]); got != "echo:hello" {
-		t.Fatalf("response = %q, want echo:hello", got)
+	if _, err := resolveForwardBackends([]model.PortForward{{ID: 3, Name: "nft", Backend: model.ForwardBackend("nft")}}, map[string]bool{"realm": true}); err == nil {
+		t.Fatal("expected a retired backend to be rejected")
 	}
 }
 
@@ -1370,82 +1268,20 @@ func TestApplyPortForwardsKeepsExistingRulesWhenCurrentPlanIsUnreadable(t *testi
 		t.Fatal(err)
 	}
 	r := New(Config{StateDir: stateDir})
-	stopped := false
-	r.builtinForwardStops = map[int64]func(){1: func() { stopped = true }}
 	if _, err := r.applyPortForwards(model.PortForwardPlan{}); err == nil {
 		t.Fatal("expected unreadable current plan error")
 	}
-	if stopped {
-		t.Fatal("active forwarding rule was stopped after the current plan could not be read")
-	}
-}
-
-func TestForwardHandoffSuspendsConflictingBuiltinForwardAndCanRollback(t *testing.T) {
-	stateDir := t.TempDir()
-	portProbe, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	listenPort := portProbe.Addr().(*net.TCPAddr).Port
-	_ = portProbe.Close()
-
-	r := New(Config{StateDir: stateDir})
-	plan := model.PortForwardPlan{Version: 1, Rules: []model.PortForward{{
-		ID: 1, Name: "transparent-vless", ListenIP: "127.0.0.1", ListenPort: listenPort,
-		TargetAddress: "127.0.0.1", TargetPort: listenPort + 1, Protocol: model.ForwardProtocolTCP,
-		Backend: model.ForwardBackendBuiltin, Enabled: true,
-	}}}
-	if _, err := r.applyPortForwards(plan); err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		r.forwardLifecycleMu.Lock()
-		defer r.forwardLifecycleMu.Unlock()
-		_ = r.applyResolvedForwards(nil, &forwardApplyResult{})
-	}()
-
-	r.forwardLifecycleMu.Lock()
-	handoff, err := r.suspendConflictingForwards([]byte(fmt.Sprintf(`{"inbounds":[{"type":"vless","listen":"127.0.0.1","listen_port":%d}]}`, listenPort)))
-	if err != nil {
-		r.forwardLifecycleMu.Unlock()
-		t.Fatal(err)
-	}
-	if handoff == nil || len(handoff.conflicts) != 1 || handoff.conflicts[0].ID != 1 {
-		r.forwardLifecycleMu.Unlock()
-		t.Fatalf("unexpected handoff: %#v", handoff)
-	}
-	available, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", fmt.Sprint(listenPort)))
-	if err != nil {
-		r.forwardLifecycleMu.Unlock()
-		t.Fatalf("conflicting forward still owns port %d: %v", listenPort, err)
-	}
-	_ = available.Close()
-	if err := r.rollbackForwardHandoff(handoff); err != nil {
-		r.forwardLifecycleMu.Unlock()
-		t.Fatal(err)
-	}
-	r.forwardLifecycleMu.Unlock()
-
-	blocked, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", fmt.Sprint(listenPort)))
-	if err == nil {
-		_ = blocked.Close()
-		t.Fatalf("rollback did not restore forward listener on %d", listenPort)
+	if r.forwardDesiredState != "" {
+		t.Fatal("desired state was recorded after the current plan could not be read")
 	}
 }
 
 func TestPortForwardDesiredStateSkipsVersionOnlyUpdate(t *testing.T) {
-	stateDir := t.TempDir()
-	port := availableTCPUDPPort(t)
-	r := New(Config{StateDir: stateDir})
-	plan := model.PortForwardPlan{Version: 1, Rules: []model.PortForward{{ID: 99, Name: "stable", ListenIP: "127.0.0.1", ListenPort: port, TargetAddress: "127.0.0.1", TargetPort: port + 1, Protocol: model.ForwardProtocolTCP, Backend: model.ForwardBackendBuiltin, Enabled: true}}}
+	r := New(Config{StateDir: t.TempDir()})
+	plan := model.PortForwardPlan{Version: 1}
 	if _, err := r.applyPortForwards(plan); err != nil {
 		t.Fatal(err)
 	}
-	defer func() {
-		r.forwardLifecycleMu.Lock()
-		defer r.forwardLifecycleMu.Unlock()
-		_ = r.applyResolvedForwards(nil, &forwardApplyResult{})
-	}()
 	plan.Version = 2
 	result, err := r.applyPortForwards(plan)
 	if err != nil {
@@ -1453,33 +1289,6 @@ func TestPortForwardDesiredStateSkipsVersionOnlyUpdate(t *testing.T) {
 	}
 	if !result.Unchanged {
 		t.Fatalf("version-only desired state update was applied: %#v", result)
-	}
-}
-
-func TestRestoreManagedBuiltinPortForwardsOnStartup(t *testing.T) {
-	stateDir := t.TempDir()
-	port := availableTCPUDPPort(t)
-	plan := model.PortForwardPlan{Version: 7, Rules: []model.PortForward{{ID: 77, Name: "restore", ListenIP: "127.0.0.1", ListenPort: port, TargetAddress: "127.0.0.1", TargetPort: port + 1, Protocol: model.ForwardProtocolTCP, Backend: model.ForwardBackendBuiltin, Enabled: true}}}
-	b, err := json.Marshal(plan)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(stateDir, portForwardsCurrent), b, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	r := New(Config{StateDir: stateDir})
-	if err := r.restoreManagedPortForwardsOnStartup(); err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		r.forwardLifecycleMu.Lock()
-		defer r.forwardLifecycleMu.Unlock()
-		_ = r.applyResolvedForwards(nil, &forwardApplyResult{})
-	}()
-	listener, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", fmt.Sprint(port)))
-	if err == nil {
-		_ = listener.Close()
-		t.Fatalf("restored builtin forward did not own port %d", port)
 	}
 }
 
@@ -1495,52 +1304,6 @@ func TestDesiredStateIDsIgnorePlanVersion(t *testing.T) {
 	sshTwo, _ := sshInboundDesiredStateID(model.SSHInboundPlan{Version: 2, Inbounds: []model.SSHInbound{{InboundID: 1}}})
 	if forwardOne != forwardTwo || tunnelOne != tunnelTwo || sshOne != sshTwo {
 		t.Fatal("plan desired-state IDs must ignore version fields")
-	}
-}
-
-func TestForwardHandoffCommitRemovesOnlyConflictingRules(t *testing.T) {
-	stateDir := t.TempDir()
-	r := New(Config{StateDir: stateDir})
-	listenPort := availableTCPUDPPort(t)
-	plan := model.PortForwardPlan{Version: 9, Rules: []model.PortForward{
-		{ID: 1, Name: "tcp-conflict", ListenIP: "127.0.0.1", ListenPort: listenPort, TargetAddress: "127.0.0.1", TargetPort: listenPort + 1, Protocol: model.ForwardProtocolTCP, Backend: model.ForwardBackendBuiltin, Enabled: true},
-		{ID: 2, Name: "udp-same-port", ListenIP: "127.0.0.1", ListenPort: listenPort, TargetAddress: "127.0.0.1", TargetPort: listenPort + 2, Protocol: model.ForwardProtocolUDP, Backend: model.ForwardBackendBuiltin, Enabled: true},
-	}}
-	b, err := json.Marshal(plan)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(stateDir, portForwardsCurrent), b, 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	r.forwardLifecycleMu.Lock()
-	handoff, err := r.suspendConflictingForwards([]byte(fmt.Sprintf(`{"inbounds":[{"type":"vless","listen_port":%d}]}`, listenPort)))
-	if err != nil {
-		r.forwardLifecycleMu.Unlock()
-		t.Fatal(err)
-	}
-	if err := r.commitForwardHandoff(handoff); err != nil {
-		r.forwardLifecycleMu.Unlock()
-		t.Fatal(err)
-	}
-	r.forwardLifecycleMu.Unlock()
-	defer func() {
-		r.forwardLifecycleMu.Lock()
-		defer r.forwardLifecycleMu.Unlock()
-		_ = r.applyResolvedForwards(nil, &forwardApplyResult{})
-	}()
-
-	stored, err := os.ReadFile(filepath.Join(stateDir, portForwardsCurrent))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var current model.PortForwardPlan
-	if err := json.Unmarshal(stored, &current); err != nil {
-		t.Fatal(err)
-	}
-	if len(current.Rules) != 1 || current.Rules[0].ID != 2 {
-		t.Fatalf("retained rules = %#v, want only UDP rule 2", current.Rules)
 	}
 }
 
@@ -1571,25 +1334,6 @@ func TestInboundListenEndpointsMatchForwardTransports(t *testing.T) {
 			}
 		})
 	}
-}
-
-func availableTCPUDPPort(t *testing.T) int {
-	t.Helper()
-	for attempt := 0; attempt < 20; attempt++ {
-		tcp, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			t.Fatal(err)
-		}
-		port := tcp.Addr().(*net.TCPAddr).Port
-		udp, udpErr := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: port})
-		_ = tcp.Close()
-		if udpErr == nil {
-			_ = udp.Close()
-			return port
-		}
-	}
-	t.Fatal("could not find a port available for both TCP and UDP")
-	return 0
 }
 
 func TestValidateTunnelSetRejectsInvalidConfigBeforeApplying(t *testing.T) {
