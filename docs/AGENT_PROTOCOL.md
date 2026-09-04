@@ -302,7 +302,14 @@ observation time instead of the reconnect time.
 ```
 
 Agent polls kernel and Agent-native SSH presence once per second, assigns one
-monotonic sequence across both sources, and bounds each delta to 500 events.
+monotonic sequence across both sources, and bounds each delta to 500 events. A
+poll that drains more than one delta's worth is written as several messages in
+sequence order, so a backlog accumulated while Agent was offline never becomes a
+frame larger than the Controller websocket read limit. Events a closed
+connection did not accept keep their sequence and are retried on the next
+connection, bounded to 4,096 buffered events; events older than five minutes are
+dropped locally and counted in `dropped_count` instead of failing a later batch
+against the Controller acceptance window.
 Events are `first_authenticated`, `first_meaningful_payload`,
 `activity_refresh`, `last_connection_closed`, and `credential_rejected`.
 Controller applies `(agent_id, seq)` idempotently, validates accounting
