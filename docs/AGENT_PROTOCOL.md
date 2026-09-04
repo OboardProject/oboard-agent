@@ -1454,6 +1454,13 @@ a report that sets only one of the two encrypted fields to zero, and one that
 carries encrypted items while naming no encrypted list. Such a report succeeds
 on a usable bootstrap group alone.
 
+When a bound group yields no usable resolver, both sides use the byte-identical
+sentinel `both encrypted and bootstrap dns groups require at least one usable
+candidate`. Controller matches that exact string to fall the server back to
+local DNS, so it must never be reworded for display; the panel localizes it per
+policy and a plain-only server is told only its bootstrap list has no usable
+resolver.
+
 ### `POST /api/v1/agent/mtu-detections`
 
 Agent-authenticated.

@@ -119,14 +119,12 @@ func (r *Runner) runDNSBenchmarkTask(ctx context.Context, plan model.DNSBenchmar
 		Encrypted:             model.DNSBenchmarkGroup{Items: encryptedItems, BestTags: benchmarkTags(encryptedBest)},
 		Bootstrap:             model.DNSBenchmarkGroup{Items: bootstrapItems, BestTags: benchmarkTags(bootstrapBest)},
 	}
-	switch {
-	case len(bootstrapBest) == 0:
+	// Both failure shapes report the same wire sentinel so Controller keeps
+	// recognizing them and falls the server back to local DNS.
+	if len(bootstrapBest) == 0 || (!plainOnly && len(encryptedBest) == 0) {
 		result.Status = "failed"
-		result.Error = "bootstrap dns group requires at least one usable candidate"
-	case !plainOnly && len(encryptedBest) == 0:
-		result.Status = "failed"
-		result.Error = "both encrypted and bootstrap dns groups require at least one usable candidate"
-	default:
+		result.Error = model.DNSBenchmarkNoUsableCandidatesError
+	} else {
 		result.Status = "succeeded"
 	}
 

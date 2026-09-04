@@ -545,6 +545,13 @@ type DNSBenchmarkGroup struct {
 	BestTags []string           `json:"best_tags"`
 }
 
+// DNSBenchmarkNoUsableCandidatesError is the shared marker for a benchmark that
+// produced no usable resolver in a bound group. Controller matches this exact
+// string to fall the server back to local DNS, so it is a wire sentinel rather
+// than a message: it must stay byte-identical to the Controller constant and
+// must never be reworded for display. The panel localizes it per policy.
+const DNSBenchmarkNoUsableCandidatesError = "both encrypted and bootstrap dns groups require at least one usable candidate"
+
 type MTUDetectionMethod struct {
 	Name      string `json:"name"`
 	Available bool   `json:"available"`

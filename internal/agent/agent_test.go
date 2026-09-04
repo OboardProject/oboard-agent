@@ -1271,6 +1271,16 @@ func TestDNSBenchmarkFailsWhenStateCannotBeRead(t *testing.T) {
 	}
 }
 
+// Controller matches this exact string to fall a server back to local DNS, so a
+// reworded Agent message would silently disable that fallback. Keep the literal
+// pinned on both sides of the wire.
+func TestDNSBenchmarkNoUsableCandidatesSentinelIsPinned(t *testing.T) {
+	const controllerConstant = "both encrypted and bootstrap dns groups require at least one usable candidate"
+	if model.DNSBenchmarkNoUsableCandidatesError != controllerConstant {
+		t.Fatalf("sentinel = %q, want the Controller model constant %q", model.DNSBenchmarkNoUsableCandidatesError, controllerConstant)
+	}
+}
+
 func TestDNSBenchmarkAcceptsPlanWithoutEncryptedGroup(t *testing.T) {
 	dir := t.TempDir()
 	r := New(Config{StateDir: dir, RestartCommand: "none", ResourceProfile: "large"})
