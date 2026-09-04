@@ -26,6 +26,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
+	"github.com/OboardProject/oboard-agent/internal/logging"
 	"github.com/OboardProject/oboard-agent/internal/model"
 )
 
@@ -34,6 +35,8 @@ const (
 	sshInboundsLastGood = "ssh-inbounds.last-good.json"
 	sshInboundHostKey   = "ssh-inbounds-host-key"
 	sshInboundIOChunk   = 32 << 10
+
+	sshInboundPolicyRetryInterval = 15 * time.Second
 )
 
 var (
@@ -210,12 +213,12 @@ func liveSSHInboundFingerprints(manager *sshInboundManager) map[int64]string {
 }
 
 type sshDriftCheck struct {
-	NoDrift        bool
-	ListenerDrift  bool
+	NoDrift         bool
+	ListenerDrift   bool
 	CredentialDrift bool
-	PolicyDrift    bool
-	Missing        []int64
-	Extra          []int64
+	PolicyDrift     bool
+	Missing         []int64
+	Extra           []int64
 }
 
 func (m *sshInboundManager) checkDrift(plan model.SSHInboundPlan) sshDriftCheck {
@@ -664,14 +667,67 @@ func (r *Runner) restoreManagedSSHInboundsOnStartup() error {
 	}
 	r.sshInboundDesiredState = desiredState
 	if err := r.reconcileSSHAndCoreTrafficPolicies(context.Background(), plan); err != nil {
-		old := r.swapSSHInboundManager(nil)
-		if old != nil {
-			old.close()
-		}
-		r.sshInboundDesiredState = ""
-		return err
+		// The listeners are already serving authorized users; only the shared
+		// kernel quota lease is behind, and on startup the core has usually not
+		// finished starting yet. Closing the manager here would take every
+		// restricted SSH user offline until the next deployment, so keep it
+		// running and converge the lease once the core API answers.
+		pending := plan
+		r.sshInboundPendingPolicyPlan = &pending
+		logging.Warnf("SSH inbounds restored, shared core/SSH quota lease reconcile deferred: %v", err)
 	}
 	return nil
+}
+
+// retrySSHInboundPolicyReconcile converges a startup quota lease reconcile that
+// was deferred because the core API was unreachable. It reports whether work is
+// still pending.
+func (r *Runner) retrySSHInboundPolicyReconcile(ctx context.Context) (bool, error) {
+	r.sshInboundLifecycleMu.Lock()
+	defer r.sshInboundLifecycleMu.Unlock()
+	plan := r.sshInboundPendingPolicyPlan
+	if plan == nil {
+		return false, nil
+	}
+	desiredState, err := sshInboundDesiredStateID(*plan)
+	if err != nil || desiredState != r.sshInboundDesiredState {
+		// A deployment already replaced this plan and ran its own reconcile.
+		r.sshInboundPendingPolicyPlan = nil
+		return false, nil
+	}
+	if err := r.reconcileSSHAndCoreTrafficPolicies(ctx, *plan); err != nil {
+		return true, err
+	}
+	r.sshInboundPendingPolicyPlan = nil
+	logging.Infof("SSH inbounds: deferred shared core/SSH quota lease reconcile succeeded")
+	return false, nil
+}
+
+func (r *Runner) sshInboundPolicyReconcilePending() bool {
+	r.sshInboundLifecycleMu.Lock()
+	defer r.sshInboundLifecycleMu.Unlock()
+	return r.sshInboundPendingPolicyPlan != nil
+}
+
+func (r *Runner) startSSHInboundPolicyReconciler(ctx context.Context) {
+	ticker := time.NewTicker(sshInboundPolicyRetryInterval)
+	defer ticker.Stop()
+	attempts := 0
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			pending, err := r.retrySSHInboundPolicyReconcile(ctx)
+			if !pending {
+				return
+			}
+			attempts++
+			if attempts%20 == 0 {
+				logging.Warnf("SSH inbounds: shared core/SSH quota lease reconcile still failing after %d attempts: %v", attempts, err)
+			}
+		}
+	}
 }
 
 func (r *Runner) validateSSHInboundServerIDs(plan model.SSHInboundPlan) error {

@@ -372,7 +372,10 @@ func checkManagementController(cfg Config) managementCheckResult {
 	} else if healthURL.Scheme == "wss" {
 		healthURL.Scheme = "https"
 	}
-	healthURL.Path = "/healthz"
+	// The controller answers 404 outside its base path, so keep the configured
+	// prefix instead of probing the host root.
+	healthURL.Path = strings.TrimRight(healthURL.Path, "/") + "/healthz"
+	healthURL.RawPath = ""
 	healthURL.RawQuery = ""
 	healthURL.Fragment = ""
 	httpCtx, cancelHTTP := context.WithTimeout(context.Background(), 8*time.Second)

@@ -61,3 +61,20 @@ func TestDisplayControllerURLRemovesSensitiveParts(t *testing.T) {
 		t.Fatalf("display URL = %q", got)
 	}
 }
+
+func TestManagementControllerCheckKeepsBasePath(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Controller answers 404 for every path outside its base path.
+		if r.URL.Path != "/qzq/healthz" {
+			http.NotFound(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	result := checkManagementController(Config{ControllerURL: server.URL + "/qzq"})
+	if !result.OK {
+		t.Fatalf("base path health check failed: %#v", result.Items)
+	}
+}

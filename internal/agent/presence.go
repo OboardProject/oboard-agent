@@ -14,6 +14,20 @@ import (
 const connectionPresencePollInterval = time.Second
 const connectionPresenceCapability = "connection_presence_v1"
 
+// Controller rejects a delta carrying more than 500 events and closes the
+// websocket once a frame passes its 1 MiB read limit, so one poll is written as
+// several contract-sized messages instead of a single oversized frame.
+const connectionPresenceDeltaBatchSize = 500
+
+// Undelivered events are kept for another connection, bounded so a long outage
+// cannot grow the buffer without limit on a small node.
+const maxPendingPresenceEvents = 4096
+
+// Controller rejects an event whose observation time left its acceptance
+// window, and one rejected event fails the whole delta. Expired events are
+// dropped locally before they can poison a later batch.
+const connectionPresenceEventMaxAge = 5 * time.Minute
+
 type connectionPresenceDelta struct {
 	Events       []connectionPresenceEvent `json:"events"`
 	DroppedCount int64                     `json:"dropped_count"`
@@ -37,6 +51,7 @@ type coreConnectionPresenceEvent struct {
 
 func (r *Runner) collectConnectionPresenceDelta(ctx context.Context) (connectionPresenceDelta, error) {
 	if !r.Config().ConnectionAuditEnabled {
+		r.discardPendingPresenceEvents()
 		return connectionPresenceDelta{}, nil
 	}
 	events, dropped := r.connectionAudit.drainPresenceEvents()
@@ -48,7 +63,88 @@ func (r *Runner) collectConnectionPresenceDelta(ctx context.Context) (connection
 		events[index].Sequence = r.nextConnectionPresenceSequence()
 		events[index].ServerID = serverID
 	}
-	return connectionPresenceDelta{Events: events, DroppedCount: dropped}, coreErr
+	// Events a previous connection could not deliver keep their original
+	// sequence, so they stay ahead of the freshly drained ones.
+	pending, pendingDropped := r.takePendingPresenceEvents()
+	if len(pending) > 0 {
+		events = append(pending, events...)
+	}
+	dropped += pendingDropped
+	kept, expired := dropExpiredPresenceEvents(events, time.Now().UTC())
+	return connectionPresenceDelta{Events: kept, DroppedCount: dropped + expired}, coreErr
+}
+
+// sendConnectionPresenceDelta writes one poll result as contract-sized
+// messages. Whatever the connection did not accept is requeued so a dropped
+// link costs a reconnect instead of the presence coverage itself.
+func (r *Runner) sendConnectionPresenceDelta(delta connectionPresenceDelta, writeMessage func(payload any, wait bool) error) error {
+	events := delta.Events
+	dropped := delta.DroppedCount
+	for {
+		chunk := events
+		if len(chunk) > connectionPresenceDeltaBatchSize {
+			chunk = chunk[:connectionPresenceDeltaBatchSize]
+		}
+		batch := connectionPresenceDelta{Events: chunk, DroppedCount: dropped}
+		if err := writeMessage(map[string]any{"type": "presence_delta", "presence_delta": batch}, true); err != nil {
+			r.requeuePresenceEvents(events, dropped)
+			return err
+		}
+		// The dropped counter describes the poll, not the chunk, so it is
+		// reported once.
+		dropped = 0
+		events = events[len(chunk):]
+		if len(events) == 0 {
+			return nil
+		}
+	}
+}
+
+func dropExpiredPresenceEvents(events []connectionPresenceEvent, now time.Time) ([]connectionPresenceEvent, int64) {
+	kept := events[:0]
+	expired := int64(0)
+	for _, event := range events {
+		at, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(event.At))
+		if err != nil || now.Sub(at) > connectionPresenceEventMaxAge {
+			expired++
+			continue
+		}
+		kept = append(kept, event)
+	}
+	return kept, expired
+}
+
+func (r *Runner) takePendingPresenceEvents() ([]connectionPresenceEvent, int64) {
+	r.presencePendingMu.Lock()
+	defer r.presencePendingMu.Unlock()
+	events, dropped := r.presencePendingEvents, r.presencePendingDropped
+	r.presencePendingEvents, r.presencePendingDropped = nil, 0
+	return events, dropped
+}
+
+func (r *Runner) requeuePresenceEvents(events []connectionPresenceEvent, dropped int64) {
+	if len(events) == 0 && dropped == 0 {
+		return
+	}
+	r.presencePendingMu.Lock()
+	defer r.presencePendingMu.Unlock()
+	merged := make([]connectionPresenceEvent, 0, len(events)+len(r.presencePendingEvents))
+	merged = append(merged, events...)
+	merged = append(merged, r.presencePendingEvents...)
+	r.presencePendingDropped += dropped
+	if overflow := len(merged) - maxPendingPresenceEvents; overflow > 0 {
+		// Presence is state-like: the newest events describe the current
+		// sessions best, so the oldest ones are the ones to lose.
+		r.presencePendingDropped += int64(overflow)
+		merged = merged[overflow:]
+	}
+	r.presencePendingEvents = merged
+}
+
+func (r *Runner) discardPendingPresenceEvents() {
+	r.presencePendingMu.Lock()
+	r.presencePendingEvents, r.presencePendingDropped = nil, 0
+	r.presencePendingMu.Unlock()
 }
 
 func (r *Runner) coreConnectionPresenceEvents(ctx context.Context) ([]connectionPresenceEvent, int64, error) {

@@ -66,87 +66,91 @@ type Config struct {
 }
 
 type Runner struct {
-	config                     atomic.Pointer[Config]
-	client                     *http.Client
-	coreClient                 *http.Client
-	mu                         sync.Mutex
-	probeMu                    sync.Mutex
-	trafficMu                  sync.Mutex
-	connectionAuditMu          sync.Mutex
-	latencyProbeMu             sync.Mutex
-	metricReportMu             sync.Mutex
-	connectionAuditCoreMu      sync.Mutex
-	deploymentMu               sync.Mutex
-	sshInboundLifecycleMu      sync.Mutex
-	tunnelLifecycleMu          sync.Mutex
-	coreLifecycleMu            sync.Mutex
-	forwardLifecycleMu         sync.Mutex
-	logMu                      sync.Mutex
-	trafficHealthMu            sync.Mutex
-	trafficReportFailures      int
-	trafficReportFailingSince  time.Time
-	trafficReportLastLoggedAt  time.Time
-	logDir                     string
-	logMaintenanceEvery        time.Duration
-	trafficState               trafficLocalState
-	trafficStateLoaded         bool
-	connectionAuditState       connectionAuditLocalState
-	connectionAuditStateLoaded bool
-	latencyProbeState          latencyProbeLocalState
-	latencyProbeStateLoaded    bool
-	metricReportState          metricReportLocalState
-	metricReportStateLoaded    bool
-	metricReportWake           chan struct{}
-	connectionAudit            *connectionAuditAccumulator
-	connectionAuditCoreKnown   bool
-	connectionAuditCoreEnabled bool
-	presenceCapabilityKnown    bool
-	presenceCapabilityEnabled  bool
-	presenceSequence           atomic.Uint64
-	lastProbe                  model.HealthReport
-	lastProbeAt                time.Time
-	lastLocalMetricsAt         time.Time
-	lastPublicIPAt             time.Time
-	lastPublicIPv4             string
-	lastPublicIPv6             string
-	lastRegionCode             string
-	lastCoreVersion            string
-	lastKernelCapabilities     []string
-	lastCoreVersionAt          time.Time
-	hostInfo                   hostStaticInfo
-	lastCPUSample              procCPU
-	lastNetworkSample          networkCounterSample
-	monitoringMode             string
-	coreBinaryCache            string
-	coreServiceCache           string
-	coreBinaryIdentityMu       sync.Mutex
-	coreBinaryIdentity         coreBinaryIdentityCache
-	forwardProbeRules          []model.PortForward
-	lastForwardProbe           map[int64]time.Time
-	clock                      *runtimeClock
-	controllerClockMu          sync.RWMutex
-	controllerReference        time.Time
-	controllerReferenceAnchor  time.Time
-	resources                  ResourceInfo
-	tuning                     RuntimeTuning
-	sshInboundManager          *sshInboundManager
-	sshOutboundRelayDial       outboundRelayDialFunc
-	sshRouteRelayDial          routeRelayDialFunc
-	forwardDesiredState        string
-	tunnelDesiredState         string
-	sshInboundDesiredState     string
-	remoteExecMu               sync.Mutex
-	remoteExecRuns             map[string]*remoteExecRun
-	remoteExecLog              *remoteExecJournal
-	interactiveMu              sync.Mutex
-	terminalSessions           map[string]*terminalSession
-	interactiveNonces          map[string]time.Time
-	controlMu                  sync.Mutex
-	controlSend                func(payload any, wait bool) error
-	agentRestartScheduled      atomic.Bool
-	agentRestartCommand        func() error
-	controllerLinkMu           sync.Mutex
-	controllerLink             controllerLinkDiagnostics
+	config                      atomic.Pointer[Config]
+	client                      *http.Client
+	coreClient                  *http.Client
+	mu                          sync.Mutex
+	probeMu                     sync.Mutex
+	trafficMu                   sync.Mutex
+	connectionAuditMu           sync.Mutex
+	latencyProbeMu              sync.Mutex
+	metricReportMu              sync.Mutex
+	connectionAuditCoreMu       sync.Mutex
+	deploymentMu                sync.Mutex
+	sshInboundLifecycleMu       sync.Mutex
+	tunnelLifecycleMu           sync.Mutex
+	coreLifecycleMu             sync.Mutex
+	forwardLifecycleMu          sync.Mutex
+	logMu                       sync.Mutex
+	trafficHealthMu             sync.Mutex
+	trafficReportFailures       int
+	trafficReportFailingSince   time.Time
+	trafficReportLastLoggedAt   time.Time
+	logDir                      string
+	logMaintenanceEvery         time.Duration
+	trafficState                trafficLocalState
+	trafficStateLoaded          bool
+	connectionAuditState        connectionAuditLocalState
+	connectionAuditStateLoaded  bool
+	latencyProbeState           latencyProbeLocalState
+	latencyProbeStateLoaded     bool
+	metricReportState           metricReportLocalState
+	metricReportStateLoaded     bool
+	metricReportWake            chan struct{}
+	connectionAudit             *connectionAuditAccumulator
+	connectionAuditCoreKnown    bool
+	connectionAuditCoreEnabled  bool
+	presenceCapabilityKnown     bool
+	presenceCapabilityEnabled   bool
+	presenceSequence            atomic.Uint64
+	presencePendingMu           sync.Mutex
+	presencePendingEvents       []connectionPresenceEvent
+	presencePendingDropped      int64
+	lastProbe                   model.HealthReport
+	lastProbeAt                 time.Time
+	lastLocalMetricsAt          time.Time
+	lastPublicIPAt              time.Time
+	lastPublicIPv4              string
+	lastPublicIPv6              string
+	lastRegionCode              string
+	lastCoreVersion             string
+	lastKernelCapabilities      []string
+	lastCoreVersionAt           time.Time
+	hostInfo                    hostStaticInfo
+	lastCPUSample               procCPU
+	lastNetworkSample           networkCounterSample
+	monitoringMode              string
+	coreBinaryCache             string
+	coreServiceCache            string
+	coreBinaryIdentityMu        sync.Mutex
+	coreBinaryIdentity          coreBinaryIdentityCache
+	forwardProbeRules           []model.PortForward
+	lastForwardProbe            map[int64]time.Time
+	clock                       *runtimeClock
+	controllerClockMu           sync.RWMutex
+	controllerReference         time.Time
+	controllerReferenceAnchor   time.Time
+	resources                   ResourceInfo
+	tuning                      RuntimeTuning
+	sshInboundManager           *sshInboundManager
+	sshOutboundRelayDial        outboundRelayDialFunc
+	sshRouteRelayDial           routeRelayDialFunc
+	forwardDesiredState         string
+	tunnelDesiredState          string
+	sshInboundDesiredState      string
+	sshInboundPendingPolicyPlan *model.SSHInboundPlan
+	remoteExecMu                sync.Mutex
+	remoteExecRuns              map[string]*remoteExecRun
+	remoteExecLog               *remoteExecJournal
+	interactiveMu               sync.Mutex
+	terminalSessions            map[string]*terminalSession
+	interactiveNonces           map[string]time.Time
+	controlMu                   sync.Mutex
+	controlSend                 func(payload any, wait bool) error
+	agentRestartScheduled       atomic.Bool
+	agentRestartCommand         func() error
+	controllerLinkMu            sync.Mutex
+	controllerLink              controllerLinkDiagnostics
 }
 
 const (
@@ -602,6 +606,9 @@ func (r *Runner) Run(ctx context.Context) error {
 	if err := r.restoreManagedSSHInboundsOnStartup(); err != nil {
 		logging.Errorf("restore managed SSH inbounds: %v", err)
 	}
+	if r.sshInboundPolicyReconcilePending() {
+		go r.startSSHInboundPolicyReconciler(ctx)
+	}
 	if err := r.restoreTrafficRuntimePolicies(ctx); err != nil {
 		logging.Errorf("restore traffic runtime policies: %v", err)
 	}
@@ -819,7 +826,7 @@ func (r *Runner) connect(ctx context.Context) error {
 				if len(delta.Events) == 0 && delta.DroppedCount == 0 {
 					continue
 				}
-				if writeMessage(map[string]any{"type": "presence_delta", "presence_delta": delta}, false) != nil {
+				if r.sendConnectionPresenceDelta(delta, writeMessage) != nil {
 					return
 				}
 			}

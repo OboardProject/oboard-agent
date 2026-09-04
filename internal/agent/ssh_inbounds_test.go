@@ -540,3 +540,58 @@ func TestDialSSHRelayAddressesUsesSelectedOutbound(t *testing.T) {
 		t.Fatalf("relay dial = %q %q %q", network, tag, destination)
 	}
 }
+
+func TestRestoreSSHInboundsKeepsListenersWhenCoreAPIIsDown(t *testing.T) {
+	stateDir := t.TempDir()
+	user := testSSHInboundUser(19, "alice", "correct horse battery staple")
+	reserve, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := reserve.Addr().(*net.TCPAddr).Port
+	_ = reserve.Close()
+	plan := model.SSHInboundPlan{Version: 1, Inbounds: []model.SSHInbound{{InboundID: 71, ServerID: 1, Name: "restricted", ListenIP: "127.0.0.1", Port: port, Enabled: true, Users: []model.SSHInboundUser{user}}}}
+	encoded, err := json.MarshalIndent(plan, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, sshInboundsCurrent), encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The node also runs kernel inbounds, so restore has a core lease to push.
+	coreConfig := `{"_oboard":{"rate_limits":{"users":{"bob":{"user_id":7,"billable":true,"lease_enforced":true,"lease_bytes":100}}}}}`
+	if err := os.WriteFile(filepath.Join(stateDir, "sing-box.json"), []byte(coreConfig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	coreUp := false
+	runner := New(Config{StateDir: stateDir})
+	runner.coreClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if strings.Contains(req.URL.Path, "/traffic/policy") && !coreUp {
+			return nil, fmt.Errorf("dial unix /run/oboard-sb.sock: connect: no such file or directory")
+		}
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"capabilities":["route_relay_v1"]}`)), Header: make(http.Header)}, nil
+	})}
+	defer func() { _, _ = runner.applySSHInbounds(model.SSHInboundPlan{Version: 2}) }()
+
+	if err := runner.restoreManagedSSHInboundsOnStartup(); err != nil {
+		t.Fatalf("startup restore failed while the core API was unreachable: %v", err)
+	}
+	if !runner.sshInboundPolicyReconcilePending() {
+		t.Fatal("deferred quota lease reconcile was not recorded")
+	}
+	client, err := ssh.Dial("tcp", net.JoinHostPort("127.0.0.1", fmt.Sprint(port)), &ssh.ClientConfig{User: user.Username, Auth: []ssh.AuthMethod{ssh.Password(user.Password)}, HostKeyCallback: ssh.InsecureIgnoreHostKey()})
+	if err != nil {
+		t.Fatalf("restricted SSH user lost access after a restart without the core: %v", err)
+	}
+	_ = client.Close()
+
+	coreUp = true
+	pending, err := runner.retrySSHInboundPolicyReconcile(t.Context())
+	if err != nil || pending {
+		t.Fatalf("deferred reconcile did not converge: pending=%v err=%v", pending, err)
+	}
+	if runner.sshInboundPolicyReconcilePending() {
+		t.Fatal("deferred reconcile stayed pending after it succeeded")
+	}
+}
