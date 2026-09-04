@@ -75,6 +75,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          args=(release create "v${{ steps.meta.outputs.version }}" dist/release/oboard-agent-* dist/release/oboard-sb-* dist/release/release-manifest.json dist/release/release-manifest.json.sig dist/release/sha256sums.txt --title "OBoard Agent v${{ steps.meta.outputs.version }}" --generate-notes)
+          assets=()
+          while IFS= read -r name; do assets+=("dist/release/$name"); done < <(python3 -c 'import json;[print(f["name"]) for f in json.load(open("dist/release/release-manifest.json"))["files"]]')
+          assets+=(dist/release/release-manifest.json dist/release/release-manifest.json.sig dist/release/sha256sums.txt)
+          for asset in "${assets[@]}"; do
+            test -f "$asset" || { echo "Release asset $asset declared by the manifest is missing" >&2; exit 1; }
+          done
+          args=(release create "v${{ steps.meta.outputs.version }}" "${assets[@]}" --title "OBoard Agent v${{ steps.meta.outputs.version }}" --generate-notes)
           if [ "${{ steps.meta.outputs.prerelease }}" = true ]; then args+=(--prerelease); else args+=(--latest); fi
           gh "${args[@]}"
