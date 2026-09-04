@@ -5,11 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 )
 
 const (
+	InteractivePrepareTTL  = 60 * time.Second
 	InteractiveSignatureV1 = 1
 	InteractiveSignatureV2 = 2
+	MaxClockSkew           = 30 * time.Second
 )
 
 type InteractiveEnvelope struct {

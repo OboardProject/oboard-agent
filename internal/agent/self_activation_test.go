@@ -190,6 +190,8 @@ func TestUpdateArmsRestartWhenResultReportFails(t *testing.T) {
 	if err := os.WriteFile(installedCore, []byte("old-core"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	stateDir := t.TempDir()
+	writeCoreConfig(t, stateDir, coreConfigA)
 	original := osExecutable
 	defer func() { osExecutable = original }()
 	osExecutable = func() (string, error) { return installedAgent, nil }
@@ -269,10 +271,10 @@ func TestUpdateArmsRestartWhenResultReportFails(t *testing.T) {
 	defer server.Close()
 
 	var scheduled atomic.Int32
-	r := New(Config{ControllerURL: server.URL, AgentID: "agent-1", AgentToken: token, StateDir: t.TempDir(), CoreBinary: installedCore, AllowPanelUpdate: true, AllowInsecureController: true})
+	r := New(Config{ControllerURL: server.URL, AgentID: "agent-1", AgentToken: token, StateDir: stateDir, CoreBinary: installedCore, AllowPanelUpdate: true, AllowInsecureController: true})
 	r.agentRestartCommand = func() error { scheduled.Add(1); return nil }
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := r.connect(ctx); err == nil {
 		t.Fatal("expected the task result report to fail")

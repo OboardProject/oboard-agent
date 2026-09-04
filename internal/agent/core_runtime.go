@@ -23,8 +23,8 @@ const (
 	// file-only convergence behaviour so Agent can be upgraded first.
 	coreRuntimeDigestCapability = "runtime_config_digest_v1"
 	// coreRuntimeBuildIdentityCapability is advertised by kernels that report
-	// their own build in GET /runtime/status. Kernels without it cannot be
-	// checked for binary staleness, and are never restarted for it.
+	// their own build in GET /runtime/status. Older kernels may still be checked
+	// when their JSON GET /version response carries the same build identity.
 	coreRuntimeBuildIdentityCapability = "runtime_build_identity_v1"
 
 	coreRuntimeVerificationVerified    = "verified"
@@ -288,22 +288,14 @@ func (r *Runner) coreAPIClient() *http.Client {
 }
 
 func (r *Runner) coreKernelCapabilities(ctx context.Context) ([]string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://oboard-sb/version", nil)
+	body, err := r.coreVersionPayload(ctx)
 	if err != nil {
 		return nil, err
-	}
-	res, err := r.coreAPIClient().Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer res.Body.Close()
-	if res.StatusCode >= 300 {
-		return nil, fmt.Errorf("core version status %d", res.StatusCode)
 	}
 	var payload struct {
 		Capabilities []string `json:"capabilities"`
 	}
-	if err := json.NewDecoder(res.Body).Decode(&payload); err != nil {
+	if err := json.Unmarshal(body, &payload); err != nil {
 		return nil, err
 	}
 	return payload.Capabilities, nil
@@ -319,25 +311,44 @@ const coreVersionResponseLimit = 64 << 10
 // unhealthy and the on-disk fallback should take over quickly.
 const coreIdentityTimeout = 3 * time.Second
 
+func (r *Runner) coreVersionPayload(ctx context.Context) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://oboard-sb/version", nil)
+	if err != nil {
+		return nil, err
+	}
+	res, err := r.coreAPIClient().Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+	if res.StatusCode >= 300 {
+		return nil, fmt.Errorf("core version status %d", res.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(res.Body, coreVersionResponseLimit+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(body) > coreVersionResponseLimit {
+		return nil, errors.New("core version response exceeds limit")
+	}
+	return body, nil
+}
+
+func (r *Runner) runningCoreBuild(ctx context.Context) (coreBuildIdentity, error) {
+	body, err := r.coreVersionPayload(ctx)
+	if err != nil {
+		return coreBuildIdentity{}, err
+	}
+	return parseCoreBuildIdentity(string(body))
+}
+
 // runningCoreIdentity reports the version and capabilities of the process that
 // is actually serving traffic. The executable on disk answers a different
 // question after an upgrade — it is the build the *next* restart will start —
 // so reporting it as the node's kernel version hides a stale process behind a
 // number that looks correct.
 func (r *Runner) runningCoreIdentity(ctx context.Context) (string, []string, bool) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://oboard-sb/version", nil)
-	if err != nil {
-		return "", nil, false
-	}
-	res, err := r.coreAPIClient().Do(req)
-	if err != nil {
-		return "", nil, false
-	}
-	defer res.Body.Close()
-	if res.StatusCode >= 300 {
-		return "", nil, false
-	}
-	body, err := io.ReadAll(io.LimitReader(res.Body, coreVersionResponseLimit))
+	body, err := r.coreVersionPayload(ctx)
 	if err != nil {
 		return "", nil, false
 	}
@@ -390,12 +401,15 @@ var errCoreRuntimeStatusUnsupported = fmt.Errorf("core does not expose %s", core
 
 // resolveCoreBuildState compares the build serving traffic with the executable
 // installed on disk. Both sides must identify themselves for a verdict: a
-// kernel that predates coreRuntimeBuildIdentityCapability, or a binary Agent
-// cannot execute, leaves the state unknown and never causes a restart.
+// running kernel whose runtime-status and legacy version responses omit build
+// identity, or a binary Agent cannot execute, leaves the state unknown and
+// never causes a watchdog restart.
 func (r *Runner) resolveCoreBuildState(check *coreRuntimeCheck) {
 	check.BuildState = coreBuildStateUnknown
 	if check.RunningBuild.empty() {
-		check.BuildErr = fmt.Errorf("core does not report %s", coreRuntimeBuildIdentityCapability)
+		if check.BuildErr == nil {
+			check.BuildErr = fmt.Errorf("core does not report %s", coreRuntimeBuildIdentityCapability)
+		}
 		return
 	}
 	installed, err := r.installedCoreBuild()
@@ -438,6 +452,8 @@ func (r *Runner) checkCoreRuntimeConfig(ctx context.Context, desired []byte) cor
 	if err == errCoreRuntimeStatusUnsupported {
 		check.Verification = coreRuntimeVerificationUnsupported
 		check.Err = nil
+		check.RunningBuild, check.BuildErr = r.runningCoreBuild(ctx)
+		r.resolveCoreBuildState(&check)
 		return check
 	}
 	capabilities, capErr := r.coreKernelCapabilities(ctx)
@@ -565,6 +581,15 @@ func (r *Runner) coreRuntimeConverged(ctx context.Context) bool {
 // build: without a verdict from the process, a changed file on disk is the only
 // evidence available.
 func (r *Runner) activateInstalledCore(ctx context.Context, binaryReplaced bool) (map[string]any, error) {
+	r.coreLifecycleMu.Lock()
+	defer r.coreLifecycleMu.Unlock()
+	return r.activateInstalledCoreLocked(ctx, binaryReplaced)
+}
+
+// activateInstalledCoreLocked runs while the caller holds coreLifecycleMu.
+// update_agent keeps the lock across atomic installation and activation so the
+// watchdog cannot race the file replacement.
+func (r *Runner) activateInstalledCoreLocked(ctx context.Context, binaryReplaced bool) (map[string]any, error) {
 	result := map[string]any{}
 	if !r.managedRestartEnabled() {
 		result["core_activation"] = "unmanaged"
@@ -579,9 +604,6 @@ func (r *Runner) activateInstalledCore(ctx context.Context, binaryReplaced bool)
 		result["core_activation"] = "waiting_for_config"
 		return result, nil
 	}
-
-	r.coreLifecycleMu.Lock()
-	defer r.coreLifecycleMu.Unlock()
 
 	before := r.checkCoreRuntimeConfig(ctx, desired)
 	if running := before.RunningBuild.String(); running != "" {

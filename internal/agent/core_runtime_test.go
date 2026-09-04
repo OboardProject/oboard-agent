@@ -66,7 +66,15 @@ func newFakeCoreKernel(t *testing.T, configPath string, runtimeSupported bool) *
 		if kernel.runtimeSupported {
 			capabilities = append(capabilities, coreRuntimeDigestCapability)
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"name": "oboard-sb", "capabilities": capabilities})
+		kernel.mu.Lock()
+		build := kernel.loadedBuild
+		kernel.mu.Unlock()
+		payload := map[string]any{"name": "oboard-sb", "capabilities": capabilities}
+		if build != "" {
+			payload["version"] = "0.0.1"
+			payload["build"] = build
+		}
+		_ = json.NewEncoder(w).Encode(payload)
 	})
 	mux.HandleFunc("/runtime/status", func(w http.ResponseWriter, _ *http.Request) {
 		if !kernel.runtimeSupported {

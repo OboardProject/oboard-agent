@@ -89,13 +89,6 @@ func (r *Runner) handleInteractivePrepare(env model.InteractivePrepareEnvelope) 
 	if err != nil || expErr != nil {
 		return r.failInteractivePrepare(env.SessionID, interactiveReasonPrepareInvalid, errors.New("invalid interactive timestamps"))
 	}
-	now := time.Now().UTC()
-	if expires.Before(now) {
-		return r.failInteractivePrepare(env.SessionID, interactiveReasonPrepareInvalid, errors.New("interactive prepare expired"))
-	}
-	if issued.After(now.Add(30 * time.Second)) {
-		return r.failInteractivePrepare(env.SessionID, interactiveReasonPrepareInvalid, errors.New("interactive prepare issued in the future"))
-	}
 	secret := security.HashSecret(r.Config().AgentToken)
 	if env.SignatureVersion == security.InteractiveSignatureV2 {
 		if !security.VerifyInteractiveEnvelopeV2(secret, security.InteractiveEnvelope{
@@ -112,6 +105,9 @@ func (r *Runner) handleInteractivePrepare(env model.InteractivePrepareEnvelope) 
 			return r.failInteractivePrepare(env.SessionID, interactiveReasonPrepareInvalid, errors.New("interactive prepare signature verification failed"))
 		}
 	}
+	if err := validateInteractiveTimes(issued, expires, r.interactiveValidationNow()); err != nil {
+		return r.failInteractivePrepare(env.SessionID, interactiveReasonPrepareInvalid, err)
+	}
 	if !r.rememberInteractiveNonce(env.Nonce) {
 		return r.failInteractivePrepare(env.SessionID, interactiveReasonPrepareInvalid, errors.New("interactive prepare nonce replayed"))
 	}
@@ -127,6 +123,29 @@ func (r *Runner) handleInteractivePrepare(env model.InteractivePrepareEnvelope) 
 		return r.failInteractivePrepare(env.SessionID, interactiveReasonPrepareInvalid, err)
 	}
 	go r.runTerminalSession(env, cols, rows, mode, secret)
+	return nil
+}
+
+func (r *Runner) interactiveValidationNow() time.Time {
+	if controllerNow, ok := r.controllerReferenceNow(); ok {
+		return controllerNow.UTC()
+	}
+	if r != nil && r.clock != nil {
+		return r.clock.Now().UTC()
+	}
+	return time.Now().UTC()
+}
+
+func validateInteractiveTimes(issued, expires, now time.Time) error {
+	if !expires.After(issued) || expires.Sub(issued) > security.InteractivePrepareTTL {
+		return errors.New("invalid interactive timestamp window")
+	}
+	if !expires.After(now) {
+		return errors.New("interactive prepare expired")
+	}
+	if issued.After(now.Add(security.MaxClockSkew)) {
+		return errors.New("interactive prepare issued in the future")
+	}
 	return nil
 }
 

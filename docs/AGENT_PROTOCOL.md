@@ -701,7 +701,10 @@ GET /runtime/status
   "operational_config_sha256": "sha256-hex",
   "started_at": "2026-09-02T00:00:00Z",
   "pid": 1234,
-  "generation": 1
+  "generation": 1,
+  "version": "dev",
+  "build": "20260903180025",
+  "commit": "b6eb4e7fd405"
 }
 ```
 
@@ -713,6 +716,13 @@ canonical JSON form of the loaded configuration with the runtime-only members
 normalization, so both sides derive the same digest from the same bytes
 regardless of key order or formatting. This is the same rule that decides
 whether a change is `runtime_policy_only`.
+
+Current kernels advertise `runtime_build_identity_v1` and return their build
+identity from `/runtime/status`. For older kernels whose runtime-status endpoint
+is absent, Agent still reads the running process's JSON `/version` response and
+may compare that positive identity with the installed executable. Configuration
+verification remains `unsupported`; only a confirmed build mismatch is eligible
+for the watchdog's one-time managed recovery.
 
 Agent persists the resulting convergence state in `core-watchdog.json`
 (`desired_digest`, `loaded_digest`, `runtime_verified`,
@@ -1178,6 +1188,15 @@ Payload:
 - `github`: run the GitHub update script from `github_repo`.
 
 Every manifest and binary transfer gets at most three attempts. A binary transfer interrupted after receiving bytes resumes from the verified target file's current size when the origin honors HTTP Range; an origin that ignores Range is restarted safely from byte zero. Permanent HTTP errors, local filesystem errors, and verification failures are not treated as connection retries, and no downloaded binary is installed until the signed manifest size and SHA-256 checks pass. Installation stages each verified binary beside the live path, preserves the previous inode with a same-directory hard link (or a rename if links are unavailable), then atomically replaces the live path. It never clones the running binary as a spare copy, and it removes leftover `.oboard-update-new.*` / `.oboard-update-backup.*` files first.
+
+Installation and kernel activation share one lifecycle lock. After a verified
+release is installed, Agent validates the deployed configuration with the
+installed `oboard-sb`, restarts the managed kernel service once, and verifies
+the running build when that identity is available. A confirmed installation is
+also the fallback activation signal for an older running kernel that cannot
+report build identity; the watchdog by itself never restarts an unidentified
+kernel. This covers the first rolling upgrade from a kernel that predates
+`/runtime/status`, where the old process can otherwise keep its unlinked inode.
 
 ### `uninstall_agent`
 
@@ -1766,6 +1785,13 @@ tokens, `OBOARD_*` process variables, or `SSH_*`, and it does not run PAM,
 `-l` so a broken profile can still open a shell.
 
 Control-channel messages (signed HMAC, 60s prepare TTL):
+
+Interactive timestamp validation uses the fresh Controller reference attached
+to the authenticated control frame, then the Agent's persistent logical clock,
+and only then the host wall clock. The signed window must be positive, no longer
+than 60 seconds, unexpired, and no more than 30 seconds in the future. Controller
+signs the envelope in the same NTP-backed time domain when that reference is
+available; clock correction does not weaken or widen the replay window.
 
 - `interactive_prepare` — Agent validates signature, server_id, nonce, TTL, and
   the local security gate, then starts a login-compatible PTY and dials

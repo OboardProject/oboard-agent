@@ -1124,8 +1124,6 @@ func (r *Runner) executeAgentTask(task model.AgentTask) (string, string) {
 		}
 		return "succeeded", jsonMap(result)
 	case model.AgentTaskTypeUpdateAgent:
-		r.coreLifecycleMu.Lock()
-		defer r.coreLifecycleMu.Unlock()
 		result, err := r.updateAgentBinary(task.PayloadJSON)
 		if err != nil {
 			result["error"] = err.Error()
@@ -1312,6 +1310,8 @@ func (r *Runner) updateAgentBinary(payloadJSON string) (map[string]any, error) {
 	default:
 		return map[string]any{"message": "agent update failed", "source": source}, fmt.Errorf("unsupported update source %q", source)
 	}
+	r.coreLifecycleMu.Lock()
+	defer r.coreLifecycleMu.Unlock()
 	beforeAgent := version.String()
 	beforeCore := strings.TrimSpace(commandText(3*time.Second, r.coreBinary(), "-version"))
 	targets, err := r.signedReleaseTargets()
@@ -1345,7 +1345,7 @@ func (r *Runner) updateAgentBinary(payloadJSON string) (map[string]any, error) {
 	// keeps serving traffic on its original inode indefinitely.
 	afterCore := strings.TrimSpace(commandText(3*time.Second, r.coreBinary(), "-version"))
 	result["after_core"] = afterCore
-	activation, activationErr := r.activateInstalledCore(context.Background(), afterCore != beforeCore)
+	activation, activationErr := r.activateInstalledCoreLocked(context.Background(), true)
 	for key, value := range activation {
 		result[key] = value
 	}

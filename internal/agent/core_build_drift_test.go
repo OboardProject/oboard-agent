@@ -85,6 +85,29 @@ func TestCheckCoreRuntimeConfigReportsCurrentBuild(t *testing.T) {
 	}
 }
 
+// Kernels released before /runtime/status still identify their running build
+// through /version. This is the upgrade state that can strand a process on an
+// unlinked executable when the first Agent carrying activation support lands.
+func TestCheckCoreRuntimeConfigDetectsLegacyKernelBinaryDrift(t *testing.T) {
+	dir := t.TempDir()
+	writeCoreConfig(t, dir, coreConfigA)
+	kernel := newFakeCoreKernel(t, filepath.Join(dir, "sing-box.json"), false)
+	kernel.reportBuild("old-build")
+	binary := writeFakeCoreBinary(t, dir, "new-build")
+	r := newRuntimeTestRunnerWithCore(t, dir, kernel, binary)
+
+	check := r.checkCoreRuntimeConfig(context.Background(), []byte(resolvedCoreConfig(t, coreConfigA)))
+	if check.Verification != coreRuntimeVerificationUnsupported {
+		t.Fatalf("legacy runtime verification = %q, want unsupported", check.Verification)
+	}
+	if check.BuildState != coreBuildStateStale || !check.binaryDrift() {
+		t.Fatalf("legacy kernel build drift was not detected: %#v", check)
+	}
+	if check.RunningBuild.Build != "old-build" || check.InstalledBuild.Build != "new-build" {
+		t.Fatalf("legacy build identities = %#v", check)
+	}
+}
+
 // A kernel that predates coreRuntimeBuildIdentityCapability cannot be judged,
 // and must never be restarted for it: that would churn every node during a
 // rolling upgrade where Agent lands before the kernel does.
@@ -233,6 +256,26 @@ func TestActivateInstalledCoreReportsUnmanagedRestart(t *testing.T) {
 	}
 	if result["core_activation"] != "unmanaged" {
 		t.Fatalf("an unmanaged core was silently reported as activated: %#v", result)
+	}
+}
+
+func TestActivateInstalledCoreUsesConfirmedInstallWhenBuildIsUnknown(t *testing.T) {
+	dir := t.TempDir()
+	writeCoreConfig(t, dir, coreConfigA)
+	kernel := newFakeCoreKernel(t, filepath.Join(dir, "sing-box.json"), false)
+	binary := writeFakeCoreBinary(t, dir, "same-on-disk-build")
+	r := New(Config{
+		StateDir: dir, CoreBinary: binary, CoreService: "oboard-sb-activation-test-missing",
+		RestartCommand: "systemd-restart", ResourceProfile: "large", CommandTimeoutSeconds: 2,
+	})
+	r.coreClient = kernel.client
+
+	result, err := r.activateInstalledCore(context.Background(), true)
+	if err == nil {
+		t.Fatalf("missing test service unexpectedly restarted: %#v", result)
+	}
+	if result["core_activation"] != "restart_failed" {
+		t.Fatalf("confirmed installation did not attempt activation: %#v", result)
 	}
 }
 
