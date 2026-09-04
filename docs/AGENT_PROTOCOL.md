@@ -833,8 +833,13 @@ Payload is `PortForwardPlan`:
 ```
 
 `backend` accepts only `realm`; an empty value normalizes to `realm`. The
-source server must provide the `realm` binary, and a rule whose server does not
-have it fails the task instead of falling back to another implementation.
+forwarding binary is bundled: the signed Agent release ships
+`oboard-realm-<os>-<arch>`, the Controller serves it from `downloads/`, and the
+Agent installs it as `oboard-realm` beside its own executable. The Agent
+executes only that path and never a `realm` binary found on the host `PATH`, so
+`capabilities.realm` reports whether the bundled binary is installed and
+executable. A rule fails the task when it is missing instead of falling back to
+another implementation.
 
 `target_server_id` is optional metadata for a Controller-managed destination.
 When it is omitted, `target_address` contains the explicit external IP or

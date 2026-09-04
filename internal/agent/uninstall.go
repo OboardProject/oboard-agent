@@ -14,6 +14,7 @@ import (
 type uninstallPaths struct {
 	AgentPath      string
 	CorePath       string
+	RealmPath      string
 	InstallDir     string
 	ConfigPath     string
 	StateDir       string
@@ -42,6 +43,7 @@ func (r *Runner) uninstallAgent(payloadJSON string) (map[string]any, error) {
 		"purge":      payload.Purge,
 		"agent_path": paths.AgentPath,
 		"core_path":  paths.CorePath,
+		"realm_path": paths.RealmPath,
 		"state_dir":  paths.StateDir,
 		"finalize":   "after_result_acknowledged",
 	}, nil
@@ -54,6 +56,7 @@ func (r *Runner) uninstallPaths() (uninstallPaths, error) {
 	}
 	agentPath := filepath.Clean(targets.Agent)
 	corePath := filepath.Clean(targets.Core)
+	realmPath := filepath.Clean(targets.Realm)
 	installDir := filepath.Dir(agentPath)
 	configPath := strings.TrimSpace(r.Config().ConfigPath)
 	if configPath == "" {
@@ -70,6 +73,7 @@ func (r *Runner) uninstallPaths() (uninstallPaths, error) {
 	return uninstallPaths{
 		AgentPath:      agentPath,
 		CorePath:       corePath,
+		RealmPath:      realmPath,
 		InstallDir:     installDir,
 		ConfigPath:     filepath.Clean(configPath),
 		StateDir:       r.stateDir(),
@@ -82,6 +86,14 @@ func (r *Runner) uninstallPaths() (uninstallPaths, error) {
 func prepareAgentUninstall(paths uninstallPaths) error {
 	_ = stopManagedService(paths.ServiceManager, paths.CoreService)
 	_ = os.Remove(paths.CorePath)
+	// The bundled forwarding process is an Agent child rather than a service, so
+	// stop it through its managed PID record before removing the binary.
+	if strings.TrimSpace(paths.StateDir) != "" {
+		_ = stopManagedProcess(filepath.Join(paths.StateDir, realmPIDFile))
+	}
+	if strings.TrimSpace(paths.RealmPath) != "" {
+		_ = os.Remove(paths.RealmPath)
+	}
 	_ = os.Remove(filepath.Join(paths.InstallDir, "obag"))
 	removeProfileIfManaged(paths.InstallDir, paths.ProfilePath)
 	removeManagedServiceFile("oboard-sb")
@@ -134,6 +146,9 @@ func uninstallFinalizerCommand(paths uninstallPaths) string {
 		"rm -f "+shellQuoteValue(paths.CorePath),
 		"rm -f "+shellQuoteValue(filepath.Join(paths.InstallDir, "obag")),
 	)
+	if strings.TrimSpace(paths.RealmPath) != "" {
+		parts = append(parts, "rm -f "+shellQuoteValue(paths.RealmPath))
+	}
 	if strings.TrimSpace(paths.ProfilePath) != "" {
 		parts = append(parts, "rm -f "+shellQuoteValue(paths.ProfilePath))
 	}

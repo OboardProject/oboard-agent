@@ -196,13 +196,16 @@ func TestUpdateArmsRestartWhenResultReportFails(t *testing.T) {
 
 	agentName := "oboard-agent-" + runtime.GOOS + "-" + runtime.GOARCH
 	coreName := "oboard-sb-" + runtime.GOOS + "-" + runtime.GOARCH
+	realmName := "oboard-realm-" + runtime.GOOS + "-" + runtime.GOARCH
 	agentData := []byte("signed-agent-binary")
 	coreData := []byte("signed-core-binary")
+	realmData := []byte("signed-realm-binary")
 	manifest := security.ReleaseManifest{
 		Version: "1.2.3", Build: "build-123", Commit: "abc123", Date: "2026-09-04T00:00:00Z", Repo: "OboardProject/oboard-agent",
 		Files: []security.ReleaseManifestFile{
 			{Name: agentName, Component: "agent", OS: runtime.GOOS, Arch: runtime.GOARCH, SHA256: sha256Hex(agentData), Size: int64(len(agentData))},
 			{Name: coreName, Component: "sb", OS: runtime.GOOS, Arch: runtime.GOARCH, SHA256: sha256Hex(coreData), Size: int64(len(coreData))},
+			{Name: realmName, Component: "realm", OS: runtime.GOOS, Arch: runtime.GOARCH, SHA256: sha256Hex(realmData), Size: int64(len(realmData))},
 		},
 	}
 	signature, err := security.SignReleaseManifest(manifest, base64.RawStdEncoding.EncodeToString(priv))
@@ -218,6 +221,7 @@ func TestUpdateArmsRestartWhenResultReportFails(t *testing.T) {
 		"/downloads/release-manifest.json.sig": []byte(signature),
 		"/downloads/" + agentName:              agentData,
 		"/downloads/" + coreName:               coreData,
+		"/downloads/" + realmName:              realmData,
 	}
 
 	token := "agent-token"

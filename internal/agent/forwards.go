@@ -23,9 +23,14 @@ import (
 const (
 	portForwardsCurrent  = "port-forwards.json"
 	portForwardsLastGood = "port-forwards.last-good.json"
-	realmConfigFile      = "realm.toml"
-	realmPIDFile         = "realm.pid"
-	realmLogFile         = "realm.log"
+	// The state file names predate the bundled binary. They are kept so that a
+	// host upgrading from a PATH realm still finds its recorded PID here and
+	// stops that process before the bundled one takes the same listen ports.
+	realmConfigFile  = "realm.toml"
+	realmPIDFile     = "realm.pid"
+	realmLogFile     = "realm.log"
+	realmProcessName = "oboard-realm"
+	legacyRealmName  = "realm"
 )
 
 type forwardApplyResult struct {
@@ -60,7 +65,7 @@ type inboundListenEndpoint struct {
 func (r *Runner) applyPortForwards(plan model.PortForwardPlan) (forwardApplyResult, error) {
 	r.forwardLifecycleMu.Lock()
 	defer r.forwardLifecycleMu.Unlock()
-	result := forwardApplyResult{Version: plan.Version, Capabilities: detectForwardCapabilities(), Backends: map[string]string{}}
+	result := forwardApplyResult{Version: plan.Version, Capabilities: r.detectForwardCapabilities(), Backends: map[string]string{}}
 	desiredState, err := portForwardDesiredStateID(plan)
 	if err != nil {
 		return result, err
@@ -150,7 +155,7 @@ func (r *Runner) suspendConflictingForwards(candidateConfig []byte) (*forwardHan
 	if err := json.Unmarshal(b, &current); err != nil {
 		return nil, fmt.Errorf("parse current port-forward plan before core handoff: %w", err)
 	}
-	originalResolved, err := resolveForwardBackends(current.Rules, detectForwardCapabilities())
+	originalResolved, err := resolveForwardBackends(current.Rules, r.detectForwardCapabilities())
 	if err != nil {
 		return nil, fmt.Errorf("resolve current port-forward plan before core handoff: %w", err)
 	}
@@ -167,7 +172,7 @@ func (r *Runner) suspendConflictingForwards(candidateConfig []byte) (*forwardHan
 	if len(conflicts) == 0 {
 		return nil, nil
 	}
-	retainedResolved, err := resolveForwardBackends(retained.Rules, detectForwardCapabilities())
+	retainedResolved, err := resolveForwardBackends(retained.Rules, r.detectForwardCapabilities())
 	if err != nil {
 		return nil, fmt.Errorf("resolve retained port-forward plan before core handoff: %w", err)
 	}
@@ -356,7 +361,7 @@ func (r *Runner) restoreLastGoodForwards(path string) error {
 	if err := json.Unmarshal(b, &plan); err != nil {
 		return err
 	}
-	resolved, err := resolveForwardBackends(plan.Rules, detectForwardCapabilities())
+	resolved, err := resolveForwardBackends(plan.Rules, r.detectForwardCapabilities())
 	if err != nil {
 		return err
 	}
@@ -392,21 +397,30 @@ func resolveForwardBackends(rules []model.PortForward, caps map[string]bool) ([]
 			return nil, fmt.Errorf("unsupported forward backend %q", backend)
 		}
 		if !caps["realm"] {
-			return nil, fmt.Errorf("port forward %q requires realm but realm binary was not found", rule.Name)
+			return nil, fmt.Errorf("port forward %q requires the bundled %s binary; run the Agent update from the panel to install it", rule.Name, realmProcessName)
 		}
 		out = append(out, forwardRule{PortForward: rule, ResolvedBackend: backend})
 	}
 	return out, nil
 }
 
-func detectForwardCapabilities() map[string]bool {
-	_, realmErr := exec.LookPath("realm")
-	root := runningAsRoot()
+func (r *Runner) detectForwardCapabilities() map[string]bool {
 	return map[string]bool{
-		"realm": realmErr == nil,
+		"realm": executableFileExists(r.realmBinary()),
 		"linux": runtime.GOOS == "linux",
-		"root":  root,
+		"root":  runningAsRoot(),
 	}
+}
+
+func executableFileExists(path string) bool {
+	if strings.TrimSpace(path) == "" {
+		return false
+	}
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return false
+	}
+	return info.Mode().Perm()&0o111 != 0
 }
 
 func (r *Runner) setForwardProbeRules(rules []forwardRule) {
@@ -601,8 +615,9 @@ func (r *Runner) applyRealmForwards(rules []forwardRule) error {
 	if len(rules) == 0 {
 		return stopManagedProcess(pidPath)
 	}
-	if _, err := exec.LookPath("realm"); err != nil {
-		return err
+	realmPath := r.realmBinary()
+	if !executableFileExists(realmPath) {
+		return fmt.Errorf("bundled %s binary is not installed; run the Agent update from the panel to install it", realmProcessName)
 	}
 	config, err := generateRealmConfig(rules)
 	if err != nil {
@@ -619,8 +634,8 @@ func (r *Runner) applyRealmForwards(rules []forwardRule) error {
 	if err != nil {
 		return err
 	}
-	// #nosec G204 -- the executable and option are fixed and configPath is a separate argv entry.
-	cmd := exec.Command("realm", "-c", configPath)
+	// #nosec G204 -- realmPath is the bundled binary validated above and configPath is a separate argv entry.
+	cmd := exec.Command(realmPath, "-c", configPath)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	if err := cmd.Start(); err != nil {
@@ -628,7 +643,7 @@ func (r *Runner) applyRealmForwards(rules []forwardRule) error {
 		return err
 	}
 	_ = logFile.Close()
-	return writeManagedPIDFile(pidPath, cmd.Process.Pid, "realm")
+	return writeManagedPIDFile(pidPath, cmd.Process.Pid, realmProcessName)
 }
 
 func stopManagedProcess(pidPath string) error {
@@ -657,8 +672,11 @@ func stopManagedProcess(pidPath string) error {
 		base := filepath.Base(pidPath)
 		if strings.HasPrefix(base, "ssh-") {
 			expected = "ssh"
-		} else if strings.Contains(base, "realm") {
-			expected = "realm"
+		} else if strings.Contains(base, legacyRealmName) {
+			// Only a record written before the command field existed lands here,
+			// and back then the process was always a host-provided realm. A
+			// bundled oboard-realm always records its own name explicitly.
+			expected = legacyRealmName
 		}
 	}
 	if !managedProcessMatches(record.PID, expected, record.StartToken) {

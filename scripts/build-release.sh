@@ -75,10 +75,14 @@ for platform in $PLATFORMS; do
   mkdir -p "$OUT_DIR/bin/$os-$arch"
   CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go -C "$AGENT_DIR" build -trimpath -ldflags "$AGENT_LDFLAGS" -o "$OUT_DIR/bin/$os-$arch/oboard-agent" ./cmd/agent
   CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go -C "$KERNEL_DIR" build -trimpath -tags "$KERNEL_TAGS" -ldflags "$KERNEL_LDFLAGS" -o "$OUT_DIR/bin/$os-$arch/oboard-sb" ./cmd/oboard-sb
+  echo "==> Bundling oboard-realm $os/$arch"
+  "$AGENT_DIR/scripts/fetch-realm.sh" "$OUT_DIR" "$os" "$arch"
+  cp "$OUT_DIR/oboard-realm-$os-$arch" "$OUT_DIR/bin/$os-$arch/oboard-realm"
   cp "$OUT_DIR/bin/$os-$arch/oboard-agent" "$OUT_DIR/oboard-agent-$os-$arch"
   cp "$OUT_DIR/bin/$os-$arch/oboard-sb" "$OUT_DIR/oboard-sb-$os-$arch"
   add_file_manifest "oboard-agent-$os-$arch" agent "$os" "$arch" "$OUT_DIR/oboard-agent-$os-$arch"
   add_file_manifest "oboard-sb-$os-$arch" sb "$os" "$arch" "$OUT_DIR/oboard-sb-$os-$arch"
+  add_file_manifest "oboard-realm-$os-$arch" realm "$os" "$arch" "$OUT_DIR/oboard-realm-$os-$arch"
 done
 
 python3 - "$OUT_DIR/release-manifest.json" "$VERSION_VALUE" "$BUILD_VALUE" "$COMMIT_VALUE" "$DATE_VALUE" "$REPO" "$files_json" <<'PY'

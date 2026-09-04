@@ -36,13 +36,16 @@ func TestDownloadAndInstallSignedRelease(t *testing.T) {
 	version.ReleasePublicKey = base64.RawStdEncoding.EncodeToString(pub)
 	agentName := "oboard-agent-" + runtime.GOOS + "-" + runtime.GOARCH
 	coreName := "oboard-sb-" + runtime.GOOS + "-" + runtime.GOARCH
+	realmName := "oboard-realm-" + runtime.GOOS + "-" + runtime.GOARCH
 	agentData := []byte("signed-agent-binary")
 	coreData := []byte("signed-core-binary")
+	realmData := []byte("signed-realm-binary")
 	manifest := security.ReleaseManifest{
 		Version: "1.2.3", Build: "build-123", Commit: "abc123", Date: "2026-07-17T00:00:00Z", Repo: "example/oboard-agent",
 		Files: []security.ReleaseManifestFile{
 			{Name: agentName, Component: "agent", OS: runtime.GOOS, Arch: runtime.GOARCH, SHA256: sha256Hex(agentData), Size: int64(len(agentData))},
 			{Name: coreName, Component: "sb", OS: runtime.GOOS, Arch: runtime.GOARCH, SHA256: sha256Hex(coreData), Size: int64(len(coreData))},
+			{Name: realmName, Component: "realm", OS: runtime.GOOS, Arch: runtime.GOARCH, SHA256: sha256Hex(realmData), Size: int64(len(realmData))},
 		},
 	}
 	privateKey := base64.RawStdEncoding.EncodeToString(priv)
@@ -59,6 +62,7 @@ func TestDownloadAndInstallSignedRelease(t *testing.T) {
 		"/release-manifest.json.sig": []byte(signature),
 		"/" + agentName:              agentData,
 		"/" + coreName:               coreData,
+		"/" + realmName:              realmData,
 	}
 	var mu sync.Mutex
 	requested := []string{}
@@ -75,7 +79,7 @@ func TestDownloadAndInstallSignedRelease(t *testing.T) {
 	}))
 	defer server.Close()
 	dir := t.TempDir()
-	targets := signedReleaseTargets{Agent: filepath.Join(dir, "oboard-agent"), Core: filepath.Join(dir, "oboard-sb")}
+	targets := signedReleaseTargets{Agent: filepath.Join(dir, "oboard-agent"), Core: filepath.Join(dir, "oboard-sb"), Realm: filepath.Join(dir, "oboard-realm")}
 	if err := os.WriteFile(targets.Agent, []byte("old-agent"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -91,11 +95,14 @@ func TestDownloadAndInstallSignedRelease(t *testing.T) {
 	}
 	assertFileContent(t, targets.Agent, agentData)
 	assertFileContent(t, targets.Core, coreData)
+	// realm is bundled like the kernel, so a first install that had no realm on
+	// disk must still end up with the signed binary in place.
+	assertFileContent(t, targets.Realm, realmData)
 	mu.Lock()
 	sort.Strings(requested)
 	gotPaths := append([]string(nil), requested...)
 	mu.Unlock()
-	wantPaths := []string{"/" + agentName, "/" + coreName, "/release-manifest.json", "/release-manifest.json.sig"}
+	wantPaths := []string{"/" + agentName, "/" + coreName, "/" + realmName, "/release-manifest.json", "/release-manifest.json.sig"}
 	sort.Strings(wantPaths)
 	if len(gotPaths) != len(wantPaths) {
 		t.Fatalf("requested paths = %#v", gotPaths)
@@ -262,9 +269,11 @@ func TestSignedReleaseRejectsTamperedBinaryBeforeInstall(t *testing.T) {
 	version.ReleasePublicKey = base64.RawStdEncoding.EncodeToString(pub)
 	agentName := "oboard-agent-" + runtime.GOOS + "-" + runtime.GOARCH
 	coreName := "oboard-sb-" + runtime.GOOS + "-" + runtime.GOARCH
+	realmName := "oboard-realm-" + runtime.GOOS + "-" + runtime.GOARCH
 	manifest := security.ReleaseManifest{Version: "1", Build: "2", Repo: "example/oboard-agent", Files: []security.ReleaseManifestFile{
 		{Name: agentName, Component: "agent", OS: runtime.GOOS, Arch: runtime.GOARCH, SHA256: sha256Hex([]byte("good-agent")), Size: int64(len("good-agent"))},
 		{Name: coreName, Component: "sb", OS: runtime.GOOS, Arch: runtime.GOARCH, SHA256: sha256Hex([]byte("good-core")), Size: int64(len("good-core"))},
+		{Name: realmName, Component: "realm", OS: runtime.GOOS, Arch: runtime.GOARCH, SHA256: sha256Hex([]byte("good-realm")), Size: int64(len("good-realm"))},
 	}}
 	signature, err := security.SignReleaseManifest(manifest, base64.RawStdEncoding.EncodeToString(priv))
 	if err != nil {
@@ -283,15 +292,18 @@ func TestSignedReleaseRejectsTamperedBinaryBeforeInstall(t *testing.T) {
 			_, _ = w.Write([]byte("tampered-agent"))
 		case "/" + coreName:
 			_, _ = w.Write([]byte("good-core"))
+		case "/" + realmName:
+			_, _ = w.Write([]byte("good-realm"))
 		default:
 			http.NotFound(w, r)
 		}
 	}))
 	defer server.Close()
 	dir := t.TempDir()
-	targets := signedReleaseTargets{Agent: filepath.Join(dir, "oboard-agent"), Core: filepath.Join(dir, "oboard-sb")}
+	targets := signedReleaseTargets{Agent: filepath.Join(dir, "oboard-agent"), Core: filepath.Join(dir, "oboard-sb"), Realm: filepath.Join(dir, "oboard-realm")}
 	_ = os.WriteFile(targets.Agent, []byte("old-agent"), 0o755)
 	_ = os.WriteFile(targets.Core, []byte("old-core"), 0o755)
+	_ = os.WriteFile(targets.Realm, []byte("old-realm"), 0o755)
 	_, err = downloadAndInstallSignedRelease(context.Background(), server.Client(), server.URL, manifest.Repo, manifest.Build, targets)
 	if err == nil || !strings.Contains(err.Error(), "failed after 3 attempts") {
 		t.Fatalf("unexpected tampered release error: %v", err)
@@ -301,6 +313,58 @@ func TestSignedReleaseRejectsTamperedBinaryBeforeInstall(t *testing.T) {
 	}
 	assertFileContent(t, targets.Agent, []byte("old-agent"))
 	assertFileContent(t, targets.Core, []byte("old-core"))
+	assertFileContent(t, targets.Realm, []byte("old-realm"))
+}
+
+// A release whose realm asset is missing must leave every installed binary
+// untouched: a half-updated node would run a new Agent that cannot forward.
+func TestSignedReleaseRejectsMissingRealmAsset(t *testing.T) {
+	oldKey := version.ReleasePublicKey
+	defer func() { version.ReleasePublicKey = oldKey }()
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	version.ReleasePublicKey = base64.RawStdEncoding.EncodeToString(pub)
+	agentName := "oboard-agent-" + runtime.GOOS + "-" + runtime.GOARCH
+	coreName := "oboard-sb-" + runtime.GOOS + "-" + runtime.GOARCH
+	manifest := security.ReleaseManifest{Version: "1", Build: "2", Repo: "example/oboard-agent", Files: []security.ReleaseManifestFile{
+		{Name: agentName, Component: "agent", OS: runtime.GOOS, Arch: runtime.GOARCH, SHA256: sha256Hex([]byte("good-agent")), Size: int64(len("good-agent"))},
+		{Name: coreName, Component: "sb", OS: runtime.GOOS, Arch: runtime.GOARCH, SHA256: sha256Hex([]byte("good-core")), Size: int64(len("good-core"))},
+	}}
+	signature, err := security.SignReleaseManifest(manifest, base64.RawStdEncoding.EncodeToString(priv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifestJSON, _ := security.CanonicalReleaseManifest(manifest)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/release-manifest.json":
+			_, _ = w.Write(manifestJSON)
+		case "/release-manifest.json.sig":
+			_, _ = w.Write([]byte(signature))
+		case "/" + agentName:
+			_, _ = w.Write([]byte("good-agent"))
+		case "/" + coreName:
+			_, _ = w.Write([]byte("good-core"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	dir := t.TempDir()
+	targets := signedReleaseTargets{Agent: filepath.Join(dir, "oboard-agent"), Core: filepath.Join(dir, "oboard-sb"), Realm: filepath.Join(dir, "oboard-realm")}
+	_ = os.WriteFile(targets.Agent, []byte("old-agent"), 0o755)
+	_ = os.WriteFile(targets.Core, []byte("old-core"), 0o755)
+	_, err = downloadAndInstallSignedRelease(context.Background(), server.Client(), server.URL, manifest.Repo, manifest.Build, targets)
+	if err == nil || !strings.Contains(err.Error(), "oboard-realm-") {
+		t.Fatalf("unexpected missing realm error: %v", err)
+	}
+	assertFileContent(t, targets.Agent, []byte("old-agent"))
+	assertFileContent(t, targets.Core, []byte("old-core"))
+	if _, statErr := os.Stat(targets.Realm); !os.IsNotExist(statErr) {
+		t.Fatalf("realm target should not exist after a rejected release: %v", statErr)
+	}
 }
 
 func TestVerifyReleaseFilesRejectsTraversalName(t *testing.T) {
@@ -394,20 +458,33 @@ func TestInstallVerifiedReleaseFilesRemovesStaleSidecars(t *testing.T) {
 	if err := os.WriteFile(staleBackup, []byte("stale-backup"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	realm := filepath.Join(dir, "oboard-realm")
+	if err := os.WriteFile(realm, []byte("old-realm"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	srcDir := t.TempDir()
 	agentSrc := filepath.Join(srcDir, "agent")
 	coreSrc := filepath.Join(srcDir, "core")
+	realmSrc := filepath.Join(srcDir, "realm")
 	if err := os.WriteFile(agentSrc, []byte("new-agent"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(coreSrc, []byte("new-core"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := installVerifiedReleaseFiles(agentSrc, coreSrc, signedReleaseTargets{Agent: agent, Core: core}); err != nil {
+	if err := os.WriteFile(realmSrc, []byte("new-realm"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := installVerifiedReleaseFiles([]stagedReleaseFile{
+		{source: agentSrc, target: agent},
+		{source: coreSrc, target: core},
+		{source: realmSrc, target: realm},
+	}); err != nil {
 		t.Fatal(err)
 	}
 	assertFileContent(t, agent, []byte("new-agent"))
 	assertFileContent(t, core, []byte("new-core"))
+	assertFileContent(t, realm, []byte("new-realm"))
 	matches, err := filepath.Glob(filepath.Join(dir, ".oboard-update-*"))
 	if err != nil {
 		t.Fatal(err)

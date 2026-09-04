@@ -434,6 +434,15 @@ func validateManagedPath(field, value string) error {
 		if !allowedCoreBinaryDir(filepath.Dir(cleaned)) {
 			return fmt.Errorf("core_binary must live in a system binary directory")
 		}
+	case "realm_binary":
+		// Unlike core_binary this path never comes from configuration: it is
+		// always derived from the running executable, and self-update installs
+		// it into that same directory. Anyone able to write there already owns
+		// the Agent binary, so a directory allowlist would add no protection
+		// while making the install and execution paths disagree.
+		if filepath.Base(cleaned) != "oboard-realm" {
+			return fmt.Errorf("realm_binary base name must be oboard-realm")
+		}
 	}
 	return nil
 }
@@ -468,6 +477,28 @@ func InstalledCoreBinary(executablePath string) string {
 	}
 	candidate := filepath.Join(filepath.Dir(absolute), "oboard-sb")
 	if validateManagedPath("core_binary", candidate) != nil {
+		return ""
+	}
+	return candidate
+}
+
+// InstalledRealmBinary resolves the bundled port-forwarding binary that ships
+// beside the Agent. realm is no longer taken from the host PATH, so this is the
+// only path the Agent will execute.
+func InstalledRealmBinary(executablePath string) string {
+	executablePath = strings.TrimSpace(executablePath)
+	if executablePath == "" {
+		return ""
+	}
+	if resolved, err := filepath.EvalSymlinks(executablePath); err == nil {
+		executablePath = resolved
+	}
+	absolute, err := filepath.Abs(executablePath)
+	if err != nil {
+		return ""
+	}
+	candidate := filepath.Join(filepath.Dir(absolute), "oboard-realm")
+	if validateManagedPath("realm_binary", candidate) != nil {
 		return ""
 	}
 	return candidate
@@ -2476,6 +2507,18 @@ func (r *Runner) coreBinary() string {
 	}
 	r.coreBinaryCache = "oboard-sb"
 	return r.coreBinaryCache
+}
+
+// realmBinary returns the bundled oboard-realm binary installed beside the
+// Agent. It is deliberately not configurable: the binary is delivered by the
+// signed release, so accepting an operator- or Controller-supplied path would
+// only add a way to run an unverified root process.
+func (r *Runner) realmBinary() string {
+	executable, err := selfExecutablePath()
+	if err != nil {
+		return ""
+	}
+	return InstalledRealmBinary(executable)
 }
 
 func (r *Runner) coreService() string {

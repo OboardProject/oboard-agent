@@ -46,6 +46,7 @@ var defaultReleaseDownloadPolicy = releaseDownloadPolicy{
 type signedReleaseTargets struct {
 	Agent string
 	Core  string
+	Realm string
 }
 
 // deletedExecutableSuffix is what Linux appends to /proc/self/exe once the
@@ -96,7 +97,10 @@ func (r *Runner) signedReleaseTargets() (signedReleaseTargets, error) {
 	if !filepath.IsAbs(corePath) {
 		return signedReleaseTargets{}, errors.New("resolved core update path is not absolute")
 	}
-	return signedReleaseTargets{Agent: filepath.Clean(agentPath), Core: filepath.Clean(corePath)}, nil
+	// realm ships beside the Agent and is never configurable, so it is always
+	// installed next to the executable being replaced.
+	realmPath := filepath.Join(filepath.Dir(agentPath), realmProcessName)
+	return signedReleaseTargets{Agent: filepath.Clean(agentPath), Core: filepath.Clean(corePath), Realm: filepath.Clean(realmPath)}, nil
 }
 
 func downloadAndInstallSignedRelease(ctx context.Context, baseClient *http.Client, baseURL, repo, expectedBuild string, targets signedReleaseTargets) (security.ReleaseManifest, error) {
@@ -105,7 +109,8 @@ func downloadAndInstallSignedRelease(ctx context.Context, baseClient *http.Clien
 	if err != nil || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") {
 		return security.ReleaseManifest{}, errors.New("invalid release base URL")
 	}
-	if targets.Agent == "" || targets.Core == "" || !filepath.IsAbs(targets.Agent) || !filepath.IsAbs(targets.Core) {
+	if targets.Agent == "" || targets.Core == "" || targets.Realm == "" ||
+		!filepath.IsAbs(targets.Agent) || !filepath.IsAbs(targets.Core) || !filepath.IsAbs(targets.Realm) {
 		return security.ReleaseManifest{}, errors.New("release install targets must be absolute")
 	}
 	ctx, cancel := context.WithTimeout(ctx, releaseUpdateTimeout)
@@ -143,6 +148,7 @@ func downloadAndInstallSignedRelease(ctx context.Context, baseClient *http.Clien
 	}
 	agentName := "oboard-agent-" + runtime.GOOS + "-" + runtime.GOARCH
 	coreName := "oboard-sb-" + runtime.GOOS + "-" + runtime.GOARCH
+	realmName := "oboard-realm-" + runtime.GOOS + "-" + runtime.GOARCH
 	agentFile, err := validateManifestBinary(manifest, agentName, "agent")
 	if err != nil {
 		return security.ReleaseManifest{}, err
@@ -151,7 +157,11 @@ func downloadAndInstallSignedRelease(ctx context.Context, baseClient *http.Clien
 	if err != nil {
 		return security.ReleaseManifest{}, err
 	}
-	for _, file := range []security.ReleaseManifestFile{agentFile, coreFile} {
+	realmFile, err := validateManifestBinary(manifest, realmName, "realm")
+	if err != nil {
+		return security.ReleaseManifest{}, err
+	}
+	for _, file := range []security.ReleaseManifestFile{agentFile, coreFile, realmFile} {
 		if err := downloadReleaseAsset(ctx, client, baseURL+"/"+file.Name, filepath.Join(tmpDir, file.Name), maxReleaseBinaryBytes, &file); err != nil {
 			return security.ReleaseManifest{}, err
 		}
@@ -159,23 +169,27 @@ func downloadAndInstallSignedRelease(ctx context.Context, baseClient *http.Clien
 	if err := ctx.Err(); err != nil {
 		return security.ReleaseManifest{}, fmt.Errorf("release update stopped before verification: %w", err)
 	}
-	if err := VerifyReleaseFiles(manifestPath, signaturePath, tmpDir, runtime.GOOS, runtime.GOARCH, []string{agentName, coreName}); err != nil {
+	if err := VerifyReleaseFiles(manifestPath, signaturePath, tmpDir, runtime.GOOS, runtime.GOARCH, []string{agentName, coreName, realmName}); err != nil {
 		return security.ReleaseManifest{}, err
 	}
 	if err := ctx.Err(); err != nil {
 		return security.ReleaseManifest{}, fmt.Errorf("release update stopped before installation: %w", err)
 	}
 	// Disk preflight before committing to filesystem
-	if err := checkUpdateDiskBudget(targets, agentFile.Size, coreFile.Size); err != nil {
+	if err := checkUpdateDiskBudget(targets, agentFile.Size, coreFile.Size, realmFile.Size); err != nil {
 		return security.ReleaseManifest{}, err
 	}
-	if err := installVerifiedReleaseFiles(filepath.Join(tmpDir, agentName), filepath.Join(tmpDir, coreName), targets); err != nil {
+	if err := installVerifiedReleaseFiles([]stagedReleaseFile{
+		{source: filepath.Join(tmpDir, agentName), target: targets.Agent},
+		{source: filepath.Join(tmpDir, coreName), target: targets.Core},
+		{source: filepath.Join(tmpDir, realmName), target: targets.Realm},
+	}); err != nil {
 		return security.ReleaseManifest{}, err
 	}
 	return manifest, nil
 }
 
-func checkUpdateDiskBudget(targets signedReleaseTargets, agentSize, coreSize int64) error {
+func checkUpdateDiskBudget(targets signedReleaseTargets, sizes ...int64) error {
 	// Estimate required: new binaries + reserve
 	profile := StorageProfileStandard
 	// Try to infer profile from state dir if available via filesystem check
@@ -207,7 +221,13 @@ func checkUpdateDiskBudget(targets signedReleaseTargets, agentSize, coreSize int
 			reserve = stats.TotalBytes / 20
 		}
 	}
-	required := uint64(agentSize + coreSize)
+	total := int64(0)
+	for _, size := range sizes {
+		if size > 0 {
+			total += size
+		}
+	}
+	required := uint64(total)
 	available := stats.AvailableBytes
 	if available < required+reserve {
 		return &InsufficientSpaceError{
@@ -482,11 +502,15 @@ type stagedReleaseFile struct {
 	linked bool
 }
 
-func installVerifiedReleaseFiles(agentSource, coreSource string, targets signedReleaseTargets) error {
-	items := []stagedReleaseFile{{source: agentSource, target: targets.Agent}, {source: coreSource, target: targets.Core}}
-	removeStaleReleaseSidecars(filepath.Dir(targets.Agent))
-	if filepath.Dir(targets.Core) != filepath.Dir(targets.Agent) {
-		removeStaleReleaseSidecars(filepath.Dir(targets.Core))
+func installVerifiedReleaseFiles(items []stagedReleaseFile) error {
+	cleaned := map[string]bool{}
+	for _, item := range items {
+		dir := filepath.Dir(item.target)
+		if cleaned[dir] {
+			continue
+		}
+		cleaned[dir] = true
+		removeStaleReleaseSidecars(dir)
 	}
 	for i := range items {
 		// #nosec G301 -- executable installation directories must remain searchable; files are installed atomically with 0755.

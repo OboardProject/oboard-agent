@@ -1,0 +1,16 @@
+{
+  "provider": "zhboner/realm",
+  "version": "v2.9.6",
+  "license": "MIT",
+  "license_sha256": "7d232b4125b518eb4527d1933cbe20e6d87b865213b9c561faade007326fd9d3",
+  "targets": {
+    "amd64": {
+      "asset": "realm-x86_64-unknown-linux-musl.tar.gz",
+      "sha256": "b1cc335547bea8bb2a88178bef12ec7f2363e36200e7ea1d4e1e67627929bf65"
+    },
+    "arm64": {
+      "asset": "realm-aarch64-unknown-linux-musl.tar.gz",
+      "sha256": "f4c0318dd86854da483dcb7645b4f39cae2cc3f91c688fef969d53220b949488"
+    }
+  }
+}
