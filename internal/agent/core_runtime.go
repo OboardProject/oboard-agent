@@ -550,6 +550,84 @@ func (r *Runner) restartCoreForRuntimeDrift(ctx context.Context, desired []byte)
 	return r.awaitCoreRuntimeConfig(ctx, desired, r.coreRuntimeVerifyWindow()), nil
 }
 
+// VerifyCoreRuntime reports whether the process that serves traffic runs the
+// kernel configuration on disk and the kernel executable on disk.
+//
+// It exists so that a shell update can reach the same verdict Agent reaches
+// internally without reimplementing the operational-digest normalization. A
+// service manager reporting "active" only proves that some process is up; it
+// says nothing about which build or which configuration that process loaded,
+// and treating it as an update success is what let a failed restart print
+// "update completed".
+func (r *Runner) VerifyCoreRuntime(ctx context.Context) (string, error) {
+	configPath := filepath.Join(r.stateDir(), "sing-box.json")
+	// #nosec G304 -- a fixed file below the Agent's configured state directory.
+	desired, err := os.ReadFile(configPath)
+	if err != nil || len(bytes.TrimSpace(desired)) == 0 {
+		return "core runtime verification skipped: no kernel configuration is deployed", nil
+	}
+	check := r.awaitCoreRuntimeConfig(ctx, desired, r.coreRuntimeVerifyWindow())
+	summary := fmt.Sprintf("core runtime verification=%s build_state=%s", check.Verification, check.buildState())
+	if running := check.RunningBuild.String(); running != "" {
+		summary += " running=" + running
+	}
+	if installed := check.InstalledBuild.String(); installed != "" {
+		summary += " installed=" + installed
+	}
+	switch {
+	case check.drift():
+		return summary, fmt.Errorf("core runs configuration %s, expected %s", check.LoadedDigest, check.DesiredDigest)
+	case check.binaryDrift():
+		return summary, fmt.Errorf("core still runs %s after the update, expected %s", check.RunningBuild.String(), check.InstalledBuild.String())
+	case check.Verification == coreRuntimeVerificationUnavailable:
+		return summary, errors.New("core local API is unreachable, so the running kernel could not be verified")
+	}
+	return summary, nil
+}
+
+// restoreCoreRuntime brings the running kernel back onto the last-good
+// configuration after a failed apply already restored it on disk.
+//
+// A rollback must never signal a reload at a kernel that does not implement
+// one. oboard-sb only installs SIGINT/SIGTERM handlers, so `systemctl reload`
+// (ExecReload=kill -HUP) or the OpenRC reload action would at best be a no-op
+// that leaves the kernel serving the failed configuration, and at worst kill
+// the process on a service manager that does not restart it. The restart is
+// therefore the primary path and the result records whether the running kernel
+// was confirmed back on the restored configuration.
+func (r *Runner) restoreCoreRuntime(ctx context.Context, previousConfig []byte, result map[string]any) {
+	if r.managedReloadEnabled() && r.coreHotReloadSupported() {
+		if err := r.reloadCore(); err == nil {
+			result["rollback_strategy"] = "hot_reload"
+			return
+		} else {
+			result["rollback_reload_error"] = err.Error()
+		}
+	}
+	if err := r.restartCore(); err != nil {
+		result["rollback_strategy"] = "restart_failed"
+		result["rollback_restart_error"] = err.Error()
+		return
+	}
+	if r.managedRestartEnabled() {
+		if err := r.waitCoreServiceStable(3 * time.Second); err != nil {
+			result["rollback_strategy"] = "restart_failed"
+			result["rollback_restart_error"] = err.Error()
+			return
+		}
+	}
+	result["rollback_strategy"] = "restart"
+	check := r.awaitCoreRuntimeConfig(ctx, previousConfig, r.coreRuntimeVerifyWindow())
+	result["rollback_runtime_verification"] = check.Verification
+	if check.drift() {
+		result["rollback_strategy"] = "restart_verification_failed"
+		result["rollback_runtime_loaded_digest"] = check.LoadedDigest
+		result["rollback_runtime_desired_digest"] = check.DesiredDigest
+		return
+	}
+	result["rollback_runtime_verified"] = check.verified()
+}
+
 // coreRuntimeConverged reports whether the running kernel serves the
 // configuration currently on disk.
 //
@@ -583,6 +661,11 @@ func (r *Runner) coreRuntimeConverged(ctx context.Context) bool {
 func (r *Runner) activateInstalledCore(ctx context.Context, binaryReplaced bool) (map[string]any, error) {
 	r.coreLifecycleMu.Lock()
 	defer r.coreLifecycleMu.Unlock()
+	hostLock, hostLockErr := r.acquireHostCoreLock(hostCoreLockWait)
+	if hostLockErr != nil {
+		return map[string]any{"core_activation": "host_lock_busy"}, hostLockErr
+	}
+	defer hostLock.release()
 	return r.activateInstalledCoreLocked(ctx, binaryReplaced)
 }
 

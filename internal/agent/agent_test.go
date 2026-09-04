@@ -919,9 +919,28 @@ func TestOBoardCoreDoesNotClaimHotReloadSupport(t *testing.T) {
 	}
 }
 
-func TestApplyCoreConfigHotReloadNoop(t *testing.T) {
+// An oboard-sb core never takes the reload branch, even when the service
+// manager is unmanaged. Reporting "hot_reload" there was a label for something
+// that never happened: nothing had asked the kernel to re-read anything.
+func TestApplyCoreConfigNeverReportsHotReloadForOBoardCore(t *testing.T) {
 	dir := t.TempDir()
 	r := New(Config{StateDir: dir, CoreBinary: filepath.Join(dir, "missing-sb"), ReloadCommand: "none", RestartCommand: "none", ResourceProfile: "large"})
+	result, err := r.applyCoreConfigTask(42, model.ApplyCoreConfigTaskPayload{Config: `{"log":{"level":"info"}}`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result["reload_strategy"] != "restart_fallback" || result["connection_draining"] != false {
+		t.Fatalf("unexpected apply result: %#v", result)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "sing-box.json")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A third-party core that Agent was pointed at keeps the reload path.
+func TestApplyCoreConfigKeepsHotReloadForThirdPartyCore(t *testing.T) {
+	dir := t.TempDir()
+	r := New(Config{StateDir: dir, CoreBinary: filepath.Join(dir, "custom-core"), CoreService: "custom-core", ReloadCommand: "none", RestartCommand: "none", ResourceProfile: "large"})
 	result, err := r.applyCoreConfigTask(42, model.ApplyCoreConfigTaskPayload{Config: `{"log":{"level":"info"}}`})
 	if err != nil {
 		t.Fatal(err)
@@ -929,8 +948,45 @@ func TestApplyCoreConfigHotReloadNoop(t *testing.T) {
 	if result["reload_strategy"] != "hot_reload" || result["connection_draining"] != true {
 		t.Fatalf("unexpected apply result: %#v", result)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "sing-box.json")); err != nil {
+}
+
+// A failed apply restores the last-good configuration and must bring the
+// running kernel back onto it with a restart. Signalling a reload at oboard-sb
+// is either a no-op that leaves the failed configuration serving, or - on
+// OpenRC, where nothing restarts the kernel automatically - a plain kill.
+func TestApplyCoreConfigRollbackRestartsAndNeverSignalsReload(t *testing.T) {
+	dir := t.TempDir()
+	previous := `{"log":{"level":"warn"}}`
+	if err := os.WriteFile(filepath.Join(dir, "sing-box.json"), []byte(previous), 0o600); err != nil {
 		t.Fatal(err)
+	}
+	r := New(Config{
+		StateDir:        dir,
+		CoreBinary:      filepath.Join(dir, "missing-sb"),
+		CoreService:     "oboard-sb",
+		ReloadCommand:   "bogus-reload",
+		RestartCommand:  "bogus-restart",
+		ResourceProfile: "large",
+	})
+	result, err := r.applyCoreConfigTask(43, model.ApplyCoreConfigTaskPayload{Config: `{"log":{"level":"debug"}}`})
+	if err == nil {
+		t.Fatal("apply must fail when the core cannot be restarted")
+	}
+	if result["reload_strategy"] != "rollback" {
+		t.Fatalf("reload_strategy = %v, want rollback", result["reload_strategy"])
+	}
+	if _, signalled := result["rollback_reload_error"]; signalled {
+		t.Fatalf("oboard-sb rollback signalled a reload: %#v", result)
+	}
+	if result["rollback_strategy"] != "restart_failed" {
+		t.Fatalf("rollback_strategy = %v, want restart_failed", result["rollback_strategy"])
+	}
+	current, err := os.ReadFile(filepath.Join(dir, "sing-box.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(current)) != previous {
+		t.Fatalf("last-good configuration was not restored: %s", current)
 	}
 }
 

@@ -118,6 +118,14 @@ func (r *Runner) runCoreWatchdogCheck(ctx context.Context, status *coreWatchdogS
 
 	r.coreLifecycleMu.Lock()
 	defer r.coreLifecycleMu.Unlock()
+	// An operator update is replacing binaries and restarting the kernel right
+	// now. Everything the watchdog would observe during that window is
+	// transient, and restarting into it would fight the update.
+	hostLock, hostLockErr := r.acquireHostCoreLock(2 * time.Second)
+	if hostLockErr != nil {
+		return
+	}
+	defer hostLock.release()
 	if err := r.coreServiceActive(); err == nil {
 		wasRunning := status.State == coreWatchdogStateRunning
 		check := r.checkCoreRuntimeConfig(ctx, desired)

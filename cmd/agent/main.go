@@ -85,6 +85,7 @@ func main() {
 	verifyBaseDir := flag.String("verify-base-dir", "", "directory containing release files")
 	verifyOS := flag.String("verify-os", "", "release OS")
 	verifyArch := flag.String("verify-arch", "", "release architecture")
+	verifyCoreRuntime := flag.Bool("verify-core-runtime", false, "verify that the running kernel serves the deployed configuration and the installed build, then exit")
 	install := flag.Bool("install", false, "print a systemd unit template")
 	flag.Parse()
 	enrollToken := consumeEnrollToken()
@@ -150,6 +151,14 @@ func main() {
 	runner := agent.New(cfg)
 	if err := runner.Config().Validate(); err != nil {
 		log.Fatal(err)
+	}
+	if *verifyCoreRuntime {
+		summary, err := runner.VerifyCoreRuntime(context.Background())
+		fmt.Println(summary)
+		if err != nil {
+			log.Fatal(err)
+		}
+		return
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

@@ -47,7 +47,26 @@ type signedReleaseTargets struct {
 	Agent string
 	Core  string
 	Realm string
+	// ActiveConfig is the kernel configuration this node is serving right now.
+	// The downloaded kernel is validated against it before any file on disk is
+	// replaced. Empty disables the preflight.
+	ActiveConfig string
 }
+
+// releaseInstallOutcome reports what a signed release installation actually did
+// beyond replacing files, so the task result can record it.
+type releaseInstallOutcome struct {
+	Manifest security.ReleaseManifest
+	// CorePreflight is validated, not_deployed, or skipped.
+	CorePreflight     string
+	CorePreflightNote string
+}
+
+const (
+	corePreflightValidated   = "validated"
+	corePreflightNotDeployed = "not_deployed"
+	corePreflightSkipped     = "skipped"
+)
 
 // deletedExecutableSuffix is what Linux appends to /proc/self/exe once the
 // running executable has been unlinked. An Agent that installed an update but
@@ -100,18 +119,24 @@ func (r *Runner) signedReleaseTargets() (signedReleaseTargets, error) {
 	// realm ships beside the Agent and is never configurable, so it is always
 	// installed next to the executable being replaced.
 	realmPath := filepath.Join(filepath.Dir(agentPath), realmProcessName)
-	return signedReleaseTargets{Agent: filepath.Clean(agentPath), Core: filepath.Clean(corePath), Realm: filepath.Clean(realmPath)}, nil
+	return signedReleaseTargets{
+		Agent:        filepath.Clean(agentPath),
+		Core:         filepath.Clean(corePath),
+		Realm:        filepath.Clean(realmPath),
+		ActiveConfig: filepath.Join(r.stateDir(), "sing-box.json"),
+	}, nil
 }
 
-func downloadAndInstallSignedRelease(ctx context.Context, baseClient *http.Client, baseURL, repo, expectedBuild string, targets signedReleaseTargets) (security.ReleaseManifest, error) {
+func downloadAndInstallSignedRelease(ctx context.Context, baseClient *http.Client, baseURL, repo, expectedBuild string, targets signedReleaseTargets) (releaseInstallOutcome, error) {
+	var outcome releaseInstallOutcome
 	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	u, err := url.Parse(baseURL)
 	if err != nil || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") {
-		return security.ReleaseManifest{}, errors.New("invalid release base URL")
+		return outcome, errors.New("invalid release base URL")
 	}
 	if targets.Agent == "" || targets.Core == "" || targets.Realm == "" ||
 		!filepath.IsAbs(targets.Agent) || !filepath.IsAbs(targets.Core) || !filepath.IsAbs(targets.Realm) {
-		return security.ReleaseManifest{}, errors.New("release install targets must be absolute")
+		return outcome, errors.New("release install targets must be absolute")
 	}
 	ctx, cancel := context.WithTimeout(ctx, releaseUpdateTimeout)
 	defer cancel()
@@ -129,7 +154,7 @@ func downloadAndInstallSignedRelease(ctx context.Context, baseClient *http.Clien
 	} else {
 		tmpDir, err = os.MkdirTemp("", "oboard-signed-update.*")
 		if err != nil {
-			return security.ReleaseManifest{}, err
+			return outcome, err
 		}
 		defer os.RemoveAll(tmpDir)
 	}
@@ -137,56 +162,105 @@ func downloadAndInstallSignedRelease(ctx context.Context, baseClient *http.Clien
 	manifestPath := filepath.Join(tmpDir, "release-manifest.json")
 	signaturePath := filepath.Join(tmpDir, "release-manifest.json.sig")
 	if err := downloadReleaseAsset(ctx, client, baseURL+"/release-manifest.json", manifestPath, maxReleaseManifestBytes, nil); err != nil {
-		return security.ReleaseManifest{}, err
+		return outcome, err
 	}
 	if err := downloadReleaseAsset(ctx, client, baseURL+"/release-manifest.json.sig", signaturePath, maxReleaseSignatureBytes, nil); err != nil {
-		return security.ReleaseManifest{}, err
+		return outcome, err
 	}
 	manifest, err := verifyDownloadedManifest(manifestPath, signaturePath, strings.TrimSpace(repo), strings.TrimSpace(expectedBuild))
 	if err != nil {
-		return security.ReleaseManifest{}, err
+		return outcome, err
 	}
 	agentName := "oboard-agent-" + runtime.GOOS + "-" + runtime.GOARCH
 	coreName := "oboard-sb-" + runtime.GOOS + "-" + runtime.GOARCH
 	realmName := "oboard-realm-" + runtime.GOOS + "-" + runtime.GOARCH
 	agentFile, err := validateManifestBinary(manifest, agentName, "agent")
 	if err != nil {
-		return security.ReleaseManifest{}, err
+		return outcome, err
 	}
 	coreFile, err := validateManifestBinary(manifest, coreName, "sb")
 	if err != nil {
-		return security.ReleaseManifest{}, err
+		return outcome, err
 	}
 	realmFile, err := validateManifestBinary(manifest, realmName, "realm")
 	if err != nil {
-		return security.ReleaseManifest{}, err
+		return outcome, err
 	}
 	for _, file := range []security.ReleaseManifestFile{agentFile, coreFile, realmFile} {
 		if err := downloadReleaseAsset(ctx, client, baseURL+"/"+file.Name, filepath.Join(tmpDir, file.Name), maxReleaseBinaryBytes, &file); err != nil {
-			return security.ReleaseManifest{}, err
+			return outcome, err
 		}
 	}
 	if err := ctx.Err(); err != nil {
-		return security.ReleaseManifest{}, fmt.Errorf("release update stopped before verification: %w", err)
+		return outcome, fmt.Errorf("release update stopped before verification: %w", err)
 	}
 	if err := VerifyReleaseFiles(manifestPath, signaturePath, tmpDir, runtime.GOOS, runtime.GOARCH, []string{agentName, coreName, realmName}); err != nil {
-		return security.ReleaseManifest{}, err
+		return outcome, err
 	}
 	if err := ctx.Err(); err != nil {
-		return security.ReleaseManifest{}, fmt.Errorf("release update stopped before installation: %w", err)
+		return outcome, fmt.Errorf("release update stopped before installation: %w", err)
 	}
 	// Disk preflight before committing to filesystem
 	if err := checkUpdateDiskBudget(targets, agentFile.Size, coreFile.Size, realmFile.Size); err != nil {
-		return security.ReleaseManifest{}, err
+		return outcome, err
+	}
+	// The downloaded kernel is validated against the configuration this node is
+	// serving right now, while nothing on disk has been replaced yet. Doing it
+	// after installation is what leaves a node running its old working kernel
+	// with an incompatible executable staged for the next restart.
+	state, note, err := preflightStagedCore(filepath.Join(tmpDir, coreName), targets.ActiveConfig, coreCheckTimeout)
+	outcome.CorePreflight = state
+	outcome.CorePreflightNote = note
+	if err != nil {
+		return outcome, err
 	}
 	if err := installVerifiedReleaseFiles([]stagedReleaseFile{
 		{source: filepath.Join(tmpDir, agentName), target: targets.Agent},
 		{source: filepath.Join(tmpDir, coreName), target: targets.Core},
 		{source: filepath.Join(tmpDir, realmName), target: targets.Realm},
 	}); err != nil {
-		return security.ReleaseManifest{}, err
+		return outcome, err
 	}
-	return manifest, nil
+	outcome.Manifest = manifest
+	return outcome, nil
+}
+
+// coreCheckTimeout bounds `oboard-sb -check` on a staged binary. Validation is
+// pure parsing and never reaches the network, so a long stall is itself a
+// signal rather than a slow but healthy check.
+const coreCheckTimeout = 30 * time.Second
+
+// preflightStagedCore runs the downloaded kernel against the live configuration
+// before the update is committed.
+//
+// Only a verdict from the binary is treated as fatal: an ExitError means the
+// kernel parsed the configuration and rejected it, so installing it would arm a
+// broken restart. Anything else (the staged file cannot be executed on this
+// filesystem, the check times out) yields no verdict, and blocking every update
+// on that would be worse than proceeding — those cases are reported as skipped
+// so the task result shows the update was not preflighted.
+func preflightStagedCore(stagedCore, configPath string, timeout time.Duration) (string, string, error) {
+	configPath = strings.TrimSpace(configPath)
+	if configPath == "" {
+		return corePreflightNotDeployed, "no active kernel configuration path", nil
+	}
+	info, err := os.Stat(configPath)
+	if err != nil || info.Size() == 0 {
+		// Nothing is deployed yet. The first apply validates before it writes.
+		return corePreflightNotDeployed, "no kernel configuration is deployed yet", nil
+	}
+	if err := os.Chmod(stagedCore, 0o700); err != nil {
+		return corePreflightSkipped, "staged kernel is not executable: " + err.Error(), nil
+	}
+	runErr := runCommand(timeout, stagedCore, "-check", "-config", configPath)
+	if runErr == nil {
+		return corePreflightValidated, "", nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(runErr, &exitErr) {
+		return corePreflightSkipped, "", fmt.Errorf("downloaded kernel rejected the active configuration; update aborted before any file was replaced: %w", runErr)
+	}
+	return corePreflightSkipped, "staged kernel could not be validated: " + runErr.Error(), nil
 }
 
 func checkUpdateDiskBudget(targets signedReleaseTargets, sizes ...int64) error {

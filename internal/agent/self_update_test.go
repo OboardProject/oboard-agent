@@ -90,8 +90,8 @@ func TestDownloadAndInstallSignedRelease(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Build != manifest.Build {
-		t.Fatalf("installed build = %q", got.Build)
+	if got.Manifest.Build != manifest.Build {
+		t.Fatalf("installed build = %q", got.Manifest.Build)
 	}
 	assertFileContent(t, targets.Agent, agentData)
 	assertFileContent(t, targets.Core, coreData)
@@ -539,5 +539,90 @@ func assertFileContent(t *testing.T, path string, want []byte) {
 	}
 	if string(got) != string(want) {
 		t.Fatalf("%s = %q, want %q", path, got, want)
+	}
+}
+
+func writeStagedCoreStub(t *testing.T, dir, name string, exitCode int) string {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	script := fmt.Sprintf("#!/bin/sh\nexit %d\n", exitCode)
+	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// A downloaded kernel that rejects the live configuration must abort the update
+// while every file on disk is still the working one. Installing first leaves a
+// node whose running process is the old kernel and whose executable is a build
+// that fails at the next restart.
+func TestPreflightStagedCoreRejectsIncompatibleKernel(t *testing.T) {
+	dir := t.TempDir()
+	staged := writeStagedCoreStub(t, dir, "oboard-sb-staged", 1)
+	config := filepath.Join(dir, "sing-box.json")
+	if err := os.WriteFile(config, []byte(`{"log":{"level":"warn"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	state, _, err := preflightStagedCore(staged, config, 10*time.Second)
+	if err == nil {
+		t.Fatal("an incompatible kernel must abort the update")
+	}
+	if !strings.Contains(err.Error(), "rejected the active configuration") {
+		t.Fatalf("unexpected preflight error: %v", err)
+	}
+	if state != corePreflightSkipped {
+		t.Fatalf("preflight state = %q", state)
+	}
+}
+
+func TestPreflightStagedCoreAcceptsCompatibleKernel(t *testing.T) {
+	dir := t.TempDir()
+	staged := writeStagedCoreStub(t, dir, "oboard-sb-staged", 0)
+	config := filepath.Join(dir, "sing-box.json")
+	if err := os.WriteFile(config, []byte(`{"log":{"level":"warn"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	state, _, err := preflightStagedCore(staged, config, 10*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state != corePreflightValidated {
+		t.Fatalf("preflight state = %q, want validated", state)
+	}
+}
+
+// Nothing is deployed yet on a fresh node, so there is no configuration to
+// validate against and the update proceeds.
+func TestPreflightStagedCoreSkipsWithoutDeployedConfig(t *testing.T) {
+	dir := t.TempDir()
+	staged := writeStagedCoreStub(t, dir, "oboard-sb-staged", 1)
+	state, _, err := preflightStagedCore(staged, filepath.Join(dir, "sing-box.json"), 10*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state != corePreflightNotDeployed {
+		t.Fatalf("preflight state = %q, want not_deployed", state)
+	}
+	state, _, err = preflightStagedCore(staged, "", 10*time.Second)
+	if err != nil || state != corePreflightNotDeployed {
+		t.Fatalf("empty config path: state=%q err=%v", state, err)
+	}
+}
+
+// A staged binary that cannot be executed at all yields no verdict. Blocking
+// every update on that would be worse than proceeding, so it is recorded as
+// skipped instead of failing the task.
+func TestPreflightStagedCoreSkipsWhenBinaryCannotRun(t *testing.T) {
+	dir := t.TempDir()
+	config := filepath.Join(dir, "sing-box.json")
+	if err := os.WriteFile(config, []byte(`{"log":{"level":"warn"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	state, note, err := preflightStagedCore(filepath.Join(dir, "does-not-exist"), config, 10*time.Second)
+	if err != nil {
+		t.Fatalf("a missing staged binary must not fail the update: %v", err)
+	}
+	if state != corePreflightSkipped || note == "" {
+		t.Fatalf("preflight state = %q note = %q", state, note)
 	}
 }

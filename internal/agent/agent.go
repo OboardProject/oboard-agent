@@ -1312,13 +1312,19 @@ func (r *Runner) updateAgentBinary(payloadJSON string) (map[string]any, error) {
 	}
 	r.coreLifecycleMu.Lock()
 	defer r.coreLifecycleMu.Unlock()
+	hostLock, hostLockErr := r.acquireHostCoreLock(hostCoreLockWait)
+	if hostLockErr != nil {
+		return map[string]any{"message": "agent update deferred", "source": source, "installed": false}, hostLockErr
+	}
+	defer hostLock.release()
 	beforeAgent := version.String()
 	beforeCore := strings.TrimSpace(commandText(3*time.Second, r.coreBinary(), "-version"))
 	targets, err := r.signedReleaseTargets()
 	if err != nil {
 		return map[string]any{"message": "agent update failed", "source": source}, err
 	}
-	manifest, err := downloadAndInstallSignedRelease(context.Background(), r.client, releaseBaseURL, repo, payload.ExpectedBuild, targets)
+	outcome, err := downloadAndInstallSignedRelease(context.Background(), r.client, releaseBaseURL, repo, payload.ExpectedBuild, targets)
+	manifest := outcome.Manifest
 	result := map[string]any{
 		"message":        "agent update completed",
 		"controller_url": controllerURL,
@@ -1329,6 +1335,12 @@ func (r *Runner) updateAgentBinary(payloadJSON string) (map[string]any, error) {
 		"before_core":    beforeCore,
 		"installed":      false,
 		"restart":        "after_result_acknowledged",
+	}
+	if outcome.CorePreflight != "" {
+		result["core_preflight"] = outcome.CorePreflight
+	}
+	if outcome.CorePreflightNote != "" {
+		result["core_preflight_note"] = outcome.CorePreflightNote
 	}
 	if err != nil {
 		result["message"] = "agent update failed"
@@ -2083,6 +2095,14 @@ func (r *Runner) applyCoreConfigTask(version int64, payload model.ApplyCoreConfi
 func (r *Runner) applyCoreConfigUnlocked(version int64, config string) (map[string]any, error) {
 	r.coreLifecycleMu.Lock()
 	defer r.coreLifecycleMu.Unlock()
+	// An operator running the shell update at the same moment is replacing the
+	// kernel binary and restarting the service outside this process. Applying
+	// on top of that races the file it is installing.
+	hostLock, hostLockErr := r.acquireHostCoreLock(hostCoreLockWait)
+	if hostLockErr != nil {
+		return map[string]any{"message": "config apply deferred", "version": version, "reload_strategy": "host_lock_busy"}, hostLockErr
+	}
+	defer hostLock.release()
 	r.forwardLifecycleMu.Lock()
 	defer r.forwardLifecycleMu.Unlock()
 	result := map[string]any{
@@ -2091,7 +2111,7 @@ func (r *Runner) applyCoreConfigUnlocked(version int64, config string) (map[stri
 		"validated":           false,
 		"reload_strategy":     "pending",
 		"connection_draining": true,
-		"connection_note":     "hot reload is attempted first; existing connections should be preserved when supported by the running core/service",
+		"connection_note":     "oboard-sb has no in-process reload; an operational change is applied with a controlled restart and verified against the running kernel",
 	}
 	finishOperationalApply := func(message, strategy string, draining bool) (map[string]any, error) {
 		result["message"] = message
@@ -2249,12 +2269,7 @@ func (r *Runner) applyCoreConfigUnlocked(version int64, config string) (map[stri
 			result["rollback_error"] = restoreErr.Error()
 			return
 		}
-		if restoreErr := r.reloadCore(); restoreErr != nil {
-			result["rollback_reload_error"] = restoreErr.Error()
-			if restartErr := r.restartCore(); restartErr != nil {
-				result["rollback_restart_error"] = restartErr.Error()
-			}
-		}
+		r.restoreCoreRuntime(ctx, previousConfig, result)
 	}
 	removedListenResources := removedInboundListenResources(previousConfig, []byte(config))
 	if len(removedListenResources) > 0 {
@@ -2262,12 +2277,15 @@ func (r *Runner) applyCoreConfigUnlocked(version int64, config string) (map[stri
 		result["restart_reason"] = "inbound listen resource removed or changed"
 		result["removed_listen_resources"] = removedListenResources
 	} else {
-		canReload := true
-		if r.managedReloadEnabled() {
-			if !r.coreHotReloadSupported() {
-				canReload = false
-				result["reload_error"] = "oboard-sb does not support in-process configuration reload"
-			} else if err := r.coreServiceActive(); err != nil {
+		// Core capability decides this, not the service-manager wiring. An
+		// unmanaged reload_command used to skip the capability check entirely,
+		// which reported "hot_reload" for oboard-sb even though nothing had
+		// reloaded it.
+		canReload := r.coreHotReloadSupported()
+		if !canReload {
+			result["reload_error"] = "the configured core has no in-process configuration reload; applying with a controlled restart"
+		} else if r.managedReloadEnabled() {
+			if err := r.coreServiceActive(); err != nil {
 				canReload = false
 				result["reload_error"] = "core service is not running: " + err.Error()
 			}
@@ -2378,6 +2396,15 @@ func (r *Runner) managedRestartEnabled() bool {
 	return strings.TrimSpace(r.Config().RestartCommand) != "none"
 }
 
+// coreHotReloadSupported reports whether the configured core really implements
+// an in-process configuration reload.
+//
+// oboard-sb does not: cmd/oboard-sb only installs SIGINT/SIGTERM handlers, so a
+// reload signal is never a reload. Every oboard-sb configuration change and
+// every rollback therefore goes through a controlled restart that is verified
+// against GET /runtime/status. Operators pointing Agent at a third-party core
+// keep the reload path. This must stay false for oboard-sb until the kernel
+// advertises a real runtime-reload capability.
 func (r *Runner) coreHotReloadSupported() bool {
 	binary := strings.ToLower(filepath.Base(strings.TrimSpace(r.coreBinary())))
 	service := strings.ToLower(strings.TrimSpace(r.coreService()))
