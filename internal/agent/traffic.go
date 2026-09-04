@@ -906,16 +906,19 @@ func applyTrafficLedgerResponse(state *trafficLocalState, resp trafficReportResp
 // terminalTrafficRejectionReason lists the Controller reasons that mean a
 // report will never be accounted. They are business outcomes, not counter
 // problems, so they must not put the local traffic state into recovery.
-// binding_removed is accepted defensively; Controller currently answers an
-// unauthorized user/inbound pair with 403 instead of a per-report rejection.
+//
+// binding_removed is the live reason for a user that is no longer bound to the
+// inbound. Retrying one is what turned a single stale report into a batch that
+// could never drain, stalling lease renewal for every user on the server.
 func terminalTrafficRejectionReason(reason string) bool {
 	switch strings.TrimSpace(reason) {
 	case "user_deleted", "user_inactive", "binding_removed", "inbound_deleted", "inbound_disabled", "path_removed",
-		// The Controller will never account a report for a pair it does not
-		// authorize. Retrying one is what turned a single stale report into a
-		// batch that could never drain, stalling lease renewal for every user
-		// on the server, so these are dropped locally like any other terminal
-		// outcome.
+		// Tolerated for a Controller older than the split that made
+		// binding_removed a per-report reason. That Controller answered the
+		// same situation with these, and a rolling upgrade can put a newer
+		// Agent in front of it. A current Controller never sends either: its
+		// only remaining request-level refusal is cross-tenant ownership, which
+		// is an HTTP 403 and never a per-report reason.
 		"unauthorized", "forbidden":
 		return true
 	default:

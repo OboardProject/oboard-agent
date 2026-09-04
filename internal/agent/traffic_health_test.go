@@ -62,9 +62,12 @@ func TestNoteTrafficReportOutcomeTracksConsecutiveFailures(t *testing.T) {
 }
 
 func TestTerminalTrafficRejectionCoversAuthorizationRefusals(t *testing.T) {
-	// These two are why a single stale report could stall lease renewal for a
-	// whole server: the Agent used to resend them forever.
-	for _, reason := range []string{"unauthorized", "forbidden"} {
+	// binding_removed is what a current Controller sends for a user that is no
+	// longer bound to the inbound. unauthorized and forbidden are the same
+	// situation from a Controller older than that split, which a rolling
+	// upgrade can still put in front of this Agent. Resending any of them is
+	// what stalled lease renewal for a whole server.
+	for _, reason := range []string{"binding_removed", "unauthorized", "forbidden"} {
 		if !terminalTrafficRejectionReason(reason) {
 			t.Fatalf("%q must be terminal so the Agent stops resending it", reason)
 		}
