@@ -48,8 +48,13 @@ func (r *Runner) runDNSBenchmarkTask(ctx context.Context, plan model.DNSBenchmar
 		}
 		return map[string]any{"skipped": true, "reason": "periodic dns test disabled", "server_id": plan.ServerID}, nil
 	}
-	if plan.PolicyRevision == 0 || plan.EncryptedListID == 0 || plan.BootstrapListID == 0 || len(plan.EncryptedCandidates) == 0 || len(plan.BootstrapCandidates) == 0 {
+	// A plain-DNS-only policy carries no encrypted list and no encrypted
+	// candidates; only the bootstrap group is required for a runnable plan.
+	if plan.PolicyRevision == 0 || plan.BootstrapListID == 0 || len(plan.BootstrapCandidates) == 0 {
 		return map[string]any{"skipped": true, "reason": "empty dns benchmark plan"}, nil
+	}
+	if (plan.EncryptedListID == 0) != (len(plan.EncryptedCandidates) == 0) {
+		return map[string]any{"skipped": true, "reason": "inconsistent dns benchmark encrypted group"}, nil
 	}
 	if err := validateDNSBenchmarkPlan(plan); err != nil {
 		return map[string]any{"server_id": plan.ServerID}, err
@@ -90,10 +95,14 @@ func (r *Runner) runDNSBenchmarkTask(ctx context.Context, plan model.DNSBenchmar
 			}
 		}
 	}
+	plainOnly := plan.EncryptedListID == 0
 	var encryptedItems []dnsBenchmarkItem
-	if bootstrapPrimary == nil {
+	switch {
+	case plainOnly:
+		encryptedItems = []dnsBenchmarkItem{}
+	case bootstrapPrimary == nil:
 		encryptedItems = failedDNSBenchmarkItems(plan.EncryptedCandidates, "bootstrap dns has no usable candidate", 2000)
-	} else {
+	default:
 		encryptedItems = benchmarkDNSCandidates(runCtx, plan.EncryptedCandidates, 2*time.Second, semaphore, bootstrapPrimary)
 	}
 	encryptedBest := bestDNSBenchmarks(encryptedItems, 2)
@@ -110,10 +119,14 @@ func (r *Runner) runDNSBenchmarkTask(ctx context.Context, plan model.DNSBenchmar
 		Encrypted:             model.DNSBenchmarkGroup{Items: encryptedItems, BestTags: benchmarkTags(encryptedBest)},
 		Bootstrap:             model.DNSBenchmarkGroup{Items: bootstrapItems, BestTags: benchmarkTags(bootstrapBest)},
 	}
-	if len(encryptedBest) == 0 || len(bootstrapBest) == 0 {
+	switch {
+	case len(bootstrapBest) == 0:
+		result.Status = "failed"
+		result.Error = "bootstrap dns group requires at least one usable candidate"
+	case !plainOnly && len(encryptedBest) == 0:
 		result.Status = "failed"
 		result.Error = "both encrypted and bootstrap dns groups require at least one usable candidate"
-	} else {
+	default:
 		result.Status = "succeeded"
 	}
 

@@ -1083,11 +1083,19 @@ Agent validates the two candidate groups, benchmarks bootstrap first, and select
 up to two usable bootstrap tags. Encrypted candidates whose server is a hostname
 are resolved through the selected bootstrap primary before probing; TLS SNI and
 the HTTP Host remain the original encrypted candidate names. Agent then posts
-both complete item arrays and both fastest-tag arrays. One group with no usable
-candidate fails the complete run. Total concurrency is four, the whole candidate
+both complete item arrays and both fastest-tag arrays. A bound group with no
+usable candidate fails the complete run. Total concurrency is four, the whole candidate
 operation (bootstrap resolution plus encrypted query) has a two-second deadline,
 and a run has a 45-second deadline. `mode: "never"` clears retained policy,
 revision-keyed first-apply history, and cached best results.
+
+A plain-DNS-only policy sends `encrypted_list_id: 0`,
+`encrypted_list_revision: 0`, and an empty `encrypted_candidates` array. Agent
+then benchmarks the bootstrap group alone, reports an empty encrypted group, and
+succeeds on a usable bootstrap candidate. A plan that sets `encrypted_list_id` to
+zero while still carrying encrypted candidates (or the reverse) is skipped as
+inconsistent instead of being probed. Only the bootstrap group is required for a
+runnable plan.
 
 ### `benchmark_dns`
 
@@ -1439,6 +1447,12 @@ transaction. Agent-supplied candidate/resolver fields are never trusted. Stale
 results remain in history but cannot update policy or trigger apply. Periodic
 reports never have apply authority; only a current successful manual run created
 with `test_and_apply` can queue targeted `apply_core_config`.
+
+A plain-DNS-only policy reports `encrypted_list_id: 0`,
+`encrypted_list_revision: 0`, and an empty `encrypted` group. Controller rejects
+a report that sets only one of the two encrypted fields to zero, and one that
+carries encrypted items while naming no encrypted list. Such a report succeeds
+on a usable bootstrap group alone.
 
 ### `POST /api/v1/agent/mtu-detections`
 

@@ -1271,6 +1271,41 @@ func TestDNSBenchmarkFailsWhenStateCannotBeRead(t *testing.T) {
 	}
 }
 
+func TestDNSBenchmarkAcceptsPlanWithoutEncryptedGroup(t *testing.T) {
+	dir := t.TempDir()
+	r := New(Config{StateDir: dir, RestartCommand: "none", ResourceProfile: "large"})
+	plan := testDNSBenchmarkPlan()
+	plan.EncryptedListID = 0
+	plan.EncryptedListRevision = 0
+	plan.EncryptedCandidates = nil
+	state := dnsBenchmarkLocalState{LastRun: map[string]time.Time{dnsBenchmarkPlanKey(plan): time.Now().UTC()}}
+	if err := r.saveDNSBenchmarkState(state); err != nil {
+		t.Fatal(err)
+	}
+	result, err := r.runDNSBenchmarkTask(context.Background(), plan, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result["skipped"] != true || result["reason"] != "first_apply already completed" {
+		t.Fatalf("plain-only plan = %#v, want a runnable plan that stops at the first_apply gate", result)
+	}
+}
+
+func TestDNSBenchmarkRejectsInconsistentEncryptedGroup(t *testing.T) {
+	dir := t.TempDir()
+	r := New(Config{StateDir: dir, RestartCommand: "none", ResourceProfile: "large"})
+	plan := testDNSBenchmarkPlan()
+	plan.EncryptedListID = 0
+	plan.EncryptedListRevision = 0
+	result, err := r.runDNSBenchmarkTask(context.Background(), plan, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result["skipped"] != true || result["reason"] != "inconsistent dns benchmark encrypted group" {
+		t.Fatalf("inconsistent plan = %#v, want it rejected before probing", result)
+	}
+}
+
 func testDNSBenchmarkPlan() model.DNSBenchmarkPlan {
 	return model.DNSBenchmarkPlan{
 		ServerID: 7, PolicyRevision: 3, EncryptedListID: 11, EncryptedListRevision: 4, BootstrapListID: 12, BootstrapListRevision: 5,
