@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/OboardProject/oboard-agent/internal/model"
 )
@@ -337,5 +338,80 @@ func TestCheckTrafficPolicyRevisionGate(t *testing.T) {
 	skipped, err = checkTrafficPolicyRevision(10, applied, 11, different)
 	if err != nil || skipped {
 		t.Fatalf("newer revision should apply, err=%v skipped=%v", err, skipped)
+	}
+}
+
+// An SSH counter that produced bytes before its runtime policy arrived has no
+// period key yet. Sending that observation made the Controller fail the entire
+// batch, and because the stream stays in local state the same batch failed on
+// every retry - so the Agent never received the policy that would have supplied
+// the missing period. An unusable observation is dropped locally instead.
+func TestTrafficStreamWireBatchDropsUnusableIdentities(t *testing.T) {
+	state := &trafficLocalState{Streams: map[string]*trafficStreamState{
+		"stream-no-period": {Source: trafficSourceSSH, SnapshotKey: "ssh-inbound:4:user:7", CounterEpoch: "ce_1", PeriodKey: "", UserID: 7, ObservedUpload: 10},
+		"stream-no-user":   {Source: trafficSourceCore, SnapshotKey: "user:8", CounterEpoch: "ce_1", PeriodKey: "2026-09", UserID: 0, ObservedUpload: 10},
+		"stream-ok":        {Source: trafficSourceCore, SnapshotKey: "user:9", CounterEpoch: "ce_1", PeriodKey: "2026-09", UserID: 9, ObservedUpload: 10},
+	}}
+	batch := trafficStreamWireBatch(state, []trafficSnapshotItem{
+		{Source: trafficSourceSSH, Key: "ssh-inbound:5:user:11", CounterEpoch: "ce_2", PeriodKey: "", UserID: 11, Upload: 5},
+	})
+	if len(batch) != 1 {
+		t.Fatalf("wire batch = %#v, want only the complete stream", batch)
+	}
+	if batch[0].UserID != 9 || batch[0].PeriodKey != "2026-09" {
+		t.Fatalf("wire batch kept the wrong stream: %#v", batch[0])
+	}
+}
+
+// Stream state was never pruned, so an entry the Controller can never accept
+// stayed in the state file across restarts and was resent in every batch.
+func TestPruneTrafficStreamsDropsUnusableAndStaleEntries(t *testing.T) {
+	now := time.Now().UTC()
+	fresh := now.Format(time.RFC3339Nano)
+	state := &trafficLocalState{
+		Streams: map[string]*trafficStreamState{
+			"unusable":      {Source: trafficSourceSSH, SnapshotKey: "ssh-inbound:4:user:7", CounterEpoch: "ce_1", PeriodKey: "", UserID: 7, LastObservedAt: fresh},
+			"checkpointed":  {Source: trafficSourceCore},
+			"stale-settled": {Source: trafficSourceCore, SnapshotKey: "user:8", CounterEpoch: "ce_1", PeriodKey: "2026-08", UserID: 8, ObservedUpload: 50, AcceptedUpload: 50, LastObservedAt: now.Add(-trafficStreamRetention - time.Hour).Format(time.RFC3339Nano)},
+			"stale-unsent":  {Source: trafficSourceCore, SnapshotKey: "user:9", CounterEpoch: "ce_1", PeriodKey: "2026-08", UserID: 9, ObservedUpload: 50, AcceptedUpload: 10, LastObservedAt: now.Add(-trafficStreamRetention - time.Hour).Format(time.RFC3339Nano)},
+			"undated":       {Source: trafficSourceCore, SnapshotKey: "user:10", CounterEpoch: "ce_1", PeriodKey: "2026-09", UserID: 10},
+			"live":          {Source: trafficSourceCore, SnapshotKey: "user:11", CounterEpoch: "ce_1", PeriodKey: "2026-09", UserID: 11, LastObservedAt: fresh},
+		},
+	}
+	if !pruneTrafficStreamsLocked(state, now) {
+		t.Fatal("prune reported no change")
+	}
+	for _, id := range []string{"unusable", "checkpointed", "stale-settled"} {
+		if _, ok := state.Streams[id]; ok {
+			t.Fatalf("stream %q survived pruning", id)
+		}
+	}
+	// Unacknowledged bytes and live streams are never dropped, and state
+	// written before the field existed is dated rather than treated as expired.
+	for _, id := range []string{"stale-unsent", "undated", "live"} {
+		if _, ok := state.Streams[id]; !ok {
+			t.Fatalf("stream %q was pruned but must be kept", id)
+		}
+	}
+	if state.Streams["undated"].LastObservedAt == "" {
+		t.Fatal("undated stream was not stamped")
+	}
+}
+
+// A stream still carrying an unreported range is kept even when it is otherwise
+// unusable, so pruning can never drop pending accounting.
+func TestPruneTrafficStreamsKeepsStreamsWithPendingReports(t *testing.T) {
+	now := time.Now().UTC()
+	state := &trafficLocalState{
+		Streams: map[string]*trafficStreamState{
+			"pending": {Source: trafficSourceSSH, SnapshotKey: "ssh-inbound:4:user:7", CounterEpoch: "ce_1", PeriodKey: "", UserID: 7},
+		},
+		PendingReports: map[string]*trafficPendingRange{
+			"r1": {ReportID: "r1", StreamID: "pending", UserID: 7, ToUpload: 100},
+		},
+	}
+	pruneTrafficStreamsLocked(state, now)
+	if _, ok := state.Streams["pending"]; !ok {
+		t.Fatal("a stream with a pending report was pruned")
 	}
 }

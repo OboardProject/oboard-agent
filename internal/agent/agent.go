@@ -83,6 +83,7 @@ type Runner struct {
 	forwardLifecycleMu          sync.Mutex
 	logMu                       sync.Mutex
 	trafficHealthMu             sync.Mutex
+	controllerAuth              controllerAuthBackoff
 	trafficReportFailures       int
 	trafficReportFailingSince   time.Time
 	trafficReportLastLoggedAt   time.Time
@@ -660,6 +661,18 @@ func (r *Runner) Run(ctx context.Context) error {
 		}
 		lived := time.Since(started)
 		authFailure := isAuthReconnectError(err)
+		// The realtime channel and the HTTP callbacks share one identity, so
+		// they share one verdict about it: a rejected handshake quiets the
+		// callbacks too, and a session that actually ran proves the identity
+		// is valid and releases them.
+		if authFailure {
+			r.controllerAuth.arm(time.Now())
+		} else if lived >= 60*time.Second {
+			// The same threshold the reconnect counter already treats as a
+			// real session: it can only be reached after the Controller
+			// accepted this identity.
+			r.controllerAuth.clear()
+		}
 		link := r.recordControllerLinkClosed(time.Now().UTC(), lived, err)
 		if lived >= 60*time.Second {
 			failures = 0
@@ -2633,6 +2646,11 @@ func (r *Runner) postControllerJSON(ctx context.Context, path string, body any, 
 		return err
 	}
 	cfg := r.Config()
+	if auth {
+		if wait := r.controllerAuth.remaining(time.Now()); wait > 0 {
+			return fmt.Errorf("controller rejected this agent identity; callbacks paused for %s", wait.Truncate(time.Second))
+		}
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(cfg.ControllerURL, "/")+path, bytes.NewReader(b))
 	if err != nil {
 		return err
@@ -2653,6 +2671,13 @@ func (r *Runner) postControllerJSON(ctx context.Context, path string, body any, 
 	}
 	if len(data) > controllerResponseLimit {
 		return fmt.Errorf("controller response exceeds %d bytes", controllerResponseLimit)
+	}
+	if auth {
+		if isControllerAuthRejection(resp.StatusCode) {
+			r.controllerAuth.arm(time.Now())
+		} else if resp.StatusCode < 300 {
+			r.controllerAuth.clear()
+		}
 	}
 	if resp.StatusCode >= 300 {
 		return fmt.Errorf("controller returned %s: %s", resp.Status, string(data))

@@ -76,6 +76,11 @@ type trafficStreamState struct {
 	AcceptedDownload int64  `json:"accepted_download"`
 	Status           string `json:"status"`
 	LastError        string `json:"last_error,omitempty"`
+	// LastObservedAt dates the last local counter snapshot that carried this
+	// stream. It is what lets a stream whose inbound or user is gone leave the
+	// state file; without it, every stream this Agent ever saw was resent in
+	// every batch for the lifetime of the installation.
+	LastObservedAt string `json:"last_observed_at,omitempty"`
 }
 
 type trafficPendingRange struct {
@@ -233,8 +238,14 @@ func (r *Runner) collectAndReportTraffic(ctx context.Context) error {
 	defer r.trafficMu.Unlock()
 	state := r.trafficStateLocked()
 	r.convertLegacyPendingToRangesLocked(state)
+	pruned := pruneTrafficStreamsLocked(state, time.Now())
 	items, err := r.snapshotTrafficItems(ctx)
 	if err != nil && len(items) == 0 {
+		if pruned {
+			if saveErr := r.saveTrafficState(*state); saveErr != nil {
+				return saveErr
+			}
+		}
 		if state.RecoveryRequired {
 			return r.reportTrafficLedger(ctx, state, nil)
 		}
@@ -263,7 +274,7 @@ func (r *Runner) collectAndReportTraffic(ctx context.Context) error {
 	}
 	changed := r.observeTrafficSnapshotLocked(state, items, false)
 	converted := r.convertLegacyPendingToRangesLocked(state)
-	if changed || converted {
+	if changed || converted || pruned {
 		if err := r.saveTrafficState(*state); err != nil {
 			return err
 		}
@@ -332,6 +343,7 @@ func (r *Runner) observeTrafficSnapshotLocked(state *trafficLocalState, items []
 		stream.UserID = item.UserID
 		stream.InboundID = item.InboundID
 		stream.PathID = item.PathID
+		stream.LastObservedAt = now
 		period := strings.TrimSpace(item.PeriodKey)
 		epochChanged := stream.CounterEpoch != "" && stream.CounterEpoch != item.CounterEpoch
 		if epochChanged {
@@ -416,6 +428,72 @@ func (r *Runner) observeTrafficSnapshotLocked(state *trafficLocalState, items []
 		changed = true
 	}
 	_ = recovering
+	return changed
+}
+
+// trafficStreamRetention is how long a stream stays in the local state after
+// its last observation. It only applies to fully acknowledged streams, so a
+// pruned entry never drops unreported bytes.
+const trafficStreamRetention = 14 * 24 * time.Hour
+
+// pruneTrafficStreamsLocked drops stream state the Agent can no longer use.
+//
+// Two kinds leave. A stream whose identity is incomplete can never be sent, so
+// keeping it only re-sends an observation the Controller must skip. A stream
+// that has not been observed for trafficStreamRetention belongs to an inbound
+// or user that is gone. Neither is dropped while a pending report still
+// references it, and the stale rule additionally requires every observed byte
+// to be acknowledged, so pruning cannot lose accounting.
+func pruneTrafficStreamsLocked(state *trafficLocalState, now time.Time) bool {
+	if state == nil || len(state.Streams) == 0 {
+		return false
+	}
+	referenced := make(map[string]bool, len(state.PendingReports))
+	for _, report := range state.PendingReports {
+		if report != nil {
+			referenced[report.StreamID] = true
+		}
+	}
+	stamp := now.UTC().Format(time.RFC3339Nano)
+	changed := false
+	for streamID, stream := range state.Streams {
+		if stream == nil {
+			delete(state.Streams, streamID)
+			changed = true
+			continue
+		}
+		if referenced[streamID] {
+			continue
+		}
+		if strings.TrimSpace(stream.SnapshotKey) == "" || strings.TrimSpace(stream.CounterEpoch) == "" ||
+			strings.TrimSpace(stream.PeriodKey) == "" || stream.UserID <= 0 {
+			delete(state.Streams, streamID)
+			changed = true
+			continue
+		}
+		if strings.TrimSpace(stream.LastObservedAt) == "" {
+			// State written before this field existed, or a stub created from
+			// a Controller checkpoint. Date it now rather than treating an
+			// unknown age as expired.
+			stream.LastObservedAt = stamp
+			changed = true
+			continue
+		}
+		observedAt, err := time.Parse(time.RFC3339Nano, stream.LastObservedAt)
+		if err != nil {
+			stream.LastObservedAt = stamp
+			changed = true
+			continue
+		}
+		if now.Sub(observedAt) < trafficStreamRetention {
+			continue
+		}
+		if stream.ObservedUpload != stream.AcceptedUpload || stream.ObservedDownload != stream.AcceptedDownload {
+			continue
+		}
+		delete(state.Streams, streamID)
+		changed = true
+	}
 	return changed
 }
 
@@ -742,7 +820,13 @@ func trafficStreamWireBatch(state *trafficLocalState, items []trafficSnapshotIte
 		if source == "" {
 			source = trafficSourceCore
 		}
-		if key == "" || epoch == "" {
+		// The Controller stores source, stream, epoch, period and user as one
+		// identity, so an observation missing any part of it can never be
+		// recorded. A counter that has produced bytes before its runtime
+		// policy arrived has no period yet; sending it anyway made the
+		// Controller fail the entire batch, including the healthy reports and
+		// the policy response that would have supplied the missing period.
+		if key == "" || epoch == "" || strings.TrimSpace(period) == "" || userID <= 0 {
 			return
 		}
 		streamID := trafficStreamID(source, key)
