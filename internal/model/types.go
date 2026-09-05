@@ -609,14 +609,14 @@ const (
 )
 
 type PortForward struct {
-	ID                   int64                 `json:"id"`
-	Name                 string                `json:"name"`
-	SourceServerID       int64                 `json:"source_server_id"`
-	TargetServerID       int64                 `json:"target_server_id,omitempty"`
-	ListenIP             string                `json:"listen_ip"`
-	ListenPort           int                   `json:"listen_port"`
-	TargetAddress        string                `json:"target_address"`
-	TargetPort           int                   `json:"target_port"`
+	ID                   int64           `json:"id"`
+	Name                 string          `json:"name"`
+	SourceServerID       int64           `json:"source_server_id"`
+	TargetServerID       int64           `json:"target_server_id,omitempty"`
+	ListenIP             string          `json:"listen_ip"`
+	ListenPort           int             `json:"listen_port"`
+	TargetAddress        string          `json:"target_address"`
+	TargetPort           int             `json:"target_port"`
 	Protocol             ForwardProtocol `json:"protocol"`
 	Backend              ForwardBackend  `json:"backend"`
 	ProbeMode            string          `json:"probe_mode"`
@@ -845,11 +845,15 @@ type ExternalEgressProbePlan struct {
 type LatencyProbeTarget struct {
 	ProbeID  string `json:"probe_id"`
 	Kind     string `json:"kind"`
+	TaskID   int64  `json:"task_id,omitempty"`
+	TaskName string `json:"task_name,omitempty"`
 	Province string `json:"province,omitempty"`
 	Carrier  string `json:"carrier,omitempty"`
 	Host     string `json:"host"`
 	IP       string `json:"ip,omitempty"`
 	Port     int    `json:"port"`
+	// IntervalSeconds is the autonomous cadence for this single target. Zero means the plan cadence.
+	IntervalSeconds int `json:"interval_seconds,omitempty"`
 }
 
 type LatencyProbeMode string
@@ -879,6 +883,8 @@ type LatencyProbeTargetsPlan struct {
 type LatencyProbeResult struct {
 	ProbeID      string    `json:"probe_id"`
 	Kind         string    `json:"kind"`
+	TaskID       int64     `json:"task_id,omitempty"`
+	TaskName     string    `json:"task_name,omitempty"`
 	Mode         string    `json:"mode"`
 	Province     string    `json:"province"`
 	Carrier      string    `json:"carrier"`
@@ -1210,66 +1216,66 @@ func TCPFastOpenStateFromMask(mask int) string {
 }
 
 type HealthReport struct {
-	AgentID                   string       `json:"agent_id"`
-	Status                    ServerStatus `json:"status"`
-	PublicIPv4                string       `json:"public_ipv4"`
-	PublicIPv6                string       `json:"public_ipv6"`
-	InterfaceIPv6             string       `json:"interface_ipv6"`
-	RegionCode                string       `json:"region_code"`
-	OS                        string       `json:"os"`
-	DistroID                  string       `json:"distro_id"`
-	DistroVersion             string       `json:"distro_version"`
-	DistroName                string       `json:"distro_name"`
-	Libc                      string       `json:"libc"`
-	ServiceManager            string       `json:"service_manager"`
-	PackageManager            string       `json:"package_manager"`
-	Arch                      string       `json:"arch"`
-	Kernel                    string       `json:"kernel"`
-	CPU                       string       `json:"cpu"`
-	CPUCores                  int          `json:"cpu_cores,omitempty"`
-	MemoryBytes               uint64       `json:"memory_bytes"`
-	CPUUsagePercent           float64      `json:"cpu_usage_percent"`
-	MemoryUsedBytes           uint64       `json:"memory_used_bytes"`
-	MemoryTotalBytes          uint64       `json:"memory_total_bytes"`
-	AgentMemoryBytes          uint64       `json:"agent_memory_bytes"`
-	DiskBytes                 uint64       `json:"disk_bytes"`
-	DiskTotalBytes            uint64       `json:"disk_total_bytes"`
-	DiskAvailableBytes        uint64       `json:"disk_available_bytes,omitempty"`
-	DiskPressure              string       `json:"disk_pressure,omitempty"`
-	StorageProfile            string       `json:"storage_profile,omitempty"`
-	TCPConnectionCount        uint64       `json:"tcp_connection_count"`
-	UDPConnectionCount        uint64       `json:"udp_connection_count"`
-	ProcessCount              uint64       `json:"process_count"`
-	AgentVersion              string       `json:"agent_version"`
-	AgentBuild                string       `json:"agent_build"`
-	SingBoxVersion            string       `json:"sing_box_version"`
-	KernelCapabilities        []string     `json:"kernel_capabilities,omitempty"`
-	TCPFastOpenState          string       `json:"tcp_fastopen_state,omitempty"`
-	TCPFastOpenValue          int          `json:"tcp_fastopen_value,omitempty"`
-	NetworkUploadBPS          uint64       `json:"network_upload_bps"`
-	NetworkDownloadBPS        uint64       `json:"network_download_bps"`
-	NetworkTotalUploadBytes   uint64       `json:"network_total_upload_bytes"`
-	NetworkTotalDownloadBytes uint64       `json:"network_total_download_bytes"`
-	ConnectivityProbeEnabled  bool         `json:"-"`
-	ConnectivityProbeTarget   string       `json:"-"`
-	ConnectivityAvailable     bool         `json:"-"`
-	ConnectivityLatencyMS     int64        `json:"-"`
-	ConnectivityCheckedAt     time.Time    `json:"-"`
-	ConnectivityError         string       `json:"-"`
-	Timestamp                 time.Time                `json:"timestamp"`
-	AppliedConfigVersion      int64                  `json:"applied_config_version,omitempty"`
-	AppliedConfigDigest       string                 `json:"applied_config_digest,omitempty"`
-	RemoteAccess              RemoteAccessReport     `json:"remote_access,omitempty"`
+	AgentID                   string                     `json:"agent_id"`
+	Status                    ServerStatus               `json:"status"`
+	PublicIPv4                string                     `json:"public_ipv4"`
+	PublicIPv6                string                     `json:"public_ipv6"`
+	InterfaceIPv6             string                     `json:"interface_ipv6"`
+	RegionCode                string                     `json:"region_code"`
+	OS                        string                     `json:"os"`
+	DistroID                  string                     `json:"distro_id"`
+	DistroVersion             string                     `json:"distro_version"`
+	DistroName                string                     `json:"distro_name"`
+	Libc                      string                     `json:"libc"`
+	ServiceManager            string                     `json:"service_manager"`
+	PackageManager            string                     `json:"package_manager"`
+	Arch                      string                     `json:"arch"`
+	Kernel                    string                     `json:"kernel"`
+	CPU                       string                     `json:"cpu"`
+	CPUCores                  int                        `json:"cpu_cores,omitempty"`
+	MemoryBytes               uint64                     `json:"memory_bytes"`
+	CPUUsagePercent           float64                    `json:"cpu_usage_percent"`
+	MemoryUsedBytes           uint64                     `json:"memory_used_bytes"`
+	MemoryTotalBytes          uint64                     `json:"memory_total_bytes"`
+	AgentMemoryBytes          uint64                     `json:"agent_memory_bytes"`
+	DiskBytes                 uint64                     `json:"disk_bytes"`
+	DiskTotalBytes            uint64                     `json:"disk_total_bytes"`
+	DiskAvailableBytes        uint64                     `json:"disk_available_bytes,omitempty"`
+	DiskPressure              string                     `json:"disk_pressure,omitempty"`
+	StorageProfile            string                     `json:"storage_profile,omitempty"`
+	TCPConnectionCount        uint64                     `json:"tcp_connection_count"`
+	UDPConnectionCount        uint64                     `json:"udp_connection_count"`
+	ProcessCount              uint64                     `json:"process_count"`
+	AgentVersion              string                     `json:"agent_version"`
+	AgentBuild                string                     `json:"agent_build"`
+	SingBoxVersion            string                     `json:"sing_box_version"`
+	KernelCapabilities        []string                   `json:"kernel_capabilities,omitempty"`
+	TCPFastOpenState          string                     `json:"tcp_fastopen_state,omitempty"`
+	TCPFastOpenValue          int                        `json:"tcp_fastopen_value,omitempty"`
+	NetworkUploadBPS          uint64                     `json:"network_upload_bps"`
+	NetworkDownloadBPS        uint64                     `json:"network_download_bps"`
+	NetworkTotalUploadBytes   uint64                     `json:"network_total_upload_bytes"`
+	NetworkTotalDownloadBytes uint64                     `json:"network_total_download_bytes"`
+	ConnectivityProbeEnabled  bool                       `json:"-"`
+	ConnectivityProbeTarget   string                     `json:"-"`
+	ConnectivityAvailable     bool                       `json:"-"`
+	ConnectivityLatencyMS     int64                      `json:"-"`
+	ConnectivityCheckedAt     time.Time                  `json:"-"`
+	ConnectivityError         string                     `json:"-"`
+	Timestamp                 time.Time                  `json:"timestamp"`
+	AppliedConfigVersion      int64                      `json:"applied_config_version,omitempty"`
+	AppliedConfigDigest       string                     `json:"applied_config_digest,omitempty"`
+	RemoteAccess              RemoteAccessReport         `json:"remote_access,omitempty"`
 	NetworkInventory          *NetworkInterfaceInventory `json:"network_inventory,omitempty"`
-	Storage                   *StorageDiskInfo       `json:"storage,omitempty"`
+	Storage                   *StorageDiskInfo           `json:"storage,omitempty"`
 }
 
 type StorageDiskInfo struct {
-	TotalBytes     uint64 `json:"total_bytes"`
-	AvailableBytes uint64 `json:"available_bytes"`
+	TotalBytes     uint64  `json:"total_bytes"`
+	AvailableBytes uint64  `json:"available_bytes"`
 	UsagePercent   float64 `json:"usage_percent"`
-	StorageProfile string `json:"storage_profile"`
-	Pressure       string `json:"pressure"`
+	StorageProfile string  `json:"storage_profile"`
+	Pressure       string  `json:"pressure"`
 }
 
 type MetricReport struct {

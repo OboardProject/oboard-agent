@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"net"
 	"net/netip"
@@ -34,9 +35,11 @@ const (
 type latencyProbeSamplesFunc func(context.Context, string, int, int, time.Duration, time.Duration) ([]int64, []string)
 
 type latencyProbeLocalState struct {
-	Plan      model.LatencyProbeTargetsPlan    `json:"plan"`
-	LastRunAt time.Time                        `json:"last_run_at"`
-	Pending   []model.LatencyProbeResultReport `json:"pending"`
+	Plan      model.LatencyProbeTargetsPlan `json:"plan"`
+	LastRunAt time.Time                     `json:"last_run_at"`
+	// TargetLastRunAt tracks the last autonomous run per probe target so each task keeps its own cadence.
+	TargetLastRunAt map[string]time.Time             `json:"target_last_run_at,omitempty"`
+	Pending         []model.LatencyProbeResultReport `json:"pending"`
 }
 
 var latencyProbeSequence atomic.Uint32
@@ -85,7 +88,7 @@ func (r *Runner) runLatencyProbeTaskWithProbe(ctx context.Context, plan model.La
 		if plan.Mode == model.LatencyProbeModeICMP {
 			port = 0
 		}
-		items[i] = model.LatencyProbeResult{ProbeID: target.ProbeID, Kind: target.Kind, Mode: string(plan.Mode), Province: target.Province, Carrier: target.Carrier, Host: target.Host, IP: target.IP, Port: port, SampleCount: samples, CheckedAt: now()}
+		items[i] = model.LatencyProbeResult{ProbeID: target.ProbeID, Kind: target.Kind, TaskID: target.TaskID, TaskName: target.TaskName, Mode: string(plan.Mode), Province: target.Province, Carrier: target.Carrier, Host: target.Host, IP: target.IP, Port: port, SampleCount: samples, CheckedAt: now()}
 		if err := validateLatencyProbeTarget(target, plan.Mode); err != nil {
 			items[i].Error = err.Error()
 			continue
@@ -418,6 +421,9 @@ func (r *Runner) setLatencyProbePlan(plan model.LatencyProbeTargetsPlan) error {
 		if err := validateLatencyProbeTarget(target, plan.Mode); err != nil {
 			return err
 		}
+		if target.IntervalSeconds != 0 && (target.IntervalSeconds < 30 || target.IntervalSeconds > 86400) {
+			return errors.New("延迟测试目标间隔无效")
+		}
 	}
 	r.latencyProbeMu.Lock()
 	defer r.latencyProbeMu.Unlock()
@@ -436,11 +442,41 @@ func (r *Runner) setLatencyProbePlan(plan model.LatencyProbeTargetsPlan) error {
 	previous := r.latencyProbeState
 	r.latencyProbeState.Plan = plan
 	r.latencyProbeState.LastRunAt = time.Time{}
+	r.latencyProbeState.TargetLastRunAt = pruneLatencyProbeTargetRuns(r.latencyProbeState.TargetLastRunAt, plan)
 	if err := r.persistLatencyProbeStateLocked(); err != nil {
 		r.latencyProbeState = previous
 		return err
 	}
 	return nil
+}
+
+// pruneLatencyProbeTargetRuns drops per-target run marks whose probe target left the plan.
+func pruneLatencyProbeTargetRuns(runs map[string]time.Time, plan model.LatencyProbeTargetsPlan) map[string]time.Time {
+	if len(runs) == 0 {
+		return nil
+	}
+	keep := make(map[string]time.Time, len(runs))
+	for _, target := range plan.Targets {
+		if at, ok := runs[target.ProbeID]; ok {
+			keep[target.ProbeID] = at
+		}
+	}
+	if len(keep) == 0 {
+		return nil
+	}
+	return keep
+}
+
+// latencyProbeTargetInterval resolves the effective cadence for one target.
+func latencyProbeTargetInterval(target model.LatencyProbeTarget, plan model.LatencyProbeTargetsPlan) time.Duration {
+	seconds := target.IntervalSeconds
+	if seconds <= 0 {
+		seconds = plan.IntervalSeconds
+	}
+	if seconds < 30 {
+		seconds = 30
+	}
+	return time.Duration(seconds) * time.Second
 }
 
 func (r *Runner) startLatencyProbeLoop(ctx context.Context) {
@@ -462,21 +498,61 @@ func (r *Runner) runLatencyProbeIfDue(ctx context.Context, now time.Time) {
 	r.latencyProbeMu.Lock()
 	r.loadLatencyProbeStateLocked()
 	plan := r.latencyProbeState.Plan
-	if !plan.Enabled || len(plan.Targets) == 0 || (!r.latencyProbeState.LastRunAt.IsZero() && now.Sub(r.latencyProbeState.LastRunAt) < time.Duration(plan.IntervalSeconds)*time.Second) {
+	if !plan.Enabled || len(plan.Targets) == 0 {
 		r.latencyProbeMu.Unlock()
 		return
 	}
-	previousRunAt := r.latencyProbeState.LastRunAt
+	// Each task owns its cadence. The controller requires exactly one public
+	// target per report, so a due batch always carries the public target along.
+	due := make([]model.LatencyProbeTarget, 0, len(plan.Targets))
+	regionalDue := false
+	for _, target := range plan.Targets {
+		if target.Kind == "public" {
+			continue
+		}
+		last, seen := r.latencyProbeState.TargetLastRunAt[target.ProbeID]
+		if seen && now.Sub(last) < latencyProbeTargetInterval(target, plan) {
+			continue
+		}
+		due = append(due, target)
+		regionalDue = true
+	}
+	publicDue := r.latencyProbeState.LastRunAt.IsZero() || now.Sub(r.latencyProbeState.LastRunAt) >= time.Duration(plan.IntervalSeconds)*time.Second
+	if !regionalDue && !publicDue {
+		r.latencyProbeMu.Unlock()
+		return
+	}
+	batch := make([]model.LatencyProbeTarget, 0, len(due)+1)
+	for _, target := range plan.Targets {
+		if target.Kind == "public" {
+			batch = append(batch, target)
+		}
+	}
+	batch = append(batch, due...)
+	if len(batch) == 0 {
+		r.latencyProbeMu.Unlock()
+		return
+	}
+	previous := r.latencyProbeState
+	previous.TargetLastRunAt = maps.Clone(r.latencyProbeState.TargetLastRunAt)
 	r.latencyProbeState.LastRunAt = now
+	if r.latencyProbeState.TargetLastRunAt == nil {
+		r.latencyProbeState.TargetLastRunAt = map[string]time.Time{}
+	}
+	for _, target := range due {
+		r.latencyProbeState.TargetLastRunAt[target.ProbeID] = now
+	}
 	if err := r.persistLatencyProbeStateLocked(); err != nil {
-		r.latencyProbeState.LastRunAt = previousRunAt
+		r.latencyProbeState = previous
 		r.latencyProbeMu.Unlock()
 		logging.Errorf("保存延迟测试执行时间失败: %v", err)
 		return
 	}
 	r.latencyProbeMu.Unlock()
 
-	report, _ := r.runLatencyProbeTask(ctx, plan)
+	batchPlan := plan
+	batchPlan.Targets = batch
+	report, _ := r.runLatencyProbeTask(ctx, batchPlan)
 	if len(report.Items) == 0 || report.ReportID == "" {
 		return
 	}
