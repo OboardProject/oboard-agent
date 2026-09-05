@@ -734,6 +734,7 @@ func (r *Runner) connect(ctx context.Context) error {
 		}
 	}()
 	conn.SetReadLimit(1 << 20)
+	configureControllerSocket(conn, controllerSocketReadTimeout)
 	defer r.closeAllTerminalSessions("controller_disconnect")
 	type websocketWriteRequest struct {
 		payload any
@@ -747,7 +748,12 @@ func (r *Runner) connect(ctx context.Context) error {
 			case <-connectionCtx.Done():
 				return
 			case request := <-writes:
-				err := conn.WriteJSON(request.payload)
+				// A Controller that stopped reading would otherwise park this
+				// writer forever, filling the queue and stalling every task ack.
+				err := conn.SetWriteDeadline(time.Now().Add(controllerSocketWriteTimeout))
+				if err == nil {
+					err = conn.WriteJSON(request.payload)
+				}
 				if request.done != nil {
 					request.done <- err
 				}
@@ -933,6 +939,8 @@ func (r *Runner) connect(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		// Any Controller frame proves the link, not just a ping.
+		_ = conn.SetReadDeadline(time.Now().Add(controllerSocketReadTimeout))
 		var typed struct {
 			Type                   string                         `json:"type"`
 			Task                   *model.AgentTask               `json:"task"`

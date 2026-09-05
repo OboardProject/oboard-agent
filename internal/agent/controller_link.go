@@ -41,6 +41,43 @@ const (
 	controllerLinkDetailMaxLength = 200
 )
 
+// controllerSocketReadTimeout bounds how long a silent Controller link is
+// treated as usable. Controller sends a heartbeat every 10s or 20s and a
+// websocket ping every 30s, so silence this long means the link is gone even
+// though TCP has not noticed; the Agent then reconnects instead of sitting on a
+// socket that will never deliver another task. Kept well above both intervals
+// so a slow moment never costs a healthy link.
+const (
+	controllerSocketReadTimeout  = 120 * time.Second
+	controllerSocketWriteTimeout = 20 * time.Second
+)
+
+// configureControllerSocket arms the read deadline and keeps it refreshed from
+// Controller pings. The pong reply mirrors the gorilla default, which this
+// handler replaces: a control write that merely times out is not a reason to
+// drop a link that is otherwise healthy.
+func configureControllerSocket(conn *websocket.Conn, readTimeout time.Duration) {
+	if readTimeout <= 0 {
+		readTimeout = controllerSocketReadTimeout
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(readTimeout))
+	conn.SetPingHandler(func(message string) error {
+		_ = conn.SetReadDeadline(time.Now().Add(readTimeout))
+		err := conn.WriteControl(websocket.PongMessage, []byte(message), time.Now().Add(time.Second))
+		if errors.Is(err, websocket.ErrCloseSent) {
+			return nil
+		}
+		var netErr net.Error
+		if errors.As(err, &netErr) && netErr.Timeout() {
+			return nil
+		}
+		return err
+	})
+	conn.SetPongHandler(func(string) error {
+		return conn.SetReadDeadline(time.Now().Add(readTimeout))
+	})
+}
+
 func (r *Runner) recordControllerLinkConnected(at time.Time) {
 	r.controllerLinkMu.Lock()
 	r.controllerLink.ConnectedAt = at.UTC()
