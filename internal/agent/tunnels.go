@@ -29,6 +29,11 @@ const (
 	managedSSHUser         = "oboard_tunnel"
 	managedSSHHome         = "/var/lib/oboard-ssh"
 	managedSSHReadyTimeout = 150 * time.Second
+	// managedSSHProcessName is the process identity of the managed tunnel
+	// sshd: the host sshd binary is executed through a same-named symlink so
+	// comm, argv[0], and the sshd proctitle all identify the daemon as
+	// OBoard-owned while the link keeps resolving to the host's real sshd.
+	managedSSHProcessName = "oboard-sshd"
 )
 
 type sshTunnelConfig struct {
@@ -290,6 +295,99 @@ func sshServerBinary() string {
 		}
 	}
 	return ""
+}
+
+// managedSSHExecPath returns an absolute path named oboard-sshd that executes
+// the host's real sshd binary. The Linux kernel derives the process comm from
+// the basename of the path passed to execve, so running sshd through this
+// symlink makes comm, argv[0], and the sshd proctitle identify every managed
+// tunnel sshd process as OBoard-owned, while the link keeps resolving to the
+// host binary so distribution updates still take effect. The symlink lives in
+// the private tunnels state directory and is refreshed to follow host sshd
+// relocation. sshd requires an absolute path for its re-exec, which this
+// always provides.
+func managedSSHExecPath(dir string) (string, error) {
+	sshd := sshServerBinary()
+	if sshd == "" {
+		return "", errors.New("sshd is unavailable")
+	}
+	if !filepath.IsAbs(sshd) {
+		if absolute, err := filepath.Abs(sshd); err != nil {
+			return "", fmt.Errorf("resolve %s path: %w", managedSSHProcessName, err)
+		} else {
+			sshd = absolute
+		}
+	}
+	if linkPath, err := managedSSHSymlinkTo(dir, managedSSHProcessName, sshd); err != nil {
+		return "", fmt.Errorf("create %s symlink: %w", managedSSHProcessName, err)
+	} else if linkPath != "" {
+		return linkPath, nil
+	}
+	return "", fmt.Errorf("create %s symlink: %w", managedSSHProcessName, errSymlinkUnavailable)
+}
+
+var errSymlinkUnavailable = errors.New("symlink unavailable")
+
+// managedSSHSessionBinary discovers the per-connection re-exec helper of the
+// host sshd (OpenSSH 9.8+ splits sshd-session out of the listener; 10.0
+// further splits sshd-auth). When present, the managed config points these
+// directives at same-named OBoard symlinks so the per-connection processes
+// are also identifiable as OBoard-owned; the symlinks resolve to the host
+// binaries. Older sshd without the directive simply keeps the single
+// oboard-sshd identity for every process, because its re-exec reuses argv[0].
+func managedSSHSessionBinary(dir, directive, linkName string) string {
+	sshd := sshServerBinary()
+	if sshd == "" {
+		return ""
+	}
+	// #nosec G204 -- sshd is resolved from a fixed executable name or fixed absolute paths; no shell is involved.
+	out, err := commandOutput(10*time.Second, sshd, "-T", "-C", "user=root,host=localhost,addr=127.0.0.1")
+	if err != nil {
+		return ""
+	}
+	var path string
+	for _, line := range strings.Split(out, "\n") {
+		if name, value, found := strings.Cut(line, " "); found && strings.EqualFold(strings.TrimSpace(name), directive) {
+			path = strings.TrimSpace(value)
+			break
+		}
+	}
+	if path == "" || !filepath.IsAbs(path) {
+		return ""
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() {
+		return ""
+	}
+	if linkPath, err := managedSSHSymlinkTo(dir, linkName, path); err == nil {
+		return linkPath
+	}
+	return ""
+}
+
+// managedSSHSymlinkTo (re)points dir/linkName at target and returns the link
+// path, or "" when the link cannot be created. A stale link or unexpected
+// regular file is replaced; a link already pointing at target is kept.
+func managedSSHSymlinkTo(dir, linkName, target string) (string, error) {
+	linkPath := filepath.Join(dir, linkName)
+	if existing, err := os.Readlink(linkPath); err == nil {
+		if existing == target {
+			return linkPath, nil
+		}
+		if err := os.Remove(linkPath); err != nil {
+			return "", err
+		}
+	} else if _, statErr := os.Stat(linkPath); statErr == nil {
+		// A regular file here can only be tampering or a partially failed
+		// removal; never execute it.
+		if err := os.Remove(linkPath); err != nil {
+			return "", err
+		}
+	}
+	if err := os.Symlink(target, linkPath); err != nil {
+		return "", err
+	}
+	return linkPath, nil
 }
 
 func (r *Runner) applyTunnelSet(tunnels []model.Tunnel, result *tunnelApplyResult) error {
@@ -768,9 +866,9 @@ func startManagedSSHServer(dir string, port int) error {
 	if port <= 0 {
 		return errors.New("managed SSH server port is invalid")
 	}
-	sshd := sshServerBinary()
-	if sshd == "" {
-		return errors.New("sshd is unavailable")
+	sshd, err := managedSSHExecPath(dir)
+	if err != nil {
+		return err
 	}
 	hostKeyPath := filepath.Join(dir, "sshd-host-ed25519")
 	if _, err := os.Stat(hostKeyPath); errors.Is(err, os.ErrNotExist) {
@@ -786,7 +884,75 @@ func startManagedSSHServer(dir string, port int) error {
 	configPath := filepath.Join(dir, fmt.Sprintf("sshd-%d.conf", port))
 	pidPath := filepath.Join(dir, fmt.Sprintf("sshd-%d.pid", port))
 	logPath := filepath.Join(dir, fmt.Sprintf("sshd-%d.log", port))
-	config := strings.Join([]string{
+	config, err := managedSSHServerConfig(dir, port, hostKeyPath)
+	if err != nil {
+		return err
+	}
+	if err := atomicWriteFile(configPath, []byte(config), 0o600); err != nil {
+		return err
+	}
+	// #nosec G301 -- OpenSSH requires /run/sshd to be searchable by the daemon before privilege separation.
+	if err := os.MkdirAll("/run/sshd", 0o755); err != nil {
+		return err
+	}
+	if err := runCommand(10*time.Second, sshd, "-t", "-f", configPath); err != nil {
+		return fmt.Errorf("validate managed sshd config: %w", err)
+	}
+	_ = stopManagedProcess(pidPath)
+	// #nosec G304 -- logPath is a fixed file name below the private tunnel state directory.
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return err
+	}
+	// #nosec G204 -- sshd is the oboard-sshd symlink resolving to the host's fixed sshd binary; no shell is involved.
+	cmd := exec.Command(sshd, "-D", "-e", "-f", configPath)
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	if err := cmd.Start(); err != nil {
+		_ = logFile.Close()
+		return err
+	}
+	_ = logFile.Close()
+	waitCh := make(chan error, 1)
+	go func() { waitCh <- cmd.Wait() }()
+	select {
+	case err := <-waitCh:
+		return fmt.Errorf("managed sshd exited before ready: %w%s", err, sshFailureLogSuffix(logPath))
+	case <-time.After(300 * time.Millisecond):
+	}
+	if err := writeManagedPIDFile(pidPath, cmd.Process.Pid, managedSSHProcessName); err != nil {
+		_ = cmd.Process.Kill()
+		return err
+	}
+	address := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp", address, 300*time.Millisecond)
+		if err == nil {
+			_ = conn.Close()
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	_ = stopManagedProcess(pidPath)
+	return fmt.Errorf("managed sshd is not listening on %s%s", address, sshFailureLogSuffix(logPath))
+}
+
+// managedSSHServerConfig renders the sshd_config for the managed tunnel
+// server. The listener itself is always started through the oboard-sshd
+// symlink (see managedSSHExecPath). OpenSSH 9.8+ execs a fixed sshd-session
+// binary for every connection and 10.0+ further execs sshd-auth for
+// authentication; when the host sshd reports those directives through
+// `sshd -T`, they are pointed at OBoard-named symlinks so the per-connection
+// processes are identifiable too. Older sshd re-execs argv[0] (the
+// oboard-sshd symlink) and needs no directive. An unknown directive would
+// fail `sshd -t`, so each is emitted only when the host sshd itself reports
+// it.
+func managedSSHServerConfig(dir string, port int, hostKeyPath string) (string, error) {
+	if _, err := managedSSHExecPath(dir); err != nil {
+		return "", err
+	}
+	configLines := []string{
 		"Port " + strconv.Itoa(port),
 		"AddressFamily any",
 		"HostKey " + hostKeyPath,
@@ -808,56 +974,14 @@ func startManagedSSHServer(dir string, port int) error {
 		"UsePAM no",
 		"StrictModes yes",
 		"LogLevel ERROR",
-		"", // final newline
-	}, "\n")
-	if err := atomicWriteFile(configPath, []byte(config), 0o600); err != nil {
-		return err
 	}
-	// #nosec G301 -- OpenSSH requires /run/sshd to be searchable by the daemon before privilege separation.
-	if err := os.MkdirAll("/run/sshd", 0o755); err != nil {
-		return err
+	if sessionPath := managedSSHSessionBinary(dir, "sshdsessionpath", managedSSHProcessName+"-session"); sessionPath != "" {
+		configLines = append(configLines, "SshdSessionPath "+sessionPath)
 	}
-	if err := runCommand(10*time.Second, sshd, "-t", "-f", configPath); err != nil {
-		return fmt.Errorf("validate managed sshd config: %w", err)
+	if authPath := managedSSHSessionBinary(dir, "sshdauthpath", managedSSHProcessName+"-auth"); authPath != "" {
+		configLines = append(configLines, "SshdAuthPath "+authPath)
 	}
-	_ = stopManagedProcess(pidPath)
-	// #nosec G304 -- logPath is a fixed file name below the private tunnel state directory.
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-	if err != nil {
-		return err
-	}
-	// #nosec G204 -- sshd is resolved from a fixed executable name or fixed absolute paths; no shell is involved.
-	cmd := exec.Command(sshd, "-D", "-e", "-f", configPath)
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
-	if err := cmd.Start(); err != nil {
-		_ = logFile.Close()
-		return err
-	}
-	_ = logFile.Close()
-	waitCh := make(chan error, 1)
-	go func() { waitCh <- cmd.Wait() }()
-	select {
-	case err := <-waitCh:
-		return fmt.Errorf("managed sshd exited before ready: %w%s", err, sshFailureLogSuffix(logPath))
-	case <-time.After(300 * time.Millisecond):
-	}
-	if err := writeManagedPIDFile(pidPath, cmd.Process.Pid, "sshd"); err != nil {
-		_ = cmd.Process.Kill()
-		return err
-	}
-	address := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		conn, err := net.DialTimeout("tcp", address, 300*time.Millisecond)
-		if err == nil {
-			_ = conn.Close()
-			return nil
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	_ = stopManagedProcess(pidPath)
-	return fmt.Errorf("managed sshd is not listening on %s%s", address, sshFailureLogSuffix(logPath))
+	return strings.Join(append(configLines, ""), "\n"), nil
 }
 
 func (r *Runner) applySSHTunnel(dir string, t model.Tunnel) error {

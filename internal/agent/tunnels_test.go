@@ -226,3 +226,180 @@ func TestManagedSSHServerPortValidationIgnoresClientTunnels(t *testing.T) {
 		t.Fatalf("manual SSH client tunnel was treated as a managed server: %v", err)
 	}
 }
+
+// installFakeSSHDBinary places a fake sshd on PATH so the managed symlink
+// resolution can be exercised without a real OpenSSH installation.
+func installFakeSSHDBinary(t *testing.T, script string) string {
+	t.Helper()
+	binDir := t.TempDir()
+	sshdPath := filepath.Join(binDir, "sshd")
+	if err := os.WriteFile(sshdPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return binDir
+}
+
+func TestManagedSSHExecPathRunsThroughOboardSSHSymlink(t *testing.T) {
+	binDir := installFakeSSHDBinary(t, "#!/bin/sh\nexit 0\n")
+	sshdPath := filepath.Join(binDir, "sshd")
+	dir := t.TempDir()
+	linkPath, err := managedSSHExecPath(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Base(linkPath) != managedSSHProcessName {
+		t.Fatalf("exec path base = %q, want %q", filepath.Base(linkPath), managedSSHProcessName)
+	}
+	if resolved, err := os.Readlink(linkPath); err != nil || resolved != sshdPath {
+		t.Fatalf("symlink = %q (%v), want %q", resolved, err, sshdPath)
+	}
+	// A second call with the same host binary is idempotent.
+	if again, err := managedSSHExecPath(dir); err != nil || again != linkPath {
+		t.Fatalf("idempotent exec path = %q (%v)", again, err)
+	}
+}
+
+func TestManagedSSHExecPathFollowsHostSSHDMove(t *testing.T) {
+	firstDir := t.TempDir()
+	firstPath := filepath.Join(firstDir, "sshd")
+	if err := os.WriteFile(firstPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", firstDir+string(os.PathListSeparator)+t.TempDir())
+	dir := t.TempDir()
+	if _, err := managedSSHExecPath(dir); err != nil {
+		t.Fatal(err)
+	}
+	secondDir := t.TempDir()
+	secondPath := filepath.Join(secondDir, "sshd")
+	if err := os.Rename(firstPath, secondPath); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", secondDir+string(os.PathListSeparator)+t.TempDir())
+	linkPath, err := managedSSHExecPath(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved, err := os.Readlink(linkPath); err != nil || resolved != secondPath {
+		t.Fatalf("symlink = %q (%v), want %q", resolved, err, secondPath)
+	}
+}
+
+func TestManagedSSHExecPathRefusesUnexpectedRegularFile(t *testing.T) {
+	installFakeSSHDBinary(t, "#!/bin/sh\nexit 0\n")
+	dir := t.TempDir()
+	linkPath := filepath.Join(dir, managedSSHProcessName)
+	if err := os.WriteFile(linkPath, []byte("#!/bin/sh\nexit 42\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	got, err := managedSSHExecPath(dir)
+	if err != nil {
+		t.Fatalf("regular file must be replaced by the symlink: %v", err)
+	}
+	if _, err := os.Readlink(got); err != nil {
+		t.Fatalf("exec path is not a symlink: %v", err)
+	}
+}
+
+func TestManagedSSHExecPathRequiresHostBinary(t *testing.T) {
+	if sshServerBinary() != "" {
+		t.Skip("host provides a fixed-path sshd that cannot be hidden for this test")
+	}
+	emptyDir := t.TempDir()
+	t.Setenv("PATH", emptyDir)
+	if _, err := managedSSHExecPath(t.TempDir()); err == nil || !strings.Contains(err.Error(), "sshd is unavailable") {
+		t.Fatalf("error = %v, want sshd unavailable", err)
+	}
+}
+
+// A host sshd whose `sshd -T` dump reports sshdsessionpath/sshdauthpath must
+// get OBoard-named symlinks so the per-connection re-exec processes are also
+// identifiable. A host without the directives must get none.
+func TestManagedSSHSessionBinaryCreatesNamedSymlinkWhenDirectiveExists(t *testing.T) {
+	binDir := t.TempDir()
+	helperPath := filepath.Join(binDir, "sshd-session")
+	if err := os.WriteFile(helperPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\nif [ \"$1\" = \"-T\" ]; then echo 'port 22\\nsshdsessionpath " + helperPath + "'; exit 0; fi\nexit 0\n"
+	installFakeSSHDBinary(t, script)
+	dir := t.TempDir()
+	linkPath := managedSSHSessionBinary(dir, "sshdsessionpath", managedSSHProcessName+"-session")
+	if linkPath == "" {
+		t.Fatal("session symlink must be created when the directive is reported")
+	}
+	if resolved, err := os.Readlink(linkPath); err != nil || resolved != helperPath {
+		t.Fatalf("symlink = %q (%v), want %q", resolved, err, helperPath)
+	}
+}
+
+func TestManagedSSHSessionBinarySkipsUnknownDirective(t *testing.T) {
+	installFakeSSHDBinary(t, "#!/bin/sh\nif [ \"$1\" = \"-T\" ]; then echo 'port 22'; exit 0; fi\nexit 0\n")
+	dir := t.TempDir()
+	if got := managedSSHSessionBinary(dir, "sshdauthpath", managedSSHProcessName+"-auth"); got != "" {
+		t.Fatalf("auth symlink = %q, want none without the directive", got)
+	}
+	if _, err := os.Stat(filepath.Join(dir, managedSSHProcessName+"-auth")); !os.IsNotExist(err) {
+		t.Fatalf("no symlink must be left behind: %v", err)
+	}
+}
+
+// The generated config must carry the OBoard identity end to end: the
+// listener is started through the oboard-sshd symlink, and on OpenSSH
+// 9.8+/10.0+ hosts the per-connection re-exec binaries are redirected through
+// OBoard-named symlinks. The fake sshd reports a sshdsessionpath directive so
+// the config rendering can be asserted without a real daemon.
+func TestManagedSSHServerConfigUsesOboardProcessIdentity(t *testing.T) {
+	binDir := t.TempDir()
+	dir := t.TempDir()
+	helperPath := filepath.Join(binDir, "sshd-session")
+	if err := os.WriteFile(helperPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sshdScript := "#!/bin/sh\nif [ \"$1\" = \"-T\" ]; then echo 'port 22\nsshdsessionpath " + helperPath + "'; exit 0; fi\nexit 0\n"
+	installFakeSSHDBinary(t, sshdScript)
+	config, err := managedSSHServerConfig(dir, 2222, filepath.Join(dir, "sshd-host-ed25519"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The listener symlink must exist and point at the host sshd.
+	listenerLink := filepath.Join(dir, managedSSHProcessName)
+	resolved, err := os.Readlink(listenerLink)
+	if err != nil {
+		t.Fatalf("listener symlink missing: %v", err)
+	}
+	if filepath.Base(resolved) != "sshd" {
+		t.Fatalf("listener symlink = %q, want the host sshd", resolved)
+	}
+	// The per-connection helper must be redirected through an OBoard-named
+	// symlink in the generated config.
+	sessionLink := filepath.Join(dir, managedSSHProcessName+"-session")
+	if resolved, err := os.Readlink(sessionLink); err != nil || resolved != helperPath {
+		t.Fatalf("session symlink = %q (%v), want %q", resolved, err, helperPath)
+	}
+	if !strings.Contains(config, "SshdSessionPath "+sessionLink+"\n") {
+		t.Fatalf("generated config missing SshdSessionPath:\n%s", config)
+	}
+	if strings.Contains(config, "SshdAuthPath") {
+		t.Fatalf("SshdAuthPath emitted for a host sshd without the directive:\n%s", config)
+	}
+}
+
+// On an sshd without sshdsessionpath (OpenSSH <= 9.7) the config must not
+// carry any re-exec directive: that sshd re-execs argv[0], which is already
+// the oboard-sshd symlink, and an unknown directive would fail `sshd -t`.
+func TestManagedSSHServerConfigOmitsDirectivesOnLegacySSHD(t *testing.T) {
+	installFakeSSHDBinary(t, "#!/bin/sh\nif [ \"$1\" = \"-T\" ]; then echo 'port 22'; exit 0; fi\nexit 0\n")
+	dir := t.TempDir()
+	config, err := managedSSHServerConfig(dir, 2222, filepath.Join(dir, "sshd-host-ed25519"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(config, "SshdSessionPath") || strings.Contains(config, "SshdAuthPath") {
+		t.Fatalf("legacy sshd config must not carry re-exec directives:\n%s", config)
+	}
+	if _, err := os.Stat(filepath.Join(dir, managedSSHProcessName+"-session")); !os.IsNotExist(err) {
+		t.Fatalf("no session symlink must be left behind: %v", err)
+	}
+}
