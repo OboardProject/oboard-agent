@@ -408,6 +408,16 @@ func (r *Runner) observeTrafficSnapshotLocked(state *trafficLocalState, items []
 		if pendingExists {
 			continue
 		}
+		if item.InboundID <= 0 {
+			// A counter without inbound identity can never be accounted: the
+			// Controller rejects a report that names no inbound. Queuing it used
+			// to wedge the whole batch on every retry, because a request-fatal
+			// rejection never carries a per-report acknowledgement that would
+			// let the pending entry drain. Keep the stream observable but never
+			// queue a report for it.
+			stream.Status = trafficStatusHealthy
+			continue
+		}
 		report := &trafficPendingRange{
 			Source: source, StreamID: streamID, CounterEpoch: item.CounterEpoch, PeriodKey: period,
 			UserID: item.UserID, FromUpload: stream.AcceptedUpload, ToUpload: item.Upload,
@@ -564,6 +574,12 @@ func (r *Runner) convertLegacyPendingToRangesLocked(state *trafficLocalState) bo
 		}
 		if epoch == "" {
 			remaining = append(remaining, pending)
+			continue
+		}
+		if pending.InboundID == nil || *pending.InboundID <= 0 {
+			// Same rule as new reports: a report without inbound identity can
+			// never be accounted, so converting it would only recreate the
+			// wedge the load-time cleanup drops.
 			continue
 		}
 		stream.CounterEpoch = epoch
@@ -800,6 +816,12 @@ func trafficLedgerReportBatch(pending map[string]*trafficPendingRange) []traffic
 		if report == nil {
 			continue
 		}
+		// Final defense: the Controller requires an inbound on every report.
+		// Entries without one are dropped by the load-time cleanup, so this
+		// only guards a state file written by a future regression.
+		if report.InboundID == nil || *report.InboundID <= 0 {
+			continue
+		}
 		out = append(out, trafficLedgerReportItem{
 			ReportID: report.ReportID, Source: report.Source, StreamID: report.StreamID, CounterEpoch: report.CounterEpoch,
 			PeriodKey: report.PeriodKey, UserID: report.UserID, InboundID: report.InboundID, PathID: report.PathID,
@@ -996,7 +1018,7 @@ func applyTrafficLedgerResponse(state *trafficLocalState, resp trafficReportResp
 // could never drain, stalling lease renewal for every user on the server.
 func terminalTrafficRejectionReason(reason string) bool {
 	switch strings.TrimSpace(reason) {
-	case "user_deleted", "user_inactive", "binding_removed", "inbound_deleted", "inbound_disabled", "path_removed",
+	case "user_deleted", "user_inactive", "binding_removed", "inbound_deleted", "inbound_disabled", "path_removed", "invalid_report",
 		// Tolerated for a Controller older than the split that made
 		// binding_removed a per-report reason. That Controller answered the
 		// same situation with these, and a rolling upgrade can put a newer
@@ -1270,6 +1292,18 @@ func migrateLoadedTrafficState(state trafficLocalState, missing bool) trafficLoc
 	}
 	if state.AgentInstanceID == "" {
 		state.AgentInstanceID = newTrafficCounterEpoch()
+	}
+	// A pending report that names no inbound can never be accepted by any
+	// Controller: the ledger requires the inbound identity on every report.
+	// One such entry used to wedge the whole batch on every retry, because a
+	// request-fatal rejection never carries the per-report acknowledgement
+	// that would let it drain. Drop them at load so a server poisoned by an
+	// older configuration self-heals instead of resending the same batch
+	// forever; the local counters stay consistent, so no recovery is due.
+	for id, report := range state.PendingReports {
+		if report == nil || report.InboundID == nil || *report.InboundID <= 0 {
+			delete(state.PendingReports, id)
+		}
 	}
 	if state.SchemaVersion >= trafficStateSchemaV2 {
 		return state

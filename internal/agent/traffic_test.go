@@ -246,9 +246,10 @@ func TestPersistBeforeReloadWritesPendingRange(t *testing.T) {
 func TestLegacyPendingConvertsToCheckpointRange(t *testing.T) {
 	runner := New(Config{StateDir: t.TempDir(), AgentID: "agent-1"})
 	state := runner.trafficStateLocked()
+	inboundID := int64(17)
 	state.Pending = []trafficPendingReport{{
 		ReportID: "legacy-pending", UserID: 7, PeriodKey: "2026-08-01", Upload: 20, Download: 30,
-		SnapshotKey: "user:7", CumulativeUpload: 120, CumulativeDownload: 130,
+		SnapshotKey: "user:7", CumulativeUpload: 120, CumulativeDownload: 130, InboundID: &inboundID,
 	}}
 	state.Last = map[string]trafficSnapshotItem{"user:7": {Key: "user:7", Source: "core", CounterEpoch: "ce_1"}}
 	if !runner.convertLegacyPendingToRangesLocked(state) {
@@ -274,7 +275,7 @@ func TestControllerCheckpointRecoveryDoesNotRebillFromZero(t *testing.T) {
 		}},
 	})
 	runner.observeTrafficSnapshotLocked(state, []trafficSnapshotItem{{
-		Key: "user:7", Source: "core", CounterEpoch: "ce_1", UserID: 7, PeriodKey: "2026-08-01", Upload: 10, Download: 10,
+		Key: "user:7", Source: "core", CounterEpoch: "ce_1", UserID: 7, InboundID: 17, PeriodKey: "2026-08-01", Upload: 10, Download: 10,
 	}}, false)
 	if len(state.PendingReports) != 1 {
 		t.Fatalf("pending = %#v", state.PendingReports)
