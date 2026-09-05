@@ -9,6 +9,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/OboardProject/oboard-agent/internal/model"
 )
 
 func TestParseOSReleaseDebianUbuntuAlpine(t *testing.T) {
@@ -418,5 +420,32 @@ func TestMonitoringModeLocalIntervals(t *testing.T) {
 	}
 	if got := monitoringLocalMetricsInterval("lightweight"); got != 19*time.Second {
 		t.Fatalf("lightweight interval = %s", got)
+	}
+}
+
+func TestTaskResultHealthDoesNotWaitForProbe(t *testing.T) {
+	r := New(Config{AgentID: "task-agent", StateDir: t.TempDir()})
+	if r.taskResultHealth() != nil {
+		t.Fatal("unexpected health before first sample")
+	}
+	r.lastProbe = model.HealthReport{AgentID: "task-agent", Timestamp: time.Now().Add(-time.Hour), AppliedConfigVersion: 1}
+	payload := []byte(`{"version":42}`)
+	if err := r.persistAppliedVersion("apply_deployment", 42, payload); err != nil {
+		t.Fatal(err)
+	}
+	r.probeMu.Lock()
+	defer r.probeMu.Unlock()
+	done := make(chan *model.HealthReport, 1)
+	go func() { done <- r.taskResultHealth() }()
+	select {
+	case health := <-done:
+		if health.AppliedConfigVersion != 42 || health.AppliedConfigDigest != appliedPayloadID("apply_deployment", payload) {
+			t.Fatalf("stale applied config in task result: %#v", health)
+		}
+		if !health.Timestamp.Equal(r.lastProbe.Timestamp) {
+			t.Fatal("cached sample was falsely timestamped as fresh")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("task result blocked behind health probe")
 	}
 }

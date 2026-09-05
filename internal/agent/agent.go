@@ -902,8 +902,8 @@ func (r *Runner) connect(ctx context.Context) error {
 						}
 					}()
 				}
-				health := r.Probe(false)
-				if err := r.ReportTaskResult(ctx, item.task.ID, status, result, &health); err != nil {
+				health := r.taskResultHealth()
+				if err := r.ReportTaskResult(ctx, item.task.ID, status, result, health); err != nil {
 					logging.Errorf("report task %d result: %v", item.task.ID, err)
 					cancelConnection()
 					return
@@ -2686,6 +2686,21 @@ func (r *Runner) postControllerJSON(ctx context.Context, path string, body any, 
 		return json.Unmarshal(data, out)
 	}
 	return nil
+}
+
+// Task completion must not wait for public-IP discovery or another health probe.
+func (r *Runner) taskResultHealth() *model.HealthReport {
+	r.mu.Lock()
+	health := r.lastProbe
+	r.mu.Unlock()
+	if health.AgentID == "" {
+		return nil
+	}
+	if applied, err := r.loadAppliedVersion(); err == nil {
+		health.AppliedConfigVersion = applied.Version
+		health.AppliedConfigDigest = applied.PayloadID
+	}
+	return &health
 }
 
 func (r *Runner) Probe(force bool) model.HealthReport {
