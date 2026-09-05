@@ -2,16 +2,20 @@ package agent
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
 	"math"
 	"net"
+	"net/http"
 	"net/netip"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -45,11 +49,7 @@ type latencyProbeLocalState struct {
 var latencyProbeSequence atomic.Uint32
 
 func (r *Runner) runLatencyProbeTask(ctx context.Context, plan model.LatencyProbeTargetsPlan) (model.LatencyProbeResultReport, error) {
-	probe := tcpProbeSamplesContext
-	if plan.Mode == model.LatencyProbeModeICMP {
-		probe = icmpProbeSamplesContext
-	}
-	return r.runLatencyProbeTaskWithProbe(ctx, plan, probe)
+	return r.runLatencyProbeTaskWithProbe(ctx, plan, nil)
 }
 
 func (r *Runner) runLatencyProbeTaskWithProbe(ctx context.Context, plan model.LatencyProbeTargetsPlan, probe latencyProbeSamplesFunc) (model.LatencyProbeResultReport, error) {
@@ -84,12 +84,13 @@ func (r *Runner) runLatencyProbeTaskWithProbe(ctx context.Context, plan model.La
 	var wg sync.WaitGroup
 	for i, target := range plan.Targets {
 		i, target := i, target
+		mode := latencyTargetMode(target, plan.Mode)
 		port := target.Port
-		if plan.Mode == model.LatencyProbeModeICMP {
+		if mode == model.LatencyProbeModeICMP {
 			port = 0
 		}
-		items[i] = model.LatencyProbeResult{ProbeID: target.ProbeID, Kind: target.Kind, TaskID: target.TaskID, TaskName: target.TaskName, Mode: string(plan.Mode), Province: target.Province, Carrier: target.Carrier, Host: target.Host, IP: target.IP, Port: port, SampleCount: samples, CheckedAt: now()}
-		if err := validateLatencyProbeTarget(target, plan.Mode); err != nil {
+		items[i] = model.LatencyProbeResult{ProbeID: target.ProbeID, Kind: target.Kind, TaskID: target.TaskID, TaskName: target.TaskName, Mode: string(mode), Province: target.Province, Carrier: target.Carrier, Host: target.Host, IP: target.IP, Port: port, SampleCount: samples, CheckedAt: now()}
+		if err := validateLatencyProbeTarget(target, latencyTargetMode(target, plan.Mode)); err != nil {
 			items[i].Error = err.Error()
 			continue
 		}
@@ -107,7 +108,20 @@ func (r *Runner) runLatencyProbeTaskWithProbe(ctx context.Context, plan model.La
 				items[i].Error = "测试等待超时"
 				return
 			}
-			latencies, failures := probe(batchCtx, target.Host, target.Port, samples, interval, timeout)
+			targetProbe := probe
+			host := target.Host
+			if targetProbe == nil {
+				switch mode {
+				case model.LatencyProbeModeTCP:
+					targetProbe = tcpProbeSamplesContext
+				case model.LatencyProbeModeICMP:
+					targetProbe = icmpProbeSamplesContext
+				case model.LatencyProbeModeHTTP:
+					targetProbe = r.httpProbeSamplesContext
+					host = target.URL
+				}
+			}
+			latencies, failures := targetProbe(batchCtx, host, target.Port, samples, interval, timeout)
 			applyLatencyStats(&items[i], latencies, samples)
 			if len(failures) > 0 {
 				items[i].Error = boundedLatencyProbeError(failures[0])
@@ -145,8 +159,8 @@ func validateLatencyProbeTarget(target model.LatencyProbeTarget, mode model.Late
 		if host != "cp.cloudflare.com" && host != "www.12306.cn" && host != "www.gstatic.com" {
 			return errors.New("公网延迟目标无效")
 		}
-	case "regional":
-		if strings.TrimSpace(target.Province) == "" || strings.TrimSpace(target.Carrier) == "" {
+	case "regional", "custom":
+		if target.Kind == "regional" && (strings.TrimSpace(target.Province) == "" || strings.TrimSpace(target.Carrier) == "") {
 			return errors.New("地区目标必须包含省份和运营商")
 		}
 		if addr, err := netip.ParseAddr(host); err == nil {
@@ -159,10 +173,29 @@ func validateLatencyProbeTarget(target model.LatencyProbeTarget, mode model.Late
 	default:
 		return errors.New("延迟目标类型无效")
 	}
-	if mode != model.LatencyProbeModeTCP && mode != model.LatencyProbeModeICMP {
+	if mode != model.LatencyProbeModeTCP && mode != model.LatencyProbeModeICMP && mode != model.LatencyProbeModeHTTP {
 		return errors.New("延迟测试方式无效")
 	}
-	if mode == model.LatencyProbeModeTCP && (target.Port < 1 || target.Port > 65535) {
+	if mode == model.LatencyProbeModeHTTP {
+		u, err := url.Parse(target.URL)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.Fragment != "" || u.Hostname() != host || len(target.URL) > 2048 {
+			return errors.New("HTTP 探测 URL 无效")
+		}
+		port := 80
+		if u.Scheme == "https" {
+			port = 443
+		}
+		if u.Port() != "" {
+			port, err = strconv.Atoi(u.Port())
+			if err != nil {
+				return errors.New("HTTP 探测端口无效")
+			}
+		}
+		if port != target.Port {
+			return errors.New("HTTP 探测端口不匹配")
+		}
+	}
+	if (mode == model.LatencyProbeModeTCP || mode == model.LatencyProbeModeHTTP) && (target.Port < 1 || target.Port > 65535) {
 		return errors.New("TCP 延迟目标端口无效")
 	}
 	return nil
@@ -291,13 +324,14 @@ func tcpProbeSamplesContext(ctx context.Context, host string, port, count int, i
 	if port < 1 || port > 65535 {
 		return nil, []string{"TCP 延迟目标端口无效"}
 	}
-	if _, err := resolveLatencyProbeIPv4(ctx, host); err != nil {
+	targetIP, err := resolveLatencyProbeIPv4(ctx, host)
+	if err != nil {
 		return nil, []string{"目标必须解析到公网 IPv4 地址"}
 	}
 	latencies := make([]int64, 0, count)
 	failures := make([]string, 0, count)
 	dialer := net.Dialer{Timeout: timeout}
-	address := net.JoinHostPort(host, fmt.Sprintf("%d", port))
+	address := net.JoinHostPort(targetIP.String(), fmt.Sprintf("%d", port))
 	for index := 0; index < count; index++ {
 		started := time.Now()
 		conn, err := dialer.DialContext(ctx, "tcp4", address)
@@ -418,7 +452,7 @@ func (r *Runner) setLatencyProbePlan(plan model.LatencyProbeTargetsPlan) error {
 		return errors.New("延迟测试目标数量无效")
 	}
 	for _, target := range plan.Targets {
-		if err := validateLatencyProbeTarget(target, plan.Mode); err != nil {
+		if err := validateLatencyProbeTarget(target, latencyTargetMode(target, plan.Mode)); err != nil {
 			return err
 		}
 		if target.IntervalSeconds != 0 && (target.IntervalSeconds < 30 || target.IntervalSeconds > 86400) {
@@ -657,4 +691,84 @@ func boundedLatencyProbeError(message string) string {
 		message = message[:240]
 	}
 	return message
+}
+
+func latencyTargetMode(target model.LatencyProbeTarget, fallback model.LatencyProbeMode) model.LatencyProbeMode {
+	if target.Mode != "" {
+		return target.Mode
+	}
+	return fallback
+}
+
+func networkProbeHTTPClient(timeout time.Duration, now func() time.Time) *http.Client {
+	transport := &http.Transport{
+		TLSClientConfig:   &tls.Config{MinVersion: tls.VersionTLS12, Time: now},
+		DisableKeepAlives: true,
+		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+			host, port, err := net.SplitHostPort(address)
+			if err != nil {
+				return nil, err
+			}
+			target, err := resolveLatencyProbeIPv4(ctx, host)
+			if err != nil {
+				return nil, err
+			}
+			return (&net.Dialer{Timeout: timeout}).DialContext(ctx, "tcp4", net.JoinHostPort(target.String(), port))
+		},
+		TLSHandshakeTimeout:    timeout,
+		ResponseHeaderTimeout:  timeout,
+		MaxResponseHeaderBytes: 64 << 10,
+	}
+	return &http.Client{Transport: transport, Timeout: timeout, CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		if len(via) > 3 || (req.URL.Scheme != "http" && req.URL.Scheme != "https") || req.URL.User != nil {
+			return errors.New("HTTP 重定向无效或过多")
+		}
+		return nil
+	}}
+}
+
+func (r *Runner) httpProbeSamplesContext(ctx context.Context, address string, _ int, count int, interval, timeout time.Duration) ([]int64, []string) {
+	now := time.Now
+	if r != nil && r.clock != nil {
+		now = r.clock.Now
+	}
+	client := networkProbeHTTPClient(timeout, now)
+	defer client.CloseIdleConnections()
+	return httpProbeSamplesWithClient(ctx, address, count, interval, client)
+}
+
+func httpProbeSamplesWithClient(ctx context.Context, address string, count int, interval time.Duration, client *http.Client) ([]int64, []string) {
+	latencies, failures := []int64{}, []string{}
+	for i := 0; i < count; i++ {
+		if ctx.Err() != nil {
+			return latencies, append(failures, "测试已取消")
+		}
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, address, nil)
+		if err != nil {
+			return latencies, append(failures, "HTTP URL 无效")
+		}
+		request.Header.Set("User-Agent", "OBoard-Network-Probe")
+		started := time.Now()
+		response, err := client.Do(request)
+		if err != nil {
+			failures = append(failures, "HTTP 请求失败")
+		} else {
+			response.Body.Close()
+			if response.StatusCode >= 200 && response.StatusCode < 300 {
+				latencies = append(latencies, time.Since(started).Milliseconds())
+			} else {
+				failures = append(failures, fmt.Sprintf("HTTP %d", response.StatusCode))
+			}
+		}
+		if i+1 < count {
+			timer := time.NewTimer(interval)
+			select {
+			case <-timer.C:
+			case <-ctx.Done():
+				timer.Stop()
+				return latencies, append(failures, "测试已取消")
+			}
+		}
+	}
+	return latencies, failures
 }

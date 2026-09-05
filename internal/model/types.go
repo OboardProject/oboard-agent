@@ -843,15 +843,17 @@ type ExternalEgressProbePlan struct {
 }
 
 type LatencyProbeTarget struct {
-	ProbeID  string `json:"probe_id"`
-	Kind     string `json:"kind"`
-	TaskID   int64  `json:"task_id,omitempty"`
-	TaskName string `json:"task_name,omitempty"`
-	Province string `json:"province,omitempty"`
-	Carrier  string `json:"carrier,omitempty"`
-	Host     string `json:"host"`
-	IP       string `json:"ip,omitempty"`
-	Port     int    `json:"port"`
+	Mode     LatencyProbeMode `json:"mode,omitempty"`
+	URL      string           `json:"url,omitempty"`
+	ProbeID  string           `json:"probe_id"`
+	Kind     string           `json:"kind"`
+	TaskID   int64            `json:"task_id,omitempty"`
+	TaskName string           `json:"task_name,omitempty"`
+	Province string           `json:"province,omitempty"`
+	Carrier  string           `json:"carrier,omitempty"`
+	Host     string           `json:"host"`
+	IP       string           `json:"ip,omitempty"`
+	Port     int              `json:"port"`
 	// IntervalSeconds is the autonomous cadence for this single target. Zero means the plan cadence.
 	IntervalSeconds int `json:"interval_seconds,omitempty"`
 }
@@ -861,6 +863,7 @@ type LatencyProbeMode string
 const (
 	LatencyProbeModeTCP  LatencyProbeMode = "tcp"
 	LatencyProbeModeICMP LatencyProbeMode = "icmp"
+	LatencyProbeModeHTTP LatencyProbeMode = "http"
 )
 
 type LatencyProbeRegion struct {
