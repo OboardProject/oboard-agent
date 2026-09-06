@@ -3,7 +3,9 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -293,5 +295,112 @@ func TestAgentUpdateInstalled(t *testing.T) {
 	}
 	if agentUpdateInstalled("failed", "not json") {
 		t.Fatal("an unparsable result was treated as installed")
+	}
+}
+
+// A release that changes the operational-digest normalization rule splits the
+// two sides of the activation check: the still-running old Agent computes the
+// desired digest with the old rule while the newly restarted kernel reports
+// with the new one. The kernel owns the rule, so when the running build is the
+// one this update just installed and the kernel's own -operational-digest of
+// the file on disk matches what the process reports, the activation is
+// converged instead of failing every credential-bearing node.
+func TestActivateInstalledCoreAcceptsKernelDigestAcrossRuleChange(t *testing.T) {
+	dir := t.TempDir()
+	writeCoreConfig(t, dir, coreConfigA)
+	kernel := newFakeCoreKernel(t, filepath.Join(dir, "sing-box.json"), true)
+	// The restarted kernel reports a digest computed with the new rule, which
+	// differs from what this (old-rule) Agent expects for the same file.
+	kernelRuleDigest := strings.Repeat("ab", 32)
+	kernel.reportDigest(kernelRuleDigest)
+	kernel.stageBuild("new-build")
+	kernel.armRestart()
+	binary := writeFakeCoreBinaryWithDigest(t, dir, "new-build", kernelRuleDigest)
+	r := newRuntimeTestRunnerWithCore(t, dir, kernel, binary)
+	cfg := r.Config()
+	cfg.RestartCommand = "systemd-restart"
+	r.storeConfig(cfg)
+	r.coreRestartCommand = func() error { kernel.bootIfArmed(); return nil }
+	r.coreServiceActiveCheck = func() error { return nil }
+
+	result, err := r.activateInstalledCore(context.Background(), true)
+	if err != nil {
+		t.Fatalf("a kernel-confirmed activation failed: %v (%#v)", err, result)
+	}
+	if result["core_activation"] != "restarted" {
+		t.Fatalf("kernel-confirmed activation was not accepted: %#v", result)
+	}
+	if result["core_running_build_after"] != "0.0.1 / build new-build" {
+		t.Fatalf("the running build was not the installed one: %#v", result)
+	}
+}
+
+// A kernel whose own digest of the file disagrees with what the process
+// reports is a real drift, and the kernel verdict must not clear it.
+func TestActivateInstalledCoreKeepsDriftWhenKernelDigestDisagrees(t *testing.T) {
+	dir := t.TempDir()
+	writeCoreConfig(t, dir, coreConfigA)
+	kernel := newFakeCoreKernel(t, filepath.Join(dir, "sing-box.json"), true)
+	kernel.reportDigest(strings.Repeat("cd", 32))
+	kernel.stageBuild("new-build")
+	kernel.armRestart()
+	// The kernel's own digest of the file differs from the reported digest.
+	binary := writeFakeCoreBinaryWithDigest(t, dir, "new-build", strings.Repeat("ef", 32))
+	r := newRuntimeTestRunnerWithCore(t, dir, kernel, binary)
+	cfg := r.Config()
+	cfg.RestartCommand = "systemd-restart"
+	r.storeConfig(cfg)
+	r.coreRestartCommand = func() error { kernel.bootIfArmed(); return nil }
+	r.coreServiceActiveCheck = func() error { return nil }
+
+	result, err := r.activateInstalledCore(context.Background(), true)
+	if err == nil {
+		t.Fatalf("a real drift was cleared by the kernel verdict: %#v", result)
+	}
+	if result["core_activation"] != "config_drift" {
+		t.Fatalf("unexpected activation result: %#v", result)
+	}
+}
+
+// Kernels that predate -operational-digest cannot arbitrate, so the verdict
+// must report "no answer" and the original drift failure stands.
+func TestActivateInstalledCoreKeepsDriftWhenKernelCannotDigest(t *testing.T) {
+	dir := t.TempDir()
+	writeCoreConfig(t, dir, coreConfigA)
+	kernel := newFakeCoreKernel(t, filepath.Join(dir, "sing-box.json"), true)
+	kernel.reportDigest(strings.Repeat("cd", 32))
+	kernel.stageBuild("new-build")
+	kernel.armRestart()
+	// A kernel that exits 2 for the verb it never learned.
+	binary := writeFakeCoreBinary(t, dir, "new-build")
+	r := newRuntimeTestRunnerWithCore(t, dir, kernel, binary)
+
+	verdict, answered := r.kernelDigestVerdict(context.Background(), filepath.Join(dir, "sing-box.json"), strings.Repeat("cd", 32))
+	if answered {
+		t.Fatal("a kernel without the digest verb was treated as an arbiter")
+	}
+	if verdict {
+		t.Fatal("an unanswered verdict must never confirm convergence")
+	}
+}
+
+// The verdict only accepts a well-formed hex digest from the kernel; garbage
+// output is a non-answer, never a confirmation.
+func TestKernelDigestVerdictRejectsMalformedOutput(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "sb-garbage"), []byte("#!/bin/sh\necho definitely-not-a-digest\n"), 0o755); err != nil { // #nosec G306 -- test fixture
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "sb-empty"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil { // #nosec G306 -- test fixture
+		t.Fatal(err)
+	}
+	r := New(Config{StateDir: dir, ResourceProfile: "large"})
+	for _, binary := range []string{"sb-garbage", "sb-empty"} {
+		if _, answered := r.kernelDigestVerdict(context.Background(), filepath.Join(dir, binary), strings.Repeat("ab", 32)); answered {
+			t.Fatalf("%s output was accepted as an arbiter answer", binary)
+		}
+	}
+	if verdict, answered := r.kernelDigestVerdict(context.Background(), filepath.Join(dir, "sb-garbage"), ""); answered || verdict {
+		t.Fatal("an empty loaded digest must short-circuit")
 	}
 }

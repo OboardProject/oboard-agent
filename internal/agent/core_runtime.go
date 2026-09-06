@@ -736,11 +736,71 @@ func (r *Runner) activateInstalledCoreLocked(ctx context.Context, binaryReplaced
 		return result, fmt.Errorf("core still runs %s after restart, expected %s", after.RunningBuild.String(), after.InstalledBuild.String())
 	}
 	if after.drift() {
+		// The running process positively identifies itself as the build this
+		// update just installed, yet reports a different configuration digest.
+		// The most common cause is a digest-normalization rule that changed in
+		// the same release: the old Agent computes the desired digest with the
+		// old rule while the new kernel reports with the new one, so every
+		// credential-bearing node fails its update on a phantom drift. The
+		// kernel owns the normalization, so ask it to digest the exact file on
+		// disk before declaring the activation failed. Only a kernel that
+		// confirms the running digest from its own rule set clears the drift;
+		// anything else keeps the original failure.
+		if after.BuildState == coreBuildStateCurrent || after.BuildState == coreBuildStateStale {
+			if verdict, ok := r.kernelDigestVerdict(ctx, configPath, after.LoadedDigest); ok && verdict {
+				result["core_activation"] = "restarted"
+				result["core_activation_note"] = "kernel confirmed the loaded configuration with its own digest rule"
+				return result, nil
+			}
+		}
 		result["core_activation"] = "config_drift"
 		return result, fmt.Errorf("core runs configuration %s after restart, expected %s", after.LoadedDigest, after.DesiredDigest)
 	}
 	result["core_activation"] = "restarted"
 	return result, nil
+}
+
+// kernelDigestVerdict asks the installed kernel binary to digest the
+// configuration file with the kernel's own normalization rule. The returned
+// bool is the verdict (the running digest matches the kernel-computed digest
+// of the file on disk); ok=false means the kernel could not answer, in which
+// case the caller keeps its original failure.
+//
+// This exists for the update transition where the normalization rule changed
+// in the same release: the still-running old Agent computes the desired digest
+// with the old rule while the newly restarted kernel reports with the new one.
+// The kernel owns the rule, so its own digest of the same file is the
+// authoritative answer to "is the running process serving this file".
+func (r *Runner) kernelDigestVerdict(ctx context.Context, configPath, loadedDigest string) (bool, bool) {
+	if strings.TrimSpace(loadedDigest) == "" {
+		return false, false
+	}
+	binary := strings.TrimSpace(r.coreBinary())
+	if binary == "" {
+		return false, false
+	}
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, binary, "-operational-digest", "-config", configPath)
+	cmd.Env = []string{}
+	output, err := cmd.Output()
+	if err != nil {
+		return false, false
+	}
+	digest := strings.TrimSpace(string(output))
+	if len(digest) != 64 || !isHexDigest(digest) {
+		return false, false
+	}
+	return digest == loadedDigest, true
+}
+
+func isHexDigest(value string) bool {
+	for _, r := range value {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // coreRuntimeMetadataOnlyChange reports whether two kernel configurations

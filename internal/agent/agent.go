@@ -155,6 +155,11 @@ type Runner struct {
 	controlSend                 func(payload any, wait bool) error
 	agentRestartScheduled       atomic.Bool
 	agentRestartCommand         func() error
+	// coreRestartCommand overrides the service-manager restart in tests. A
+	// nil value keeps the managed presets.
+	coreRestartCommand           func() error
+	// coreServiceActiveCheck overrides the service liveness probe in tests.
+	coreServiceActiveCheck       func() error
 	controllerLinkMu            sync.Mutex
 	controllerLink              controllerLinkDiagnostics
 }
@@ -2455,6 +2460,9 @@ func (r *Runner) coreHotReloadSupported() bool {
 }
 
 func (r *Runner) coreServiceActive() error {
+	if active := r.coreServiceActiveCheck; active != nil {
+		return active()
+	}
 	return managedServiceActive(detectServiceManager(), r.coreService())
 }
 
@@ -2607,6 +2615,9 @@ func (r *Runner) coreService() string {
 func (r *Runner) restartCore() error {
 	if err := r.persistTrafficCheckpointBeforeRuntimeTransition(context.Background()); err != nil {
 		return err
+	}
+	if restart := r.coreRestartCommand; restart != nil {
+		return restart()
 	}
 	restartCommand := strings.TrimSpace(r.Config().RestartCommand)
 	switch restartCommand {

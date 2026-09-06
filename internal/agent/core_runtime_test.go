@@ -40,6 +40,9 @@ type fakeCoreKernel struct {
 	// coreRuntimeBuildIdentityCapability.
 	loadedBuild  string
 	installBuild string
+	// pinnedDigest keeps the reported digest fixed across boots, which stands
+	// for a kernel whose normalization rule differs from the Agent's.
+	pinnedDigest bool
 }
 
 func newFakeCoreKernel(t *testing.T, configPath string, runtimeSupported bool) *fakeCoreKernel {
@@ -136,6 +139,17 @@ func (k *fakeCoreKernel) boot() {
 	if err != nil {
 		return
 	}
+	k.mu.Lock()
+	if k.pinnedDigest {
+		if k.installBuild != "" {
+			k.loadedBuild = k.installBuild
+		}
+		k.generation++
+		k.boots++
+		k.mu.Unlock()
+		return
+	}
+	k.mu.Unlock()
 	digest, err := operationalCoreConfigDigest(raw)
 	if err != nil {
 		return
@@ -165,6 +179,15 @@ func (k *fakeCoreKernel) stageBuild(installed string) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	k.installBuild = installed
+}
+
+// reportDigest pins the digest the running process reports, standing for a
+// kernel that computes the operational digest with its own normalization rule.
+func (k *fakeCoreKernel) reportDigest(digest string) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.loadedDigest = digest
+	k.pinnedDigest = true
 }
 
 func (k *fakeCoreKernel) digest() string {
@@ -208,10 +231,35 @@ func newRuntimeTestRunnerWithCore(t *testing.T, dir string, kernel *fakeCoreKern
 // never touches a process that is already running.
 func writeFakeCoreBinary(t *testing.T, dir, build string) string {
 	t.Helper()
+	return writeFakeCoreBinaryWithDigest(t, dir, build, "")
+}
+
+// writeFakeCoreBinaryWithDigest also teaches the fake kernel the
+// -operational-digest verb. A non-empty digest is printed verbatim for the
+// configuration file the caller passes, which stands for a kernel that owns
+// its own normalization rule; an empty digest keeps the verb unsupported.
+func writeFakeCoreBinaryWithDigest(t *testing.T, dir, build, digest string) string {
+	t.Helper()
 	path := filepath.Join(dir, "oboard-sb")
-	script := "#!/bin/sh\ncat <<'OBOARDEOF'\n" +
-		`{"name":"oboard-sb","version":"0.0.1","build":"` + build + `","commit":""}` +
-		"\nOBOARDEOF\n"
+	var script string
+	if digest == "" {
+		script = "#!/bin/sh\ncat <<'OBOARDEOF'\n" +
+			`{"name":"oboard-sb","version":"0.0.1","build":"` + build + `","commit":""}` +
+			"\nOBOARDEOF\n"
+	} else {
+		// The digest is embedded as a single-quoted literal; hex digits need no
+		// shell escaping. -check still validates, and unknown verbs exit 2 the
+		// way a kernel that predates them does.
+		script = "#!/bin/sh\n" +
+			"case \"$1\" in\n" +
+			"  -version) cat <<'OBOARDEOF'\n" +
+			`{"name":"oboard-sb","version":"0.0.1","build":"` + build + `","commit":""}` + "\nOBOARDEOF\n" +
+			"  ;;\n" +
+			"  -operational-digest) echo '" + digest + "' ;;\n" +
+			"  -check) exit 0 ;;\n" +
+			"  *) exit 2 ;;\n" +
+			"esac\n"
+	}
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil { // #nosec G306 -- test fixture must be executable
 		t.Fatal(err)
 	}

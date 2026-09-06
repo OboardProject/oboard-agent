@@ -37,6 +37,7 @@ type runtimeConfigState struct {
 func main() {
 	config := flag.String("config", "config.json", "sing-box config path")
 	check := flag.Bool("check", false, "validate config and exit")
+	operationalDigest := flag.Bool("operational-digest", false, "print the operational configuration digest for the config file and exit")
 	api := flag.String("api", "", "optional local health API listen address; supports unix:/path.sock")
 	resourceProfile := flag.String("resource-profile", "auto", "resource profile: auto, small, or large")
 	gomaxprocs := flag.Int("gomaxprocs", 0, "runtime GOMAXPROCS override; 0 uses the resource profile")
@@ -50,6 +51,14 @@ func main() {
 
 	if *showVersion {
 		printVersion()
+		return
+	}
+	if *operationalDigest {
+		digest, err := minibox.OperationalConfigDigestFile(*config)
+		if err != nil {
+			log.Fatal(err)
+		}
+		fmt.Println(digest)
 		return
 	}
 
@@ -82,11 +91,11 @@ func main() {
 		return
 	}
 
-	operationalDigest, err := minibox.OperationalConfigDigestFile(*config)
+	loadedOperationalDigest, err := minibox.OperationalConfigDigestFile(*config)
 	if err != nil {
 		log.Fatal(err)
 	}
-	runtimeConfig := runtimeConfigState{OperationalDigest: operationalDigest, StartedAt: time.Now().UTC(), Generation: 1}
+	runtimeConfig := runtimeConfigState{OperationalDigest: loadedOperationalDigest, StartedAt: time.Now().UTC(), Generation: 1}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
