@@ -186,6 +186,11 @@ func removeManagedServiceFile(service string) {
 	}
 }
 
+// shellQuoteValue wraps value in POSIX single quotes. An embedded single quote
+// must close the quoted run, contribute one backslash-escaped quote, and reopen
+// the run. Writing that replacement as a Go raw literal emits a second
+// backslash, which ends the quoting early and leaves the rest of the value as
+// live shell syntax, so it has to stay an interpreted string.
 func shellQuoteValue(value string) string {
-	return "'" + strings.ReplaceAll(value, "'", `'\\''`) + "'"
+	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
 }

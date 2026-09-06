@@ -1,6 +1,6 @@
 module github.com/OboardProject/oboard-agent/kernel/oboard-sb
 
-go 1.25.12
+go 1.25.13
 
 require (
 	github.com/enfein/mieru/v3 v3.35.0
