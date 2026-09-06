@@ -75,6 +75,9 @@ func LoadConfig(path string, tuning HY2Tuning) (option.Options, RuntimeMetadata,
 	if err != nil {
 		return option.Options{}, RuntimeMetadata{}, err
 	}
+	if err := validateResolveReferences(opts); err != nil {
+		return option.Options{}, RuntimeMetadata{}, err
+	}
 	if opts.Log == nil {
 		opts.Log = &option.LogOptions{Level: "warn", Timestamp: true}
 	} else if opts.Log.Level == "" {

@@ -11,7 +11,11 @@ OUT_DIR=${OUT_DIR:-$AGENT_DIR/dist/release}
 PLATFORMS=${OBOARD_PLATFORMS:-"linux/amd64 linux/arm64"}
 REPO=${OBOARD_AGENT_REPO:-OboardProject/oboard-agent}
 SIGNING_KEY=${OBOARD_RELEASE_SIGNING_KEY:-}
-SING_BOX_MODULE_VERSION=${SING_BOX_VERSION:-$(go -C "$KERNEL_DIR" list -m -f '{{.Version}}' github.com/sagernet/sing-box)}
+SING_BOX_MODULE_VERSION=$(go -C "$KERNEL_DIR" list -m -f '{{.Version}}' github.com/sagernet/sing-box)
+if [ -n "${SING_BOX_VERSION:-}" ] && [ "${SING_BOX_VERSION#v}" != "${SING_BOX_MODULE_VERSION#v}" ]; then
+  echo "SING_BOX_VERSION does not match the actual module dependency" >&2
+  exit 1
+fi
 SING_BOX_VERSION_VALUE=${SING_BOX_MODULE_VERSION#v}
 
 case "$SING_BOX_VERSION_VALUE" in

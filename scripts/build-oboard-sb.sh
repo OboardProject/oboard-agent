@@ -11,7 +11,11 @@ TARGET_OS=${GOOS:-$(go env GOOS)}
 TARGET_ARCH=${GOARCH:-$(go env GOARCH)}
 TAGS=${OBOARD_SB_TAGS:-with_utls,with_gvisor}
 OUT=${OUT:-$AGENT_DIR/dist/bin/$TARGET_OS-$TARGET_ARCH/oboard-sb}
-SING_BOX_MODULE_VERSION=${SING_BOX_VERSION:-$(go -C "$KERNEL_DIR" list -m -f '{{.Version}}' github.com/sagernet/sing-box)}
+SING_BOX_MODULE_VERSION=$(go -C "$KERNEL_DIR" list -m -f '{{.Version}}' github.com/sagernet/sing-box)
+if [ -n "${SING_BOX_VERSION:-}" ] && [ "${SING_BOX_VERSION#v}" != "${SING_BOX_MODULE_VERSION#v}" ]; then
+  echo "SING_BOX_VERSION does not match the actual module dependency" >&2
+  exit 1
+fi
 SING_BOX_VERSION_VALUE=${SING_BOX_MODULE_VERSION#v}
 
 case "$SING_BOX_VERSION_VALUE" in

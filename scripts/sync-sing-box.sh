@@ -3,7 +3,11 @@ set -euo pipefail
 
 AGENT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 KERNEL_DIR="$AGENT_DIR/kernel/oboard-sb"
-TARGET=${1:-latest}
+TARGET=${1:?Usage: sync-sing-box.sh vX.Y.Z}
+case "$TARGET" in
+  v[0-9]*.[0-9]*.[0-9]*) ;;
+  *) echo "An explicit sing-box release tag is required" >&2; exit 1 ;;
+esac
 KERNEL_TAGS=${OBOARD_SB_TAGS:-with_utls,with_gvisor}
 
 require_kernel_tag() {

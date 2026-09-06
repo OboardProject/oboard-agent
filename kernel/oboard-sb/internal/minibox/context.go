@@ -13,6 +13,7 @@ import (
 	dnsTransport "github.com/sagernet/sing-box/dns/transport"
 	dnsHosts "github.com/sagernet/sing-box/dns/transport/hosts"
 	dnsLocal "github.com/sagernet/sing-box/dns/transport/local"
+	dnsQUIC "github.com/sagernet/sing-box/dns/transport/quic"
 	"github.com/sagernet/sing-box/protocol/anytls"
 	"github.com/sagernet/sing-box/protocol/block"
 	"github.com/sagernet/sing-box/protocol/direct"
@@ -26,6 +27,7 @@ import (
 	"github.com/sagernet/sing/common/ntp"
 	singService "github.com/sagernet/sing/service"
 
+	"github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/dnsgroup"
 	"github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/protocol/familyselector"
 	"github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/protocol/mieru"
 	"github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/protocol/sourceprefix"
@@ -73,6 +75,8 @@ func Context(parent context.Context, clocks ...*RuntimeClock) context.Context {
 	dnsTransport.RegisterTCP(dnsTransports)
 	dnsTransport.RegisterTLS(dnsTransports)
 	dnsTransport.RegisterHTTPS(dnsTransports)
+	dnsQUIC.RegisterTransport(dnsTransports)
+	dnsgroup.Register(dnsTransports)
 	dnsLocal.RegisterTransport(dnsTransports)
 	dnsHosts.RegisterTransport(dnsTransports)
 

@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/restrictedtarget"
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/outbound"
 	C "github.com/sagernet/sing-box/constant"
@@ -168,6 +169,11 @@ func (o *Outbound) ordered(ipv4, ipv6 []netip.Addr) (familyCandidates, familyCan
 }
 
 func (o *Outbound) candidates(ctx context.Context, destination M.Socksaddr) (ipv4, ipv6 []netip.Addr, literal bool, err error) {
+	metadata := adapter.ContextFrom(ctx)
+	restricted := metadata != nil && metadata.InboundType == "ssh"
+	if restricted && destination.IsIP() && !restrictedtarget.Public(destination.Addr) {
+		return nil, nil, false, fmt.Errorf("restricted SSH destination is not public")
+	}
 	if destination.IsIP() {
 		if destination.IsIPv4() {
 			return []netip.Addr{destination.Addr}, nil, true, nil
@@ -180,6 +186,13 @@ func (o *Outbound) candidates(ctx context.Context, destination M.Socksaddr) (ipv
 	addresses, err := o.dnsRouter.Lookup(ctx, destination.Fqdn, o.dnsOptions)
 	if err != nil {
 		return nil, nil, false, E.Cause(err, "resolve family-selector destination")
+	}
+	if restricted {
+		for _, address := range addresses {
+			if !restrictedtarget.Public(address) {
+				return nil, nil, false, fmt.Errorf("restricted SSH DNS answer is not public")
+			}
+		}
 	}
 	seen := make(map[netip.Addr]bool, len(addresses))
 	for _, address := range addresses {

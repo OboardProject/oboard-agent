@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/restrictedtarget"
 	box "github.com/sagernet/sing-box"
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing/common/buf"
@@ -131,7 +132,7 @@ func parseRouteRelayAddresses(value string) ([]netip.Addr, error) {
 }
 
 func isPublicRouteRelayAddress(address netip.Addr) bool {
-	return address.IsValid() && address.IsGlobalUnicast() && !address.IsPrivate() && !address.IsLoopback() && !address.IsLinkLocalUnicast() && !address.IsLinkLocalMulticast() && !address.IsMulticast() && !address.IsUnspecified()
+	return restrictedtarget.Public(address)
 }
 
 type routeRelayPacketConn struct {

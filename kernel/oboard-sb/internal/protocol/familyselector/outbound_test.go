@@ -91,6 +91,28 @@ func TestCandidateResolutionRetainsBothFamiliesAndBoundsResults(t *testing.T) {
 	}
 }
 
+// The selector resolves the final address itself, so for restricted SSH
+// traffic it must apply the relay's public-address boundary to every answer
+// and literal, while ordinary inbounds keep reaching private space.
+func TestRestrictedSSHRejectsPrivateAnswersAndLiterals(t *testing.T) {
+	private := &testDNSRouter{addresses: []netip.Addr{netip.MustParseAddr("198.51.100.4"), netip.MustParseAddr("10.0.0.4")}}
+	sshCtx := adapter.WithContext(context.Background(), &adapter.InboundContext{InboundType: "ssh"})
+	selector := testSelector(&testOutbound{tag: "v4"}, &testOutbound{tag: "v6"}, private, false)
+	if _, _, _, err := selector.candidates(sshCtx, M.Socksaddr{Fqdn: "mixed.example", Port: 443}); err == nil {
+		t.Fatal("restricted SSH accepted a private DNS answer")
+	}
+	if _, _, _, err := selector.candidates(sshCtx, M.SocksaddrFrom(netip.MustParseAddr("192.168.1.10"), 443)); err == nil {
+		t.Fatal("restricted SSH accepted a private literal")
+	}
+	if _, _, literal, err := selector.candidates(sshCtx, M.SocksaddrFrom(netip.MustParseAddr("198.51.100.9"), 443)); err != nil || !literal {
+		t.Fatalf("public literal rejected for restricted SSH: %v", err)
+	}
+	ordinary := adapter.WithContext(context.Background(), &adapter.InboundContext{InboundType: "vless"})
+	if ipv4, _, _, err := selector.candidates(ordinary, M.Socksaddr{Fqdn: "mixed.example", Port: 443}); err != nil || len(ipv4) != 2 {
+		t.Fatalf("ordinary inbound lost private answers: v4=%v err=%v", ipv4, err)
+	}
+}
+
 func testSelector(ipv4, ipv6 *testOutbound, resolver *testDNSRouter, preferIPv6 bool) *Outbound {
 	strategy := C.DomainStrategyPreferIPv4
 	if preferIPv6 {

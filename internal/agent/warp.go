@@ -70,8 +70,20 @@ func (r *Runner) requestWARPConfig(ctx context.Context, plan model.WARPRequestPl
 		report.Error = "profile_id required"
 		return report
 	}
+	if err := applyDialConstraintToEndpoint(map[string]any{}, plan.Underlay); err != nil {
+		report.Error = err.Error()
+		return report
+	}
+	effectiveBinding, err := mergeWARPRegistrationBinding(binding, plan.Underlay)
+	if err != nil {
+		report.Error = err.Error()
+		return report
+	}
 	if persisted, err := r.loadPersistedWARPConfig(plan); err == nil {
 		return persisted
+	} else if !errors.Is(err, os.ErrNotExist) {
+		report.Error = fmt.Sprintf("reuse WARP identity: %v", err)
+		return report
 	}
 	cfg := r.Config()
 	if strings.TrimSpace(cfg.WarpCommand) == "none" {
@@ -79,16 +91,12 @@ func (r *Runner) requestWARPConfig(ctx context.Context, plan model.WARPRequestPl
 		return report
 	}
 	if strings.TrimSpace(cfg.WarpCommand) == "" || strings.TrimSpace(cfg.WarpCommand) == "auto" {
-		// Prefer explicit underlay from plan, otherwise fallback to legacy config-derived binding.
-		effectiveBinding := binding
-		if plan.Underlay != nil && strings.TrimSpace(plan.Underlay.Mode) == "interface" {
-			effectiveBinding = warpBindingFromDialConstraint(plan.Underlay)
-		}
 		client, err := boundWARPRegistrationClient(ctx, r.client, effectiveBinding, plan)
 		if err != nil {
 			report.Error = fmt.Sprintf("prepare bound WARP registration: %v", err)
 			return report
 		}
+		defer client.CloseIdleConnections()
 		outbound, err := registerWARPWireGuard(ctx, client, warpRegistrationURL, plan)
 		if err != nil {
 			report.Error = err.Error()
@@ -102,7 +110,7 @@ func (r *Runner) requestWARPConfig(ctx context.Context, plan model.WARPRequestPl
 		}
 		return r.persistReadyWARPReport(report, outbound)
 	}
-	if binding.key() != "" {
+	if binding.key() != "" || warpBindingFromDialConstraint(plan.Underlay).key() != "" {
 		report.Error = "custom wgcf registration cannot honor the selected interface or source-prefix binding; use warp_command=auto"
 		return report
 	}
@@ -151,19 +159,18 @@ func (r *Runner) loadPersistedWARPConfig(plan model.WARPRequestPlan) (model.WARP
 	if err := json.Unmarshal(raw, &endpoint); err != nil || !strings.EqualFold(strings.TrimSpace(fmt.Sprint(endpoint["type"])), "wireguard") {
 		return model.WARPConfigReport{}, errors.New("persisted WARP endpoint is invalid")
 	}
-	resolverBefore, _ := json.Marshal(endpoint["domain_resolver"])
+	before, _ := json.Marshal(endpoint)
 	normalizeWARPDomainResolver(endpoint, plan)
-	resolverAfter, _ := json.Marshal(endpoint["domain_resolver"])
-	mtuBefore, _ := json.Marshal(endpoint["mtu"])
-	if mtu, ok := endpoint["mtu"].(float64); ok && mtu > 0 {
-		endpoint["mtu"] = warpMTU(int(mtu))
+	endpoint["mtu"] = warpMTU(plan.MTU)
+	if err := applyDialConstraintToEndpoint(endpoint, plan.Underlay); err != nil {
+		return model.WARPConfigReport{}, err
 	}
-	mtuAfter, _ := json.Marshal(endpoint["mtu"])
+	after, _ := json.Marshal(endpoint)
 	report := model.WARPConfigReport{ServerID: plan.ServerID, ProfileID: plan.ProfileID, Status: model.WARPStatusReady, ConfigJSON: string(raw), ResultJSON: string(raw), MTU: warpMTU(plan.MTU)}
 	if mtu, ok := endpoint["mtu"].(float64); ok && mtu > 0 {
 		report.MTU = int(mtu)
 	}
-	if !bytes.Equal(resolverBefore, resolverAfter) || !bytes.Equal(mtuBefore, mtuAfter) {
+	if !bytes.Equal(before, after) {
 		return r.persistReadyWARPReport(report, endpoint), nil
 	}
 	return report, nil
@@ -407,6 +414,11 @@ func wgcfProfileToSingBox(profile string, plan model.WARPRequestPlan) (map[strin
 
 func normalizeWARPDomainResolver(endpoint map[string]any, plan model.WARPRequestPlan) {
 	strategy := strings.TrimSpace(plan.DNSStrategy)
+	if plan.Underlay != nil && plan.Underlay.Mode == "interface" {
+		if family := strings.TrimSpace(plan.Underlay.Family); family == "ipv4_only" || family == "ipv6_only" {
+			strategy = family
+		}
+	}
 	if strategy == "" || strings.EqualFold(strategy, "auto") {
 		delete(endpoint, "domain_resolver")
 		return

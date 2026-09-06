@@ -19,14 +19,12 @@ import (
 type warpRegistrationBinding struct {
 	InterfaceName string
 	SourcePrefix  string
+	Family        string
 }
 
 func (binding warpRegistrationBinding) key() string {
-	if binding.InterfaceName != "" {
-		return "interface:" + binding.InterfaceName
-	}
-	if binding.SourcePrefix != "" {
-		return "source-prefix:" + binding.SourcePrefix
+	if binding.InterfaceName != "" || binding.SourcePrefix != "" || binding.Family != "" {
+		return "interface:" + binding.InterfaceName + ";source-prefix:" + binding.SourcePrefix + ";family:" + binding.Family
 	}
 	return ""
 }
@@ -93,6 +91,9 @@ func trimmedAnyString(value any) string {
 }
 
 func anyMapSlice(value any) []map[string]any {
+	if values, ok := value.([]map[string]any); ok {
+		return values
+	}
 	values, _ := value.([]any)
 	result := make([]map[string]any, 0, len(values))
 	for _, value := range values {
@@ -104,35 +105,40 @@ func anyMapSlice(value any) []map[string]any {
 }
 
 func newWARPRegistrationHTTPClient(base *http.Client, binding warpRegistrationBinding, plan model.WARPRequestPlan) (*http.Client, error) {
-	interfaces, err := listNetworkInterfaces()
-	if err != nil {
-		return nil, err
-	}
-	interfaceName, localAddress, err := selectWARPRegistrationAddress(interfaces, binding, plan.IPStack)
-	if err != nil {
-		return nil, err
-	}
 	transport := lowOverheadTransport()
-	if base != nil {
-		if existing, ok := base.Transport.(*http.Transport); ok && existing != nil {
-			transport = existing.Clone()
-		}
-	}
+	transport.Proxy = nil
 	dialer := &net.Dialer{
 		Timeout:   15 * time.Second,
 		KeepAlive: 30 * time.Second,
-		LocalAddr: &net.TCPAddr{IP: net.IP(localAddress.AsSlice())},
-		Control:   warpBindToInterfaceControl(interfaceName),
+	}
+	if binding.key() != "" {
+		interfaces, err := listNetworkInterfaces()
+		if err != nil {
+			return nil, err
+		}
+		interfaceName, localAddress, err := selectWARPRegistrationAddress(interfaces, binding, plan.IPStack)
+		if err != nil {
+			return nil, err
+		}
+		dialer.LocalAddr = &net.TCPAddr{IP: net.IP(localAddress.AsSlice())}
+		dialer.Control = warpBindToInterfaceControl(interfaceName)
 	}
 	transport.DialContext = dialer.DialContext
 	timeout := 20 * time.Second
-	if base != nil && base.Timeout > 0 {
+	if base != nil && base.Timeout > 0 && base.Timeout < timeout {
 		timeout = base.Timeout
 	}
-	return &http.Client{Timeout: timeout, Transport: transport}, nil
+	return &http.Client{Timeout: timeout, Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error {
+		return errors.New("WARP registration redirects are not allowed")
+	}}, nil
 }
 
 func selectWARPRegistrationAddress(interfaces []model.NetworkInterfaceInfo, binding warpRegistrationBinding, preferred model.IPStack) (string, netip.Addr, error) {
+	switch binding.Family {
+	case "", "auto", "ipv4_only", "ipv6_only":
+	default:
+		return "", netip.Addr{}, errors.New("invalid WARP underlay family")
+	}
 	if err := core.ValidateNetworkInterfaceName(binding.InterfaceName); err != nil {
 		return "", netip.Addr{}, fmt.Errorf("invalid WARP registration interface: %w", err)
 	}
@@ -162,6 +168,9 @@ func selectWARPRegistrationAddress(interfaces []model.NetworkInterfaceInfo, bind
 				continue
 			}
 			address := prefix.Addr().Unmap()
+			if binding.Family == "ipv4_only" && !address.Is4() || binding.Family == "ipv6_only" && !address.Is6() {
+				continue
+			}
 			if !address.IsValid() || address.IsUnspecified() || address.IsLoopback() || address.IsLinkLocalUnicast() || address.IsMulticast() {
 				continue
 			}
@@ -172,6 +181,9 @@ func selectWARPRegistrationAddress(interfaces []model.NetworkInterfaceInfo, bind
 		}
 	}
 	if len(candidates) == 0 {
+		if binding.Family == "ipv6_only" {
+			return "", netip.Addr{}, errors.New("registration_ipv6_unavailable: no usable local address in the allowed underlay")
+		}
 		return "", netip.Addr{}, errors.New("WARP registration binding has no usable local address")
 	}
 	sort.Slice(candidates, func(i, j int) bool {
@@ -206,7 +218,7 @@ func warpBindingFromDialConstraint(dc *model.DialConstraint) warpRegistrationBin
 	if dc == nil || strings.TrimSpace(dc.Mode) != "interface" {
 		return warpRegistrationBinding{}
 	}
-	b := warpRegistrationBinding{InterfaceName: strings.TrimSpace(dc.InterfaceName)}
+	b := warpRegistrationBinding{InterfaceName: strings.TrimSpace(dc.InterfaceName), Family: strings.ToLower(strings.TrimSpace(dc.Family))}
 	addr := strings.TrimSpace(dc.SourceAddress)
 	if addr != "" {
 		if parsed, err := netip.ParseAddr(addr); err == nil {
@@ -220,13 +232,68 @@ func warpBindingFromDialConstraint(dc *model.DialConstraint) warpRegistrationBin
 			b.SourcePrefix = p.Masked().String()
 		}
 	}
-	// Family is handled via IPStack preference; no need to encode separately here.
 	return b
 }
 
+func mergeWARPRegistrationBinding(binding warpRegistrationBinding, underlay *model.DialConstraint) (warpRegistrationBinding, error) {
+	if underlay == nil || underlay.Mode != "interface" {
+		return binding, nil
+	}
+	explicit := warpBindingFromDialConstraint(underlay)
+	if binding.InterfaceName != "" && explicit.InterfaceName != "" && binding.InterfaceName != explicit.InterfaceName {
+		return warpRegistrationBinding{}, errors.New("warp_identity_underlay_conflict: profile and branch interfaces differ")
+	}
+	if binding.SourcePrefix != "" && explicit.SourcePrefix != "" {
+		bound, err1 := netip.ParsePrefix(binding.SourcePrefix)
+		source, err2 := netip.ParsePrefix(explicit.SourcePrefix)
+		if err1 != nil || err2 != nil || !bound.Contains(source.Addr()) {
+			return warpRegistrationBinding{}, errors.New("warp_identity_underlay_conflict: profile source is outside branch prefix")
+		}
+	}
+	if binding.Family != "" && binding.Family != "auto" && explicit.Family != "" && explicit.Family != "auto" && binding.Family != explicit.Family {
+		return warpRegistrationBinding{}, errors.New("warp_identity_underlay_conflict: profile and branch families differ")
+	}
+	if explicit.InterfaceName == "" {
+		explicit.InterfaceName = binding.InterfaceName
+	}
+	if explicit.SourcePrefix == "" {
+		explicit.SourcePrefix = binding.SourcePrefix
+	}
+	if explicit.Family == "" || explicit.Family == "auto" {
+		explicit.Family = binding.Family
+	}
+	return explicit, nil
+}
+
 func applyDialConstraintToEndpoint(endpoint map[string]any, dc *model.DialConstraint) error {
-	if dc == nil || strings.TrimSpace(dc.Mode) != "interface" {
+	if dc == nil {
 		return nil
+	}
+	if strings.TrimSpace(dc.Mode) == "auto" {
+		if dc.InterfaceName != "" || dc.SourceAddress != "" || dc.Family != "" && dc.Family != "auto" {
+			return errors.New("automatic WARP underlay cannot contain explicit bindings")
+		}
+		delete(endpoint, "bind_interface")
+		delete(endpoint, "inet4_bind_address")
+		delete(endpoint, "inet6_bind_address")
+		return nil
+	}
+	if strings.TrimSpace(dc.Mode) != "interface" {
+		return errors.New("invalid WARP underlay mode")
+	}
+	if strings.TrimSpace(dc.InterfaceName) == "" && strings.TrimSpace(dc.SourceAddress) == "" {
+		return errors.New("WARP underlay requires interface or exact source address")
+	}
+	family := strings.ToLower(strings.TrimSpace(dc.Family))
+	if family != "" && family != "auto" && family != "ipv4_only" && family != "ipv6_only" {
+		return errors.New("invalid WARP underlay family")
+	}
+	for _, peer := range anyMapSlice(endpoint["peers"]) {
+		if address, err := netip.ParseAddr(trimmedAnyString(peer["address"])); err == nil {
+			if family == "ipv6_only" && !address.Unmap().Is6() || family == "ipv4_only" && !address.Unmap().Is4() {
+				return errors.New("underlay_family_mismatch: WARP peer address conflicts with underlay")
+			}
+		}
 	}
 	if detour, _ := endpoint["detour"].(string); strings.TrimSpace(detour) != "" {
 		return fmt.Errorf("WARP underlay binding cannot be combined with detour")
@@ -245,11 +312,11 @@ func applyDialConstraintToEndpoint(endpoint map[string]any, dc *model.DialConstr
 	if addrStr != "" {
 		addr, err := netip.ParseAddr(addrStr)
 		if err != nil {
-			if p, perr := netip.ParsePrefix(addrStr); perr == nil {
-				addr = p.Addr()
-			} else {
-				return fmt.Errorf("invalid underlay source address %q", addrStr)
-			}
+			return fmt.Errorf("underlay source address must be an exact IP address")
+		}
+		addr = addr.Unmap()
+		if !addr.IsGlobalUnicast() || addr.IsLoopback() {
+			return errors.New("underlay source address must be a unicast address")
 		}
 		if family := strings.ToLower(strings.TrimSpace(dc.Family)); family == "ipv4_only" && addr.Is6() {
 			return fmt.Errorf("family ipv4_only conflicts with IPv6 source_address")
@@ -271,9 +338,6 @@ func applyDialConstraintToEndpoint(endpoint map[string]any, dc *model.DialConstr
 }
 
 func boundWARPRegistrationClient(ctx context.Context, base *http.Client, binding warpRegistrationBinding, plan model.WARPRequestPlan) (*http.Client, error) {
-	if binding.key() == "" {
-		return base, nil
-	}
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
