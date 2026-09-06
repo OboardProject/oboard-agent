@@ -143,14 +143,14 @@ func TestSSHInboundCredentialStatusUpdatePreservesExistingConnection(t *testing.
 		t.Fatal("new SSH authentication was accepted after reject_new")
 	}
 	revoked := &model.AuthorizationLease{Revision: 2, IssuedAt: time.Now().UTC().Format(time.RFC3339Nano), Grants: map[string]string{}}
-	if err := runner.applyAuthorization(context.Background(), revoked); err != nil {
+	if _, err := runner.applyAuthorization(context.Background(), revoked); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := client.SendRequest("keepalive@openssh.com", true, nil); err == nil {
 		t.Fatal("revocation preserved an existing SSH connection")
 	}
 	stale := &model.AuthorizationLease{Revision: 1, IssuedAt: time.Now().UTC().Format(time.RFC3339Nano), Grants: map[string]string{user.AuthorizationKey: time.Now().Add(time.Minute).UTC().Format(time.RFC3339Nano)}}
-	if err := runner.applyAuthorization(context.Background(), stale); err != nil {
+	if _, err := runner.applyAuthorization(context.Background(), stale); err != nil {
 		t.Fatal(err)
 	}
 	if runner.authorizationAllows(user.AuthorizationKey) {

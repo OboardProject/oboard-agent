@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -43,6 +44,27 @@ type fakeCoreKernel struct {
 	// pinnedDigest keeps the reported digest fixed across boots, which stands
 	// for a kernel whose normalization rule differs from the Agent's.
 	pinnedDigest bool
+	// authorizationRevisions records every lease revision pushed through
+	// POST /authorization/config, in arrival order.
+	authorizationRevisions []int64
+	// authorizationControl makes the running kernel advertise
+	// authorization_control_v1 (wrapped body + status read-back).
+	authorizationControl  bool
+	authorizationSequence int64
+	authorizationDigest    string
+	authorizationDenied    []string
+}
+
+func (k *fakeCoreKernel) deniedKeys() []string {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return append([]string(nil), k.authorizationDenied...)
+}
+
+func (k *fakeCoreKernel) pushedAuthorizationRevisions() []int64 {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return append([]int64(nil), k.authorizationRevisions...)
 }
 
 func newFakeCoreKernel(t *testing.T, configPath string, runtimeSupported bool) *fakeCoreKernel {
@@ -71,6 +93,9 @@ func newFakeCoreKernel(t *testing.T, configPath string, runtimeSupported bool) *
 		}
 		kernel.mu.Lock()
 		build := kernel.loadedBuild
+		if kernel.authorizationControl {
+			capabilities = append(capabilities, kernelCapabilityAuthorizationControl)
+		}
 		kernel.mu.Unlock()
 		payload := map[string]any{"name": "oboard-sb", "capabilities": capabilities}
 		if build != "" {
@@ -107,6 +132,42 @@ func newFakeCoreKernel(t *testing.T, configPath string, runtimeSupported bool) *
 		kernel.policyPushes++
 		kernel.mu.Unlock()
 		_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+	})
+	mux.HandleFunc("/authorization/config", func(w http.ResponseWriter, r *http.Request) {
+		// Accept both the bare lease (lease-only kernels) and the wrapped
+		// {lease, deny} body (authorization_control_v1 kernels).
+		var body struct {
+			Revision int64 `json:"revision"`
+			Sequence int64 `json:"sequence"`
+			Digest   string
+			Lease    *struct {
+				Revision int64  `json:"revision"`
+				Sequence int64  `json:"sequence"`
+				Digest   string `json:"digest"`
+			} `json:"lease"`
+			Deny []string `json:"deny"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		revision, sequence, digest := body.Revision, body.Sequence, body.Digest
+		if body.Lease != nil {
+			revision, sequence, digest = body.Lease.Revision, body.Lease.Sequence, body.Lease.Digest
+		}
+		kernel.mu.Lock()
+		kernel.authorizationRevisions = append(kernel.authorizationRevisions, revision)
+		kernel.authorizationSequence = sequence
+		kernel.authorizationDigest = digest
+		kernel.authorizationDenied = append([]string(nil), body.Deny...)
+		kernel.mu.Unlock()
+		_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+	})
+	mux.HandleFunc("/authorization/status", func(w http.ResponseWriter, r *http.Request) {
+		kernel.mu.Lock()
+		defer kernel.mu.Unlock()
+		revision := int64(0)
+		if len(kernel.authorizationRevisions) > 0 {
+			revision = kernel.authorizationRevisions[len(kernel.authorizationRevisions)-1]
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"revision": revision, "sequence": kernel.authorizationSequence, "digest": kernel.authorizationDigest, "boot_id": "kernel-boot", "denied_count": len(kernel.authorizationDenied)})
 	})
 	server := &http.Server{Handler: mux}
 	go func() { _ = server.Serve(listener) }()
@@ -401,6 +462,63 @@ func TestApplyCoreConfigRuntimePolicyOnlyKeepsKernelRunning(t *testing.T) {
 	if kernel.pushCount() == 0 {
 		t.Fatal("runtime policy was never pushed to the kernel")
 	}
+}
+
+// A lease-only change rides the runtime_policy_only branch because the
+// operational digest does not contain grants. The live kernel must still
+// receive the new lease: a revoke that only reaches the disk waits for the
+// next traffic cycle or a restart, which is exactly the window a revoke must
+// not have.
+func TestApplyCoreConfigRuntimePolicyOnlyPushesAuthorizationToKernel(t *testing.T) {
+	dir := t.TempDir()
+	core := writeFakeCoreBinaryWithCapabilities(t, dir, "build-auth", []string{"authorization_lease_v1", coreRuntimeDigestCapability})
+	issued := time.Now().UTC()
+	granted := issued.Add(4 * time.Minute).Format(time.RFC3339Nano)
+	base := `{"log":{"level":"warn"},"inbounds":[{"tag":"in-b","type":"socks","listen":"127.0.0.1","listen_port":22222}],"_oboard":{"rate_limits":{"users":{"alice":{"user_id":7,"authorization_key":"k-alice","lease_bytes":100}}},"authorization":{"revision":%d,"issued_at":%q,"grants":%s}}}`
+	granting := fmt.Sprintf(base, 1, issued.Format(time.RFC3339Nano), `{"k-alice":"`+granted+`"}`)
+	revoking := fmt.Sprintf(base, 2, issued.Add(time.Second).Format(time.RFC3339Nano), `{}`)
+	writeCoreConfig(t, dir, granting)
+	kernel := newFakeCoreKernel(t, filepath.Join(dir, "sing-box.json"), true)
+	r := newRuntimeTestRunnerWithCore(t, dir, kernel, core)
+	boots := kernel.bootCount()
+
+	result, err := r.applyCoreConfigTask(70, model.ApplyCoreConfigTaskPayload{Config: revoking})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result["reload_strategy"] != "runtime_policy_only" {
+		t.Fatalf("lease-only change did not stay hot: %#v", result)
+	}
+	if kernel.bootCount() != boots {
+		t.Fatalf("lease-only change restarted the kernel %d time(s)", kernel.bootCount()-boots)
+	}
+	revisions := kernel.pushedAuthorizationRevisions()
+	if len(revisions) == 0 || revisions[len(revisions)-1] != 2 {
+		t.Fatalf("revoking lease never reached the running kernel: pushed=%v", revisions)
+	}
+}
+
+// writeFakeCoreBinaryWithCapabilities installs a kernel stub whose -version
+// output advertises the given capabilities.
+func writeFakeCoreBinaryWithCapabilities(t *testing.T, dir, build string, capabilities []string) string {
+	t.Helper()
+	encoded, err := json.Marshal(capabilities)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "oboard-sb")
+	script := "#!/bin/sh\n" +
+		"case \"$1\" in\n" +
+		"  -version) cat <<'OBOARDEOF'\n" +
+		`{"name":"oboard-sb","version":"0.0.1","build":"` + build + `","commit":"","capabilities":` + string(encoded) + `}` + "\nOBOARDEOF\n" +
+		"  ;;\n" +
+		"  -check) exit 0 ;;\n" +
+		"  *) exit 2 ;;\n" +
+		"esac\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil { // #nosec G306 -- test fixture must be executable
+		t.Fatal(err)
+	}
+	return path
 }
 
 // A rate-limit-only change must not be allowed to mask a kernel that is already

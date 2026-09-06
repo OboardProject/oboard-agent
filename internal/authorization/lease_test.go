@@ -76,6 +76,64 @@ func TestLeaseAbsoluteDeadlineAndCorruptStateFailClosed(t *testing.T) {
 	}
 }
 
+func TestLeaseSequenceOrdersRenewalsAndDenyWatermarkSurvivesRestart(t *testing.T) {
+	now := time.Now().UTC()
+	path := filepath.Join(t.TempDir(), "authorization.json")
+	store := NewStore(path)
+	first := &Lease{Revision: 3, Sequence: 1, Digest: "d3", IssuedAt: now.Format(time.RFC3339Nano), ExpiresAt: now.Add(MaxLifetime).Format(time.RFC3339Nano), Grants: map[string]string{"a": now.Add(MaxLifetime).Format(time.RFC3339Nano), "b": now.Add(MaxLifetime).Format(time.RFC3339Nano)}}
+	if _, err := store.UpdateWithResult(first); err != nil {
+		t.Fatal(err)
+	}
+	// A renewal with a higher sequence but an earlier issued_at still wins by
+	// sequence; the same sequence with the same content is a no-op.
+	renewal := clone(first)
+	renewal.Sequence = 2
+	renewal.IssuedAt = now.Add(-time.Second).Format(time.RFC3339Nano)
+	renewal.ExpiresAt = now.Add(MaxLifetime - time.Second).Format(time.RFC3339Nano)
+	renewal.Grants["a"] = renewal.ExpiresAt
+	renewal.Grants["b"] = renewal.ExpiresAt
+	if res, err := store.UpdateWithResult(renewal); err != nil || !res.Installed {
+		t.Fatalf("higher sequence not installed: %+v err=%v", res, err)
+	}
+	if res, err := store.UpdateWithResult(first); err != nil || !res.Superseded {
+		t.Fatalf("lower sequence replay was not superseded: %+v err=%v", res, err)
+	}
+	// Revision 4 revokes b explicitly and lists it in the deny watermark.
+	revoke := &Lease{Revision: 4, Sequence: 1, Digest: "d4", IssuedAt: now.Add(time.Second).Format(time.RFC3339Nano), Grants: map[string]string{"a": now.Add(MaxLifetime).Format(time.RFC3339Nano)}, Denied: []string{"b"}}
+	res, err := store.UpdateWithResult(revoke)
+	if err != nil || len(res.Revoked) != 1 || res.Revoked[0] != "b" {
+		t.Fatalf("revoke result: %+v err=%v", res, err)
+	}
+	if store.Allows("b", now.Add(2*time.Second)) || !store.Allows("a", now.Add(2*time.Second)) {
+		t.Fatal("deny watermark or grant not honored")
+	}
+	if store.Status().Revision != 4 || store.Status().DeniedCount != 1 {
+		t.Fatalf("status: %+v", store.Status())
+	}
+	// Restart: the watermark is persisted next to the lease.
+	restarted := NewStore(path)
+	if !restarted.Denied("b") || restarted.Allows("b", now.Add(2*time.Second)) {
+		t.Fatal("deny watermark lost across restart")
+	}
+	// A same-revision snapshot with a different digest is a conflict.
+	conflict := clone(revoke)
+	conflict.Digest = "other"
+	conflict.Grants["c"] = now.Add(MaxLifetime).Format(time.RFC3339Nano)
+	if _, err := restarted.UpdateWithResult(conflict); err == nil {
+		t.Fatal("same revision with different digest accepted")
+	}
+	// A fresh lease issued after the installed one fully expired is accepted
+	// even with a lower revision (Controller counters reset).
+	reset := &Lease{Revision: 1, Sequence: 1, Digest: "r1", IssuedAt: now.Add(MaxLifetime + 2*time.Second).Format(time.RFC3339Nano), Grants: map[string]string{"a": now.Add(2*MaxLifetime + 2*time.Second).Format(time.RFC3339Nano)}}
+	if res, err := restarted.UpdateWithResult(reset); err != nil || !res.Installed {
+		t.Fatalf("post-expiry reset lease rejected: %+v err=%v", res, err)
+	}
+	// Denied b stays denied even if a later snapshot never mentions it.
+	if restarted.Allows("b", now.Add(MaxLifetime+3*time.Second)) {
+		t.Fatal("denied key re-admitted after counter reset")
+	}
+}
+
 func TestAuthorizationPersistenceFailureDeniesExistingGrants(t *testing.T) {
 	now := time.Now().UTC()
 	store := NewStore("")

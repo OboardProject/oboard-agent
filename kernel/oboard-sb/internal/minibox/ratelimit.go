@@ -34,6 +34,12 @@ type RateLimitTracker struct {
 	states                map[string]*runtimeState
 	active                map[string]map[*trackedConn]struct{}
 	activePacket          map[string]map[*trackedPacketConn]struct{}
+	// byCredential indexes live connections by the authorization key they
+	// authenticated with so a revoke can close exactly that credential's
+	// sessions without scanning every inbound user.
+	byCredential       map[string]map[*trackedConn]struct{}
+	byCredentialPacket map[string]map[*trackedPacketConn]struct{}
+	authorizationWake  chan struct{}
 	auditMu               sync.Mutex
 	auditBuckets          map[string]*ConnectionAuditBucket
 	auditActiveByIdentity map[string]int64
@@ -143,7 +149,8 @@ func newRateLimitTracker(metadata RuntimeMetadata, now func() time.Time) *RateLi
 		now = time.Now
 	}
 	tracker := &RateLimitTracker{states: map[string]*runtimeState{}, active: map[string]map[*trackedConn]struct{}{}, activePacket: map[string]map[*trackedPacketConn]struct{}{}, now: now}
-	tracker.authorization = authorization.NewStore("")
+	tracker.installAuthorizationStore(authorization.NewStore(""))
+	tracker.authorization.SetClock(tracker.timeNow)
 	_ = tracker.authorization.Update(metadata.Authorization)
 	auditEnabled := metadata.ConnectionAudit != nil && metadata.ConnectionAudit.Enabled
 	tracker.auditEnabled.Store(auditEnabled)
@@ -356,10 +363,46 @@ func (s *runtimeState) denied() bool {
 	return runtimeConfigDenied(config, s.unacknowledged(config))
 }
 
-func (s *runtimeState) deniedForConnection(admitted bool) bool {
-	if s.authorizationDenied() {
+// connectionIdentity is the credential a connection authenticated with. It is
+// captured at admission so a later credential rotation (new epoch, new key on
+// the same inbound user) still identifies and closes the old session.
+type connectionIdentity struct {
+	authorizationKey string
+	credentialEpoch  int64
+	userID           int64
+}
+
+func (s *runtimeState) identity() connectionIdentity {
+	p := s.loadedPolicy()
+	return connectionIdentity{authorizationKey: p.AuthorizationKey, credentialEpoch: p.CredentialEpoch, userID: p.UserID}
+}
+
+// authorizationRevokedFor is the authorization verdict for one identity: the
+// key it authenticated with is denied or no longer granted, or the credential
+// it used has been superseded by a newer epoch. Unlike quota, a revoked
+// connection is always closed regardless of how it was admitted.
+func (s *runtimeState) authorizationRevokedFor(identity connectionIdentity) bool {
+	if s.authorization == nil {
+		return false
+	}
+	p := s.loadedPolicy()
+	if p.UserID <= 0 && p.AuthorizationKey == "" && identity.authorizationKey == "" {
+		return false
+	}
+	key := identity.authorizationKey
+	if key == "" {
+		key = p.AuthorizationKey
+	}
+	if !s.authorization.Allows(key, s.now()) {
 		return true
 	}
+	return identity.authorizationKey != "" && p.AuthorizationKey != "" && (identity.authorizationKey != p.AuthorizationKey || (identity.credentialEpoch > 0 && p.CredentialEpoch > 0 && identity.credentialEpoch != p.CredentialEpoch))
+}
+
+// quotaDeniedFor is the quota/credential-status verdict. reject_new keeps an
+// already admitted connection open; only disconnect_and_reject or a revoked
+// credential status closes it.
+func (s *runtimeState) quotaDeniedFor(admitted bool) bool {
 	config := s.currentConfig()
 	switch normalizeCredentialStatus(config.policy.CredentialStatus) {
 	case "active":
@@ -372,6 +415,10 @@ func (s *runtimeState) deniedForConnection(admitted bool) bool {
 		return false
 	}
 	return config.policy.EnforcementMode != "reject_new" || !admitted
+}
+
+func (s *runtimeState) deniedForConnection(admitted bool) bool {
+	return s.authorizationRevokedFor(s.identity()) || s.quotaDeniedFor(admitted)
 }
 
 func runtimeConfigDenied(config *runtimeConfig, unacknowledged int64) bool {
@@ -556,7 +603,7 @@ func (t *RateLimitTracker) RoutedConnection(ctx context.Context, conn net.Conn, 
 		return conn
 	}
 	admitted := !state.denied()
-	tracked := &trackedConn{ExtendedConn: bufio.NewExtendedConn(conn), ctx: ctx, tracker: t, state: state, admitted: admitted, auditKey: t.recordConnectionStart(state, metadata, outbound, "tcp", admitted)}
+	tracked := &trackedConn{ExtendedConn: bufio.NewExtendedConn(conn), ctx: ctx, tracker: t, state: state, identity: state.identity(), admitted: admitted, auditKey: t.recordConnectionStart(state, metadata, outbound, "tcp", admitted)}
 	t.registerConn(state.key, tracked)
 	if tracked.deny() {
 		_ = tracked.Close()
@@ -577,7 +624,7 @@ func (t *RateLimitTracker) RoutedPacketConnection(ctx context.Context, conn N.Pa
 		return conn
 	}
 	admitted := !state.denied()
-	tracked := &trackedPacketConn{PacketConn: conn, ctx: ctx, tracker: t, state: state, admitted: admitted, auditKey: t.recordConnectionStart(state, metadata, outbound, "udp", admitted)}
+	tracked := &trackedPacketConn{PacketConn: conn, ctx: ctx, tracker: t, state: state, identity: state.identity(), admitted: admitted, auditKey: t.recordConnectionStart(state, metadata, outbound, "udp", admitted)}
 	t.registerPacketConn(state.key, tracked)
 	if tracked.deny() {
 		_ = tracked.Close()
@@ -630,6 +677,7 @@ type trackedConn struct {
 	ctx      context.Context
 	tracker  *RateLimitTracker
 	state    *runtimeState
+	identity connectionIdentity
 	admitted bool
 	auditKey string
 	closed   atomic.Bool
@@ -799,7 +847,7 @@ func (c *trackedConn) Close() error {
 }
 
 func (c *trackedConn) deny() bool {
-	return c.state != nil && c.state.deniedForConnection(c.admitted)
+	return c.state != nil && (c.state.authorizationRevokedFor(c.identity) || c.state.quotaDeniedFor(c.admitted))
 }
 
 // trackedCounterConn lets sing's copy engine unwrap traffic accounting into
@@ -842,6 +890,7 @@ type trackedPacketConn struct {
 	ctx      context.Context
 	tracker  *RateLimitTracker
 	state    *runtimeState
+	identity connectionIdentity
 	admitted bool
 	auditKey string
 	closed   atomic.Bool
@@ -909,7 +958,7 @@ func (c *trackedPacketConn) addTraffic(upload, download int64) {
 }
 
 func (c *trackedPacketConn) deny() bool {
-	return c.state != nil && c.state.deniedForConnection(c.admitted)
+	return c.state != nil && (c.state.authorizationRevokedFor(c.identity) || c.state.quotaDeniedFor(c.admitted))
 }
 
 func (c *trackedPacketConn) Upstream() any { return c.PacketConn }
@@ -1075,13 +1124,22 @@ func (t *RateLimitTracker) registerConn(key string, c *trackedConn) {
 		t.active[key] = map[*trackedConn]struct{}{}
 	}
 	t.active[key][c] = struct{}{}
+	if credential := c.identity.authorizationKey; credential != "" {
+		if t.byCredential == nil {
+			t.byCredential = map[string]map[*trackedConn]struct{}{}
+		}
+		if t.byCredential[credential] == nil {
+			t.byCredential[credential] = map[*trackedConn]struct{}{}
+		}
+		t.byCredential[credential][c] = struct{}{}
+	}
 	t.mu.Unlock()
 	active := t.activeTCP.Add(1)
 	if t.socketGovernor != nil {
 		t.socketGovernor.ObserveConnections(active)
 	}
-	if c.state.deniedForConnection(c.admitted) {
-		t.closeActive(key)
+	if c.deny() {
+		_ = c.Close()
 	}
 }
 
@@ -1090,6 +1148,12 @@ func (t *RateLimitTracker) unregisterConn(key string, c *trackedConn) {
 	delete(t.active[key], c)
 	if len(t.active[key]) == 0 {
 		delete(t.active, key)
+	}
+	if credential := c.identity.authorizationKey; credential != "" && t.byCredential != nil {
+		delete(t.byCredential[credential], c)
+		if len(t.byCredential[credential]) == 0 {
+			delete(t.byCredential, credential)
+		}
 	}
 	t.mu.Unlock()
 	active := t.activeTCP.Add(-1)
@@ -1111,9 +1175,18 @@ func (t *RateLimitTracker) registerPacketConn(key string, c *trackedPacketConn) 
 		t.activePacket[key] = map[*trackedPacketConn]struct{}{}
 	}
 	t.activePacket[key][c] = struct{}{}
+	if credential := c.identity.authorizationKey; credential != "" {
+		if t.byCredentialPacket == nil {
+			t.byCredentialPacket = map[string]map[*trackedPacketConn]struct{}{}
+		}
+		if t.byCredentialPacket[credential] == nil {
+			t.byCredentialPacket[credential] = map[*trackedPacketConn]struct{}{}
+		}
+		t.byCredentialPacket[credential][c] = struct{}{}
+	}
 	t.mu.Unlock()
-	if c.state.deniedForConnection(c.admitted) {
-		t.closeActive(key)
+	if c.deny() {
+		_ = c.Close()
 	}
 }
 
@@ -1123,9 +1196,16 @@ func (t *RateLimitTracker) unregisterPacketConn(key string, c *trackedPacketConn
 	if len(t.activePacket[key]) == 0 {
 		delete(t.activePacket, key)
 	}
+	if credential := c.identity.authorizationKey; credential != "" && t.byCredentialPacket != nil {
+		delete(t.byCredentialPacket[credential], c)
+		if len(t.byCredentialPacket[credential]) == 0 {
+			delete(t.byCredentialPacket, credential)
+		}
+	}
 	t.mu.Unlock()
 }
 
+// closeActive closes every connection routed for one inbound user key.
 func (t *RateLimitTracker) closeActive(key string) {
 	t.mu.RLock()
 	conns := make([]*trackedConn, 0, len(t.active[key]))
@@ -1143,6 +1223,59 @@ func (t *RateLimitTracker) closeActive(key string) {
 	for _, conn := range packets {
 		_ = conn.Close()
 	}
+}
+
+// closeByCredential closes every connection that authenticated with one
+// authorization key, whichever inbound user it is currently mapped to. It
+// returns how many connections were closed. Only the routed TCP/UDP streams are
+// closed here: a HY2 QUIC connection, AnyTLS session, or multiplex tunnel that
+// carried them stays up until the client opens a new stream, which is then
+// rejected at admission.
+func (t *RateLimitTracker) closeByCredential(credential string) int {
+	if credential == "" {
+		return 0
+	}
+	t.mu.RLock()
+	conns := make([]*trackedConn, 0, len(t.byCredential[credential]))
+	for conn := range t.byCredential[credential] {
+		conns = append(conns, conn)
+	}
+	packets := make([]*trackedPacketConn, 0, len(t.byCredentialPacket[credential]))
+	for conn := range t.byCredentialPacket[credential] {
+		packets = append(packets, conn)
+	}
+	t.mu.RUnlock()
+	for _, conn := range conns {
+		_ = conn.Close()
+	}
+	for _, conn := range packets {
+		_ = conn.Close()
+	}
+	return len(conns) + len(packets)
+}
+
+// revokedConnections lists connections whose authorization identity is no
+// longer granted, independent of the inbound user they are mapped to.
+func (t *RateLimitTracker) revokedConnections() ([]*trackedConn, []*trackedPacketConn) {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	var conns []*trackedConn
+	var packets []*trackedPacketConn
+	for _, set := range t.active {
+		for conn := range set {
+			if conn.state != nil && conn.state.authorizationRevokedFor(conn.identity) {
+				conns = append(conns, conn)
+			}
+		}
+	}
+	for _, set := range t.activePacket {
+		for conn := range set {
+			if conn.state != nil && conn.state.authorizationRevokedFor(conn.identity) {
+				packets = append(packets, conn)
+			}
+		}
+	}
+	return conns, packets
 }
 
 func waitBytes(ctx context.Context, limiter *rate.Limiter, n int) error {

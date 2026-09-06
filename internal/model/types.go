@@ -760,6 +760,49 @@ const (
 
 const AgentCapabilityTrafficPolicy = "traffic_policy_v1"
 
+// AgentCapabilityAuthorizationControl is advertised by Agents that verify and
+// apply signed authorization envelopes outside the task slot and confirm them
+// with authorization_ack / applied_authorization health fields.
+const AgentCapabilityAuthorizationControl = "authorization_control_v1"
+
+const (
+	AgentControlAuthorizationUpdate = "authorization_update"
+	AgentControlAuthorizationAck    = "authorization_ack"
+)
+
+// AuthorizationEnvelope carries one signed AuthorizationLease. LeaseJSON is the
+// exact encoding the signature covers; the Agent verifies before decoding.
+type AuthorizationEnvelope struct {
+	Type      string `json:"type,omitempty"`
+	MessageID string `json:"message_id"`
+	ServerID  int64  `json:"server_id"`
+	LeaseJSON string `json:"lease_json"`
+	Signature string `json:"signature"`
+}
+
+// AuthorizationAppliedSnapshot is the opaque identity of the authorization the
+// data plane enforces. It never carries grants, credentials, or payloads.
+type AuthorizationAppliedSnapshot struct {
+	Revision int64  `json:"revision"`
+	Sequence int64  `json:"sequence,omitempty"`
+	Digest   string `json:"digest,omitempty"`
+	BootID   string `json:"boot_id,omitempty"`
+}
+
+// AuthorizationAck confirms one applied envelope on the control channel.
+type AuthorizationAck struct {
+	Type      string                        `json:"type,omitempty"`
+	MessageID string                        `json:"message_id"`
+	Revision  int64                         `json:"revision"`
+	Sequence  int64                         `json:"sequence"`
+	Digest    string                        `json:"digest,omitempty"`
+	Confirmed bool                          `json:"confirmed"`
+	BootID    string                        `json:"boot_id,omitempty"`
+	Runtimes  map[string]string             `json:"runtimes,omitempty"`
+	Error     string                        `json:"error,omitempty"`
+	Applied   *AuthorizationAppliedSnapshot `json:"applied,omitempty"`
+}
+
 type NetworkInterfaceInfo struct {
 	Name      string   `json:"name"`
 	Up        bool     `json:"up"`
@@ -1278,6 +1321,7 @@ type HealthReport struct {
 	RemoteAccess              RemoteAccessReport         `json:"remote_access,omitempty"`
 	NetworkInventory          *NetworkInterfaceInventory `json:"network_inventory,omitempty"`
 	Storage                   *StorageDiskInfo           `json:"storage,omitempty"`
+	AppliedAuthorization      *AuthorizationAppliedSnapshot `json:"applied_authorization,omitempty"`
 }
 
 type StorageDiskInfo struct {

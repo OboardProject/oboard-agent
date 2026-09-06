@@ -196,7 +196,8 @@ type trafficStreamCheckpoint struct {
 }
 
 type trafficReportResponse struct {
-	Authorization     *model.AuthorizationLease `json:"authorization,omitempty"`
+	Authorization         *model.AuthorizationLease    `json:"authorization,omitempty"`
+	AuthorizationEnvelope *model.AuthorizationEnvelope `json:"authorization_envelope,omitempty"`
 	Accepted          []string                  `json:"accepted_report_ids"`
 	AcceptedReports   []trafficAcceptedReport   `json:"accepted_reports"`
 	StreamCheckpoints []trafficStreamCheckpoint `json:"stream_checkpoints"`
@@ -631,7 +632,7 @@ func (r *Runner) reportTrafficLedger(ctx context.Context, state *trafficLocalSta
 		return err
 	}
 	stage = "authorization_apply"
-	if err := r.applyAuthorization(ctx, resp.Authorization); err != nil {
+	if err := r.applyAuthorizationResponse(ctx, resp.AuthorizationEnvelope, resp.Authorization); err != nil {
 		return err
 	}
 	stage = "checkpoint_persist"
@@ -1509,7 +1510,7 @@ func (r *Runner) applyTrafficPolicyTask(payload model.ApplyTrafficPolicyTaskPayl
 	defer func() {
 		r.noteSyncOutcome("traffic_policy_task", stage, payload.PolicyRevision, len(payload.Policies), resultErr)
 	}()
-	if err := r.applyAuthorization(context.Background(), payload.Authorization); err != nil {
+	if _, err := r.applyAuthorization(context.Background(), payload.Authorization); err != nil {
 		return nil, err
 	}
 	if payload.Authorization != nil && payload.PolicyRevision == 0 && len(payload.Policies) == 0 {

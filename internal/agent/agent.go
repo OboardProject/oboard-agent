@@ -69,6 +69,8 @@ type Config struct {
 type Runner struct {
 	authorizationMu             sync.Mutex
 	authorizationStore          *authorization.Store
+	authorizationApplyMu        sync.Mutex
+	authorizationSyncWake       chan struct{}
 	config                      atomic.Pointer[Config]
 	client                      *http.Client
 	coreClient                  *http.Client
@@ -180,7 +182,7 @@ func New(cfg Config) *Runner {
 	if profile == StorageProfileAuto {
 		profile = detectStorageProfile(cfg.StateDir, StorageProfileAuto)
 	}
-	runner := &Runner{coreClient: unixHTTPClient(coreAPISocket), lastForwardProbe: map[int64]time.Time{}, resources: resources, tuning: tuning, hostInfo: detectHostStaticInfo(), logDir: "/var/log", logMaintenanceEvery: logMaintenanceIntervalForProfile(profile), monitoringMode: "lightweight", metricReportWake: make(chan struct{}, 1), connectionAudit: newConnectionAuditAccumulator(cfg.ConnectionAuditEnabled), clock: clock}
+	runner := &Runner{coreClient: unixHTTPClient(coreAPISocket), lastForwardProbe: map[int64]time.Time{}, resources: resources, tuning: tuning, hostInfo: detectHostStaticInfo(), logDir: "/var/log", logMaintenanceEvery: logMaintenanceIntervalForProfile(profile), monitoringMode: "lightweight", metricReportWake: make(chan struct{}, 1), authorizationSyncWake: make(chan struct{}, 1), connectionAudit: newConnectionAuditAccumulator(cfg.ConnectionAuditEnabled), clock: clock}
 	runner.client = &http.Client{Timeout: 20 * time.Second, Transport: runner.lowOverheadTransport()}
 	runner.storeConfig(cfg)
 	runner.refreshLogLevel()
@@ -656,6 +658,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 	r.startLogMaintenance(ctx)
 	r.startTrafficLoop(ctx)
+	r.startAuthorizationSyncLoop(ctx)
 	r.startLatencyProbeLoop(ctx)
 	r.startMetricReportLoop(ctx)
 	_ = r.configureCoreConnectionAudit(ctx, cfg.ConnectionAuditEnabled)
@@ -752,40 +755,63 @@ func (r *Runner) connect(ctx context.Context) error {
 		done    chan error
 	}
 	writes := make(chan websocketWriteRequest, 128)
+	// Authorization acknowledgements and task acks bypass the health/metric
+	// backlog: the writer drains priorityWrites first whenever one is ready.
+	priorityWrites := make(chan websocketWriteRequest, 32)
 	writerErrors := make(chan error, 1)
 	go func() {
+		write := func(request websocketWriteRequest) bool {
+			// A Controller that stopped reading would otherwise park this
+			// writer forever, filling the queue and stalling every task ack.
+			err := conn.SetWriteDeadline(time.Now().Add(controllerSocketWriteTimeout))
+			if err == nil {
+				err = conn.WriteJSON(request.payload)
+			}
+			if request.done != nil {
+				request.done <- err
+			}
+			if err != nil {
+				select {
+				case writerErrors <- err:
+				default:
+				}
+				_ = conn.Close()
+				return false
+			}
+			return true
+		}
 		for {
 			select {
 			case <-connectionCtx.Done():
 				return
+			case request := <-priorityWrites:
+				if !write(request) {
+					return
+				}
+				continue
+			default:
+			}
+			select {
+			case <-connectionCtx.Done():
+				return
+			case request := <-priorityWrites:
+				if !write(request) {
+					return
+				}
 			case request := <-writes:
-				// A Controller that stopped reading would otherwise park this
-				// writer forever, filling the queue and stalling every task ack.
-				err := conn.SetWriteDeadline(time.Now().Add(controllerSocketWriteTimeout))
-				if err == nil {
-					err = conn.WriteJSON(request.payload)
-				}
-				if request.done != nil {
-					request.done <- err
-				}
-				if err != nil {
-					select {
-					case writerErrors <- err:
-					default:
-					}
-					_ = conn.Close()
+				if !write(request) {
 					return
 				}
 			}
 		}
 	}()
-	writeMessage := func(payload any, wait bool) error {
+	enqueue := func(queue chan websocketWriteRequest, payload any, wait bool) error {
 		request := websocketWriteRequest{payload: payload}
 		if wait {
 			request.done = make(chan error, 1)
 		}
 		select {
-		case writes <- request:
+		case queue <- request:
 		case err := <-writerErrors:
 			return err
 		case <-connectionCtx.Done():
@@ -803,11 +829,32 @@ func (r *Runner) connect(ctx context.Context) error {
 			return connectionCtx.Err()
 		}
 	}
+	writeMessage := func(payload any, wait bool) error { return enqueue(writes, payload, wait) }
+	writePriority := func(payload any, wait bool) error { return enqueue(priorityWrites, payload, wait) }
 	r.setControlSend(writeMessage)
 	defer r.setControlSend(nil)
 	if err := writeMessage(map[string]any{"type": "health_report", "health_report": r.Probe(false)}, false); err != nil {
 		return err
 	}
+	// Authorization envelopes are applied by their own goroutine so a revoke is
+	// never queued behind the single task worker. Only the newest envelope is
+	// kept: an older one is superseded by construction.
+	authorizationCh := make(chan model.AuthorizationEnvelope, 1)
+	go func() {
+		for {
+			select {
+			case <-connectionCtx.Done():
+				return
+			case envelope := <-authorizationCh:
+				ack := r.applyAuthorizationEnvelope(connectionCtx, envelope)
+				if err := writePriority(ack, true); err != nil {
+					logging.Errorf("acknowledge authorization message %s: %v", envelope.MessageID, err)
+					cancelConnection()
+					return
+				}
+			}
+		}
+	}()
 	go func() {
 		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()
@@ -925,7 +972,7 @@ func (r *Runner) connect(ctx context.Context) error {
 					cancelConnection()
 					return
 				}
-				if err := writeMessage(map[string]any{"type": "task_ack", "task_id": item.task.ID}, true); err != nil {
+				if err := writePriority(map[string]any{"type": "task_ack", "task_id": item.task.ID}, true); err != nil {
 					logging.Errorf("acknowledge task %d: %v", item.task.ID, err)
 					cancelConnection()
 					return
@@ -984,6 +1031,28 @@ func (r *Runner) connect(ctx context.Context) error {
 				}
 			}
 			r.setConnectionAuditPolicy(typed.ConnectionAuditEnabled)
+			// A reconnect may have missed a revoke pushed while the link was
+			// down; the independent lane pulls the current snapshot now.
+			r.wakeAuthorizationSync()
+		case model.AgentControlAuthorizationUpdate:
+			var envelope model.AuthorizationEnvelope
+			if err := json.Unmarshal(data, &envelope); err != nil {
+				logging.Warnf("authorization_update decode failed: %v", err)
+				continue
+			}
+			// Replace a not-yet-applied envelope: the newest one supersedes it.
+			select {
+			case authorizationCh <- envelope:
+			default:
+				select {
+				case <-authorizationCh:
+				default:
+				}
+				select {
+				case authorizationCh <- envelope:
+				default:
+				}
+			}
 		case "task_request":
 			if typed.Task == nil {
 				continue
@@ -2270,6 +2339,12 @@ func (r *Runner) applyCoreConfigUnlocked(version int64, config string) (map[stri
 			result["reload_strategy"] = "runtime_policy_sync_failed"
 			return result, fmt.Errorf("sync runtime-only core policy: %w", err)
 		}
+		// The lease is part of the runtime policy the live process enforces:
+		// a snapshot that only changed grants must still reach the kernel.
+		if err := r.applyConfigAuthorization(context.Background(), []byte(config)); err != nil {
+			result["reload_strategy"] = "runtime_authorization_sync_failed"
+			return result, fmt.Errorf("sync runtime-only authorization: %w", err)
+		}
 		result["message"] = "runtime policy updated without core reload"
 		result["reload_strategy"] = "runtime_policy_only"
 		result["connection_draining"] = false
@@ -2682,9 +2757,19 @@ func (r *Runner) ReportTaskResult(ctx context.Context, id int64, status, result 
 }
 
 func (r *Runner) postControllerJSON(ctx context.Context, path string, body any, out any, auth bool) error {
-	b, err := json.Marshal(body)
-	if err != nil {
-		return err
+	return r.controllerJSON(ctx, http.MethodPost, path, nil, body, out, auth)
+}
+
+// controllerJSON performs one authenticated Controller callback. A nil body
+// sends no request body (GET); extra headers are added verbatim.
+func (r *Runner) controllerJSON(ctx context.Context, method, path string, headers http.Header, body any, out any, auth bool) error {
+	var reader io.Reader
+	if body != nil {
+		b, err := json.Marshal(body)
+		if err != nil {
+			return err
+		}
+		reader = bytes.NewReader(b)
 	}
 	cfg := r.Config()
 	if auth {
@@ -2692,11 +2777,18 @@ func (r *Runner) postControllerJSON(ctx context.Context, path string, body any, 
 			return fmt.Errorf("controller rejected this agent identity; callbacks paused for %s", wait.Truncate(time.Second))
 		}
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(cfg.ControllerURL, "/")+path, bytes.NewReader(b))
+	req, err := http.NewRequestWithContext(ctx, method, strings.TrimRight(cfg.ControllerURL, "/")+path, reader)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Content-Type", "application/json")
+	for key, values := range headers {
+		for _, value := range values {
+			req.Header.Add(key, value)
+		}
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	if auth {
 		req.Header.Set("Authorization", "Bearer "+cfg.AgentToken)
 		req.Header.Set("X-Agent-ID", cfg.AgentID)
@@ -2741,6 +2833,7 @@ func (r *Runner) taskResultHealth() *model.HealthReport {
 		health.AppliedConfigVersion = applied.Version
 		health.AppliedConfigDigest = applied.PayloadID
 	}
+	health.AppliedAuthorization = r.appliedAuthorization()
 	return &health
 }
 
@@ -2881,6 +2974,7 @@ func (r *Runner) Probe(force bool) model.HealthReport {
 	health.NetworkTotalDownloadBytes = probe.NetworkTotalDownloadBytes
 	health.Timestamp = now
 	health.RemoteAccess = r.remoteAccessReport()
+	health.AppliedAuthorization = r.appliedAuthorization()
 	diskInfo := r.storageDiskInfo()
 	health.DiskAvailableBytes = diskInfo.AvailableBytes
 	health.DiskPressure = diskInfo.Pressure
@@ -2961,7 +3055,7 @@ func buildHealthReport(binary string, timeout time.Duration, host hostStaticInfo
 		AgentVersion:       version.Version,
 		AgentBuild:         version.Build,
 		SingBoxVersion:     coreVersion,
-		KernelCapabilities: append(append([]string(nil), kernelCapabilities...), model.AgentCapabilityTrafficPolicy),
+		KernelCapabilities: append(append([]string(nil), kernelCapabilities...), model.AgentCapabilityTrafficPolicy, model.AgentCapabilityAuthorizationControl),
 		TCPFastOpenState:   tfoState,
 		TCPFastOpenValue:   tfoValue,
 		Timestamp:          time.Now().UTC(),
