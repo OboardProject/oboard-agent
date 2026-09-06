@@ -42,7 +42,7 @@ const (
 var (
 	sshDeviceIDHashPattern  = regexp.MustCompile(`^[A-Za-z0-9_-]{16,128}$`)
 	sshRouteInboundPattern  = regexp.MustCompile(`^in-[1-9][0-9]*$`)
-	sshRouteAuthUserPattern = regexp.MustCompile(`^.{1,192}__oboard_path_([1-9][0-9]*)$`)
+	sshRouteAuthUserPattern = regexp.MustCompile(`^u[0-9a-f]{32}$`)
 )
 
 type sshInboundApplyResult struct {
@@ -70,19 +70,22 @@ type sshInboundManager struct {
 }
 
 type managedSSHInbound struct {
-	plan      model.SSHInbound
-	listener  net.Listener
-	auth      map[string]sshInboundCredential
-	authMu    sync.RWMutex
-	counters  map[int64]*sshInboundCounter
-	audit     *connectionAuditAccumulator
-	routeDial routeRelayDialFunc
+	authorizationAllows func(string) bool
+	plan                model.SSHInbound
+	listener            net.Listener
+	auth                map[string]sshInboundCredential
+	authMu              sync.RWMutex
+	counters            map[int64]*sshInboundCounter
+	audit               *connectionAuditAccumulator
+	routeDial           routeRelayDialFunc
 
-	mu    sync.Mutex
-	conns map[net.Conn]int64
+	mu       sync.Mutex
+	conns    map[net.Conn]int64
+	sessions map[*ssh.ServerConn]string
 }
 
 type sshInboundCredential struct {
+	authorizationKey string
 	userID           int64
 	password         string
 	deviceIDHash     string
@@ -131,7 +134,7 @@ func passwordDigest(password string) string {
 
 func sshInboundUserFingerprint(user model.SSHInboundUser) string {
 	// Fingerprint includes all identity-relevant fields but not plaintext password
-	return fmt.Sprintf("%d|%s|%s|%s|%d|%s|%d|%s|%s|%s", user.UserID, user.Username, passwordDigest(user.Password), strings.TrimSpace(user.DeviceIDHash), user.CredentialEpoch, strings.TrimSpace(user.CredentialStatus), user.PathID, user.RouteKind, user.RouteInboundTag, user.RouteAuthUser)
+	return user.AuthorizationKey + "|" + fmt.Sprintf("%d|%s|%s|%s|%d|%s|%d|%s|%s|%s", user.UserID, user.Username, passwordDigest(user.Password), strings.TrimSpace(user.DeviceIDHash), user.CredentialEpoch, strings.TrimSpace(user.CredentialStatus), user.PathID, user.RouteKind, user.RouteInboundTag, user.RouteAuthUser)
 }
 
 func sshInboundFingerprint(inbound model.SSHInbound) string {
@@ -188,6 +191,7 @@ func liveSSHInboundFingerprints(manager *sshInboundManager) map[int64]string {
 				Username:         username,
 				Password:         cred.password,
 				DeviceIDHash:     cred.deviceIDHash,
+				AuthorizationKey: cred.authorizationKey,
 				CredentialEpoch:  cred.credentialEpoch,
 				CredentialStatus: cred.credentialStatus,
 				PathID:           cred.pathID,
@@ -366,7 +370,7 @@ func (r *Runner) sshDiagnostics(plan model.SSHInboundPlan) sshDiagnostics {
 				live.authMu.RLock()
 				liveUsers := []model.SSHInboundUser{}
 				for username, cred := range live.auth {
-					liveUsers = append(liveUsers, model.SSHInboundUser{UserID: cred.userID, Username: username, Password: cred.password, DeviceIDHash: cred.deviceIDHash, CredentialEpoch: cred.credentialEpoch, CredentialStatus: cred.credentialStatus, PathID: cred.pathID, RouteKind: cred.routeKind, RouteInboundTag: cred.routeInboundTag, RouteAuthUser: cred.routeAuthUser, Enabled: true})
+					liveUsers = append(liveUsers, model.SSHInboundUser{AuthorizationKey: cred.authorizationKey, UserID: cred.userID, Username: username, Password: cred.password, DeviceIDHash: cred.deviceIDHash, CredentialEpoch: cred.credentialEpoch, CredentialStatus: cred.credentialStatus, PathID: cred.pathID, RouteKind: cred.routeKind, RouteInboundTag: cred.routeInboundTag, RouteAuthUser: cred.routeAuthUser, Enabled: true})
 				}
 				live.authMu.RUnlock()
 				tmp := live.plan
@@ -892,6 +896,7 @@ func (r *Runner) newSSHInboundManager(plan model.SSHInboundPlan) (*sshInboundMan
 		if err != nil {
 			return nil, err
 		}
+		inbound.authorizationAllows = r.authorizationAllows
 		manager.listeners[planInbound.InboundID] = inbound
 	}
 	return manager, nil
@@ -942,7 +947,7 @@ func (m *sshInboundManager) applyCredentialStates(plan model.SSHInboundPlan) {
 		return
 	}
 	m.mu.RLock()
-	defer m.mu.RUnlock()
+	defer func() { m.mu.RUnlock(); m.reapAuthorization() }()
 	for _, planned := range plan.Inbounds {
 		current := m.listeners[planned.InboundID]
 		if current == nil || !planned.Enabled {
@@ -968,7 +973,7 @@ func sshInboundCredentials(users []model.SSHInboundUser) map[string]sshInboundCr
 		if status == "" {
 			status = "active"
 		}
-		out[user.Username] = sshInboundCredential{userID: user.UserID, password: user.Password, deviceIDHash: strings.TrimSpace(user.DeviceIDHash), credentialEpoch: user.CredentialEpoch, credentialStatus: status, pathID: user.PathID, routeKind: user.RouteKind, routeInboundTag: user.RouteInboundTag, routeAuthUser: user.RouteAuthUser}
+		out[user.Username] = sshInboundCredential{authorizationKey: user.AuthorizationKey, userID: user.UserID, password: user.Password, deviceIDHash: strings.TrimSpace(user.DeviceIDHash), credentialEpoch: user.CredentialEpoch, credentialStatus: status, pathID: user.PathID, routeKind: user.RouteKind, routeInboundTag: user.RouteInboundTag, routeAuthUser: user.RouteAuthUser}
 	}
 	return out
 }
@@ -1090,8 +1095,7 @@ func validateSSHInboundPlan(plan model.SSHInboundPlan) error {
 			if !sshRouteInboundPattern.MatchString(strings.TrimSpace(user.RouteInboundTag)) {
 				return fmt.Errorf("SSH inbound user %q has an invalid route inbound tag", user.Username)
 			}
-			match := sshRouteAuthUserPattern.FindStringSubmatch(strings.TrimSpace(user.RouteAuthUser))
-			if len(match) != 2 || match[1] != strconv.FormatInt(user.PathID, 10) {
+			if !sshRouteAuthUserPattern.MatchString(user.RouteAuthUser) || user.RouteAuthUser != user.Username || len(user.AuthorizationKey) != 32 {
 				return fmt.Errorf("SSH inbound user %q has an invalid route auth user", user.Username)
 			}
 		}
@@ -1232,7 +1236,7 @@ func (m *managedSSHInbound) handle(raw net.Conn, signer ssh.Signer) {
 			logSSHAuthFailure(m.plan.InboundID, credential.userID, metadata.User(), "password_mismatch")
 			return nil, errors.New("password is not authorized")
 		}
-		if credential.credentialStatus != "active" {
+		if !m.credentialAuthorized(credential, false) {
 			m.audit.recordCredentialRejected(connectionAuditSnapshotItem{UserID: credential.userID, InboundID: m.plan.InboundID, PathID: credential.pathID, DeviceIDHash: credential.deviceIDHash, CredentialEpoch: credential.credentialEpoch, SourceIP: sourceIPFromNetAddr(metadata.RemoteAddr()), Network: "tcp"})
 			logSSHAuthFailure(m.plan.InboundID, credential.userID, metadata.User(), "credential_inactive")
 			return nil, errors.New("password is not authorized")
@@ -1263,6 +1267,19 @@ func (m *managedSSHInbound) handle(raw net.Conn, signer ssh.Signer) {
 		return
 	}
 	defer connection.Close()
+	m.mu.Lock()
+	if m.sessions == nil {
+		m.sessions = map[*ssh.ServerConn]string{}
+	}
+	m.sessions[connection] = connection.User()
+	m.mu.Unlock()
+	defer func() { m.mu.Lock(); delete(m.sessions, connection); m.mu.Unlock() }()
+	done := make(chan struct{})
+	defer close(done)
+	go m.watchAuthorization(connection, done)
+	if !m.sessionAuthorized(connection.User()) {
+		return
+	}
 	if connection.Permissions != nil {
 		if userID, parseErr := strconv.ParseInt(connection.Permissions.Extensions["oboard_user_id"], 10, 64); parseErr == nil && userID > 0 {
 			m.mu.Lock()
@@ -1283,6 +1300,11 @@ func (m *managedSSHInbound) handle(raw net.Conn, signer ssh.Signer) {
 }
 
 func (m *managedSSHInbound) handleDirectTCPIP(connection *ssh.ServerConn, newChannel ssh.NewChannel) {
+	if !m.sessionAuthorized(connection.User()) {
+		_ = newChannel.Reject(ssh.Prohibited, "authorization expired")
+		_ = connection.Close()
+		return
+	}
 	if connection.Permissions == nil {
 		_ = newChannel.Reject(ssh.Prohibited, "missing authenticated OBoard user")
 		return

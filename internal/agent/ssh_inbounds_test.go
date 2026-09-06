@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -22,12 +23,17 @@ import (
 )
 
 func testSSHInboundUser(id int64, username, password string) model.SSHInboundUser {
-	return model.SSHInboundUser{UserID: id, Username: username, Password: password, PathID: 1, RouteKind: "kernel", RouteInboundTag: "in-1", RouteAuthUser: username + "__oboard_path_1", Enabled: true}
+	username = fmt.Sprintf("u%x", sha256.Sum256([]byte(username)))[:33]
+	return model.SSHInboundUser{AuthorizationKey: "0123456789abcdef0123456789abcdef", UserID: id, Username: username, Password: password, PathID: 1, RouteKind: "kernel", RouteInboundTag: "in-1", RouteAuthUser: username, Enabled: true}
 }
 
 func newTestSSHRunner(t *testing.T, cfg Config) *Runner {
 	t.Helper()
 	runner := New(cfg)
+	now := time.Now().UTC()
+	if err := runner.authorizationState().Update(&model.AuthorizationLease{Revision: 1, IssuedAt: now.Format(time.RFC3339Nano), Grants: map[string]string{"0123456789abcdef0123456789abcdef": now.Add(5 * time.Minute).Format(time.RFC3339Nano)}}); err != nil {
+		t.Fatal(err)
+	}
 	runner.coreClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"capabilities":["route_relay_v1"]}`)), Header: make(http.Header)}, nil
 	})}
@@ -61,7 +67,7 @@ func TestSSHInboundAllowsOnlyPasswordAndDirectTCPIP(t *testing.T) {
 	}
 	defer func() { _, _ = runner.applySSHInbounds(model.SSHInboundPlan{Version: 2}) }()
 
-	client, err := ssh.Dial("tcp", net.JoinHostPort("127.0.0.1", fmt.Sprint(port)), &ssh.ClientConfig{User: "alice", Auth: []ssh.AuthMethod{ssh.Password(user.Password)}, HostKeyCallback: ssh.InsecureIgnoreHostKey()})
+	client, err := ssh.Dial("tcp", net.JoinHostPort("127.0.0.1", fmt.Sprint(port)), &ssh.ClientConfig{User: user.Username, Auth: []ssh.AuthMethod{ssh.Password(user.Password)}, HostKeyCallback: ssh.InsecureIgnoreHostKey()})
 	if err != nil {
 		t.Fatalf("password authentication failed: %v", err)
 	}
@@ -82,7 +88,7 @@ func TestSSHInboundAllowsOnlyPasswordAndDirectTCPIP(t *testing.T) {
 	}
 	_ = udpGateway.Close()
 
-	if _, err := ssh.Dial("tcp", net.JoinHostPort("127.0.0.1", fmt.Sprint(port)), &ssh.ClientConfig{User: "alice", Auth: []ssh.AuthMethod{ssh.Password("wrong")}, HostKeyCallback: ssh.InsecureIgnoreHostKey()}); err == nil {
+	if _, err := ssh.Dial("tcp", net.JoinHostPort("127.0.0.1", fmt.Sprint(port)), &ssh.ClientConfig{User: user.Username, Auth: []ssh.AuthMethod{ssh.Password("wrong")}, HostKeyCallback: ssh.InsecureIgnoreHostKey()}); err == nil {
 		t.Fatal("incorrect SSH password was accepted")
 	}
 	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
@@ -93,7 +99,7 @@ func TestSSHInboundAllowsOnlyPasswordAndDirectTCPIP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ssh.Dial("tcp", net.JoinHostPort("127.0.0.1", fmt.Sprint(port)), &ssh.ClientConfig{User: "alice", Auth: []ssh.AuthMethod{ssh.PublicKeys(userSigner)}, HostKeyCallback: ssh.InsecureIgnoreHostKey()}); err == nil {
+	if _, err := ssh.Dial("tcp", net.JoinHostPort("127.0.0.1", fmt.Sprint(port)), &ssh.ClientConfig{User: user.Username, Auth: []ssh.AuthMethod{ssh.PublicKeys(userSigner)}, HostKeyCallback: ssh.InsecureIgnoreHostKey()}); err == nil {
 		t.Fatal("public-key authentication was accepted")
 	}
 }
@@ -136,6 +142,21 @@ func TestSSHInboundCredentialStatusUpdatePreservesExistingConnection(t *testing.
 	if _, err := ssh.Dial("tcp", net.JoinHostPort("127.0.0.1", fmt.Sprint(port)), &ssh.ClientConfig{User: user.Username, Auth: []ssh.AuthMethod{ssh.Password(user.Password)}, HostKeyCallback: ssh.InsecureIgnoreHostKey()}); err == nil {
 		t.Fatal("new SSH authentication was accepted after reject_new")
 	}
+	revoked := &model.AuthorizationLease{Revision: 2, IssuedAt: time.Now().UTC().Format(time.RFC3339Nano), Grants: map[string]string{}}
+	if err := runner.applyAuthorization(context.Background(), revoked); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := client.SendRequest("keepalive@openssh.com", true, nil); err == nil {
+		t.Fatal("revocation preserved an existing SSH connection")
+	}
+	stale := &model.AuthorizationLease{Revision: 1, IssuedAt: time.Now().UTC().Format(time.RFC3339Nano), Grants: map[string]string{user.AuthorizationKey: time.Now().Add(time.Minute).UTC().Format(time.RFC3339Nano)}}
+	if err := runner.applyAuthorization(context.Background(), stale); err != nil {
+		t.Fatal(err)
+	}
+	if runner.authorizationAllows(user.AuthorizationKey) {
+		t.Fatal("stale task restored SSH authorization")
+	}
+
 }
 
 func TestSSHInboundApplyReportsPersistentHostIdentity(t *testing.T) {
@@ -564,6 +585,7 @@ func TestRestoreSSHInboundsKeepsListenersWhenCoreAPIIsDown(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	_ = newTestSSHRunner(t, Config{StateDir: stateDir}) // Persist the prior process's unexpired authorization.
 	coreUp := false
 	runner := New(Config{StateDir: stateDir})
 	runner.coreClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {

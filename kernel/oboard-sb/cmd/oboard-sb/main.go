@@ -10,18 +10,20 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/authorization"
 	"github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/minibox"
 	"github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/version"
 	box "github.com/sagernet/sing-box"
 	C "github.com/sagernet/sing-box/constant"
 )
 
-var kernelCapabilities = []string{"outbound_egress_probe_v1", "outbound_relay_v1", "route_relay_v1", "runtime_clock_v1", "connection_presence_v1", "family_selector_v1", "traffic_ledger", "runtime_config_digest_v1", "runtime_build_identity_v1"}
+var kernelCapabilities = []string{"authorization_lease_v1", "outbound_egress_probe_v1", "outbound_relay_v1", "route_relay_v1", "runtime_clock_v1", "connection_presence_v1", "family_selector_v1", "traffic_ledger", "runtime_config_digest_v1", "runtime_build_identity_v1"}
 
 // runtimeConfigState is the payload-free identity of the configuration this
 // process actually loaded. Agent compares it with the desired configuration so
@@ -96,6 +98,17 @@ func main() {
 		log.Fatal(err)
 	}
 	tracker := minibox.AttachRuntimeTrackers(boxCtx, runtimeMetadata)
+	if err := tracker.InitializeAuthorization(filepath.Join(filepath.Dir(*config), "kernel-authorization.json"), runtimeMetadata.Authorization); err != nil {
+		log.Fatal(err)
+	}
+	agentLease, err := authorization.NewStore(filepath.Join(filepath.Dir(*config), "authorization.json")).Snapshot()
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := tracker.UpdateAuthorization(agentLease); err != nil {
+		log.Fatal(err)
+	}
+	go tracker.RunAuthorizationReaper(ctx)
 	socketGovernor := minibox.StartAdaptiveSocketGovernor(ctx, runtimeTuning)
 	tracker.SetSocketGovernor(socketGovernor)
 	if *api != "" {
@@ -207,6 +220,7 @@ func serveHealth(ctx context.Context, listen string, instance *box.Box, tracker 
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 	})
 	registerClockConfigHandler(mux, listen, runtimeClock)
+	registerAuthorizationHandler(mux, listen, tracker)
 
 	var (
 		ln         net.Listener

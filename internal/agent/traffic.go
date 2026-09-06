@@ -196,6 +196,7 @@ type trafficStreamCheckpoint struct {
 }
 
 type trafficReportResponse struct {
+	Authorization     *model.AuthorizationLease `json:"authorization,omitempty"`
 	Accepted          []string                  `json:"accepted_report_ids"`
 	AcceptedReports   []trafficAcceptedReport   `json:"accepted_reports"`
 	StreamCheckpoints []trafficStreamCheckpoint `json:"stream_checkpoints"`
@@ -206,7 +207,7 @@ type trafficReportResponse struct {
 func (r *Runner) startTrafficLoop(ctx context.Context) {
 	// #nosec G118 -- loopCtx is the caller's lifecycle context; only the final bounded flush uses a fresh timeout after cancellation.
 	go func(loopCtx context.Context) {
-		ticker := time.NewTicker(r.resources.TrafficReportInterval())
+		ticker := time.NewTicker(min(r.resources.TrafficReportInterval(), 30*time.Second))
 		defer ticker.Stop()
 		for {
 			// A failed cycle means the Controller returned no policies, so no
@@ -408,12 +409,12 @@ func (r *Runner) observeTrafficSnapshotLocked(state *trafficLocalState, items []
 		if pendingExists {
 			continue
 		}
-		if item.InboundID <= 0 {
+		if item.InboundID <= 0 || item.UserID <= 0 {
 			// A counter without inbound identity can never be accounted: the
 			// Controller rejects a report that names no inbound. Queuing it used
 			// to wedge the whole batch on every retry, because a request-fatal
-			// rejection never carries a per-report acknowledgement that would
-			// let the pending entry drain. Keep the stream observable but never
+			// rejection never carries a per-report acknowledgement that would let
+			// the pending entry drain. Keep the stream observable but never
 			// queue a report for it.
 			stream.Status = trafficStatusHealthy
 			continue
@@ -620,6 +621,9 @@ func (r *Runner) reportTrafficLedger(ctx context.Context, state *trafficLocalSta
 		state.Sync.Status = trafficStatusStale
 		state.Sync.LastError = err.Error()
 		_ = r.saveTrafficState(*state)
+		return err
+	}
+	if err := r.applyAuthorization(ctx, resp.Authorization); err != nil {
 		return err
 	}
 	applyTrafficLedgerResponse(state, resp)
@@ -1489,6 +1493,12 @@ func applyStaleLeasePolicies(policies map[string]interface{}, state *trafficLoca
 }
 
 func (r *Runner) applyTrafficPolicyTask(payload model.ApplyTrafficPolicyTaskPayload) (map[string]any, error) {
+	if err := r.applyAuthorization(context.Background(), payload.Authorization); err != nil {
+		return nil, err
+	}
+	if payload.Authorization != nil && payload.PolicyRevision == 0 && len(payload.Policies) == 0 {
+		return map[string]any{"message": "authorization applied", "authorization_revision": payload.Authorization.Revision}, nil
+	}
 	r.trafficMu.Lock()
 	defer r.trafficMu.Unlock()
 	state := r.trafficStateLocked()

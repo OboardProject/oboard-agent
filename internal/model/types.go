@@ -3,7 +3,11 @@ package model
 import (
 	"encoding/json"
 	"time"
+
+	"github.com/OboardProject/oboard-agent/internal/authorization"
 )
+
+type AuthorizationLease = authorization.Lease
 
 type Role string
 
@@ -702,6 +706,7 @@ type SSHInbound struct {
 // SSHInboundUser maps one panel user to an isolated SSH login. Shell access
 // and agent forwarding are intentionally unsupported.
 type SSHInboundUser struct {
+	AuthorizationKey string `json:"authorization_key,omitempty"`
 	UserID           int64  `json:"user_id"`
 	Username         string `json:"username"`
 	Password         string `json:"password"`
@@ -803,6 +808,7 @@ type AgentTaskResultReport struct {
 }
 
 type ApplyCoreConfigTaskPayload struct {
+	SSHInbounds  *SSHInboundPlan         `json:"ssh_inbounds,omitempty"`
 	Config       string                  `json:"config"`
 	Reason       string                  `json:"reason,omitempty"`
 	PrunedUserID int64                   `json:"pruned_user_id,omitempty"`
@@ -810,6 +816,7 @@ type ApplyCoreConfigTaskPayload struct {
 }
 
 type ApplyTrafficPolicyTaskPayload struct {
+	Authorization  *AuthorizationLease             `json:"authorization,omitempty"`
 	PolicyRevision int64                           `json:"policy_revision"`
 	Reason         string                          `json:"reason,omitempty"`
 	Policies       map[string]TrafficRuntimePolicy `json:"policies"`

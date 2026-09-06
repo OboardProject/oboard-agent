@@ -24,6 +24,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"github.com/OboardProject/oboard-agent/internal/authorization"
 	"github.com/OboardProject/oboard-agent/internal/core"
 	"github.com/OboardProject/oboard-agent/internal/logging"
 	"github.com/OboardProject/oboard-agent/internal/model"
@@ -66,6 +67,8 @@ type Config struct {
 }
 
 type Runner struct {
+	authorizationMu             sync.Mutex
+	authorizationStore          *authorization.Store
 	config                      atomic.Pointer[Config]
 	client                      *http.Client
 	coreClient                  *http.Client
@@ -2089,7 +2092,10 @@ func (r *Runner) applyCoreConfigTask(version int64, payload model.ApplyCoreConfi
 	// A replay may only be answered from local bookkeeping when the running
 	// kernel actually serves what was recorded. Otherwise fall through to the
 	// full apply, which re-verifies the runtime and restarts a drifted kernel.
-	if verdict == appliedVersionReplay && r.coreRuntimeConverged(context.Background()) {
+	if verdict == appliedVersionReplay && payload.SSHInbounds == nil && r.coreRuntimeConverged(context.Background()) {
+		if err := r.applyConfigAuthorization(context.Background(), []byte(payload.Config)); err != nil {
+			return nil, err
+		}
 		if err := r.cleanupManagedAssets(payload.Assets); err != nil {
 			return map[string]any{"message": "managed asset cleanup failed", "version": version, "idempotent_replay": true, "reload_strategy": "unchanged"}, err
 		}
@@ -2104,6 +2110,13 @@ func (r *Runner) applyCoreConfigTask(version int64, payload model.ApplyCoreConfi
 		return result, err
 	}
 	result["managed_assets_changed"] = assetsChanged
+	if payload.SSHInbounds != nil {
+		sshResult, err := r.applySSHInbounds(*payload.SSHInbounds)
+		result["ssh_inbounds"] = sshResult
+		if err != nil {
+			return result, err
+		}
+	}
 	if err := r.persistAppliedVersion(model.AgentTaskTypeApplyCoreConfig, version, payloadBytes); err != nil {
 		return result, fmt.Errorf("persist applied config version: %w", err)
 	}
@@ -2124,6 +2137,9 @@ func (r *Runner) applyCoreConfigUnlocked(version int64, config string) (map[stri
 		return map[string]any{"message": "config apply deferred", "version": version, "reload_strategy": "host_lock_busy"}, hostLockErr
 	}
 	defer hostLock.release()
+	if err := r.stageConfigAuthorization([]byte(config)); err != nil {
+		return map[string]any{"message": "authorization rejected"}, err
+	}
 	r.forwardLifecycleMu.Lock()
 	defer r.forwardLifecycleMu.Unlock()
 	result := map[string]any{
@@ -2135,6 +2151,9 @@ func (r *Runner) applyCoreConfigUnlocked(version int64, config string) (map[stri
 		"connection_note":     "oboard-sb has no in-process reload; an operational change is applied with a controlled restart and verified against the running kernel",
 	}
 	finishOperationalApply := func(message, strategy string, draining bool) (map[string]any, error) {
+		if err := r.applyConfigAuthorization(context.Background(), []byte(config)); err != nil {
+			return result, err
+		}
 		result["message"] = message
 		result["reload_strategy"] = strategy
 		result["connection_draining"] = draining

@@ -20,7 +20,7 @@ import (
 
 var (
 	routeInboundTagPattern = regexp.MustCompile(`^in-[1-9][0-9]*$`)
-	routeAuthUserPattern   = regexp.MustCompile(`^.{1,192}__oboard_path_[1-9][0-9]*$`)
+	routeAuthUserPattern   = regexp.MustCompile(`^u[0-9a-f]{32}$`)
 )
 
 func registerRouteRelayHandlers(mux *http.ServeMux, listen string, instance *box.Box) {

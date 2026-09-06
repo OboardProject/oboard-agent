@@ -45,6 +45,11 @@ func (r *Runner) executeDeploymentTask(payload model.DeploymentTaskPayload) (str
 	// serves the recorded configuration, so a drifted kernel gets the full
 	// deployment instead, which restarts it.
 	if verdict == appliedVersionReplay && r.coreRuntimeConverged(ctx) {
+		if strings.TrimSpace(payload.Config.Config) != "" {
+			if err := r.applyConfigAuthorization(ctx, []byte(payload.Config.Config)); err != nil {
+				return "failed", jsonResult("authorization reconciliation failed: " + err.Error())
+			}
+		}
 		return r.deploymentReplayResponse(payload)
 	}
 	steps := make([]deploymentStepResult, 0, 12+len(payload.WARPRequests))

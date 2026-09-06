@@ -18,7 +18,7 @@ import (
 )
 
 func TestRateLimitTrackerWrapsKnownUser(t *testing.T) {
-	tracker := NewRateLimitTracker(RuntimeMetadata{RateLimits: RuntimeRateLimits{Users: map[string]RuntimeUserLimit{"alice": {SpeedLimitMbps: 20}}}})
+	tracker := authorizedQuotaFixture(RuntimeMetadata{RateLimits: RuntimeRateLimits{Users: map[string]RuntimeUserLimit{"alice": {SpeedLimitMbps: 20}}}})
 	if !tracker.Enabled() {
 		t.Fatal("tracker should be enabled")
 	}
@@ -63,7 +63,7 @@ func TestRuntimePolicyMigrationPreservesUnreportedCounters(t *testing.T) {
 }
 
 func TestRateLimitTrackerFallsBackToInbound(t *testing.T) {
-	tracker := NewRateLimitTracker(RuntimeMetadata{RateLimits: RuntimeRateLimits{Inbounds: map[string]RuntimeUserLimit{"in-1": {SpeedLimitMbps: 20}}}})
+	tracker := authorizedQuotaFixture(RuntimeMetadata{RateLimits: RuntimeRateLimits{Inbounds: map[string]RuntimeUserLimit{"in-1": {SpeedLimitMbps: 20}}}})
 	client, server := net.Pipe()
 	defer client.Close()
 	defer server.Close()
@@ -74,7 +74,7 @@ func TestRateLimitTrackerFallsBackToInbound(t *testing.T) {
 }
 
 func TestRateLimitTrackerCountsBillableUser(t *testing.T) {
-	tracker := NewRateLimitTracker(RuntimeMetadata{RateLimits: RuntimeRateLimits{Users: map[string]RuntimeUserLimit{"alice": {UserID: 7, Billable: true, TrafficLimitBytes: 10, PeriodKey: "2026-07"}}}})
+	tracker := authorizedQuotaFixture(RuntimeMetadata{RateLimits: RuntimeRateLimits{Users: map[string]RuntimeUserLimit{"alice": {UserID: 7, Billable: true, TrafficLimitBytes: 10, PeriodKey: "2026-07"}}}})
 	state := tracker.stateForKey("user:alice")
 	state.addTraffic(4, 5)
 	items := tracker.Snapshot()
@@ -111,7 +111,7 @@ func TestUnrestrictedBillableConnectionKeepsDirectCopyEligibility(t *testing.T) 
 	server := <-accepted
 	defer server.Close()
 
-	tracker := NewRateLimitTracker(RuntimeMetadata{RateLimits: RuntimeRateLimits{Users: map[string]RuntimeUserLimit{
+	tracker := authorizedQuotaFixture(RuntimeMetadata{RateLimits: RuntimeRateLimits{Users: map[string]RuntimeUserLimit{
 		"alice": {UserID: 7, Billable: true},
 	}}})
 	wrapped := tracker.RoutedConnection(context.Background(), server, adapter.InboundContext{User: "alice"}, nil, nil)
@@ -136,7 +136,7 @@ func TestUnrestrictedBillableConnectionKeepsDirectCopyEligibility(t *testing.T) 
 }
 
 func TestSpeedLimitedConnectionStaysWrapped(t *testing.T) {
-	tracker := NewRateLimitTracker(RuntimeMetadata{RateLimits: RuntimeRateLimits{Users: map[string]RuntimeUserLimit{
+	tracker := authorizedQuotaFixture(RuntimeMetadata{RateLimits: RuntimeRateLimits{Users: map[string]RuntimeUserLimit{
 		"alice": {UserID: 7, Billable: true, SpeedLimitMbps: 20},
 	}}})
 	client, server := net.Pipe()
@@ -173,7 +173,7 @@ func TestTrackedConnWriteHonorsCanceledRateLimitWait(t *testing.T) {
 }
 
 func TestUpdatePoliciesRefreshesExistingLimitersAndPreservesIdentity(t *testing.T) {
-	tracker := NewRateLimitTracker(RuntimeMetadata{RateLimits: RuntimeRateLimits{
+	tracker := authorizedQuotaFixture(RuntimeMetadata{RateLimits: RuntimeRateLimits{
 		Users: map[string]RuntimeUserLimit{
 			"alice": {UserID: 7, Billable: true, SpeedLimitMbps: 10, TrafficLimitBytes: 100},
 		},
@@ -206,7 +206,7 @@ func TestUpdatePoliciesRefreshesExistingLimitersAndPreservesIdentity(t *testing.
 }
 
 func TestPolicyUpdatePreservesCountersInSamePeriodAndResetsNextPeriod(t *testing.T) {
-	tracker := NewRateLimitTracker(RuntimeMetadata{RateLimits: RuntimeRateLimits{Users: map[string]RuntimeUserLimit{
+	tracker := authorizedQuotaFixture(RuntimeMetadata{RateLimits: RuntimeRateLimits{Users: map[string]RuntimeUserLimit{
 		"alice": {UserID: 7, Billable: true, PeriodKey: "2026-07", TrafficLimitBytes: 100},
 	}}})
 	state := tracker.stateForKey("user:alice")
@@ -233,7 +233,7 @@ func TestPolicyUpdatePreservesCountersInSamePeriodAndResetsNextPeriod(t *testing
 }
 
 func TestAcknowledgedTrafficIsNotAddedToUpdatedBaseline(t *testing.T) {
-	tracker := NewRateLimitTracker(RuntimeMetadata{RateLimits: RuntimeRateLimits{Users: map[string]RuntimeUserLimit{
+	tracker := authorizedQuotaFixture(RuntimeMetadata{RateLimits: RuntimeRateLimits{Users: map[string]RuntimeUserLimit{
 		"alice": {UserID: 7, Billable: true, PeriodKey: "2026-07", TrafficLimitBytes: 12, UsedBaselineBytes: 4},
 	}}})
 	state := tracker.stateForKey("user:alice")
@@ -255,7 +255,7 @@ func TestAcknowledgedTrafficIsNotAddedToUpdatedBaseline(t *testing.T) {
 
 func TestQuotaAggregatesSameUserAcrossRuntimeStates(t *testing.T) {
 	policy := RuntimeUserLimit{UserID: 7, Billable: true, PeriodKey: "2026-07", TrafficLimitBytes: 10}
-	tracker := NewRateLimitTracker(RuntimeMetadata{RateLimits: RuntimeRateLimits{
+	tracker := authorizedQuotaFixture(RuntimeMetadata{RateLimits: RuntimeRateLimits{
 		Users:    map[string]RuntimeUserLimit{"alice": policy},
 		Inbounds: map[string]RuntimeUserLimit{"path-alice": policy},
 	}})
@@ -270,7 +270,7 @@ func TestQuotaAggregatesSameUserAcrossRuntimeStates(t *testing.T) {
 
 func TestExpiredRuntimePolicyResetsCountersOnlyOnce(t *testing.T) {
 	stale := RuntimeUserLimit{UserID: 7, Billable: true, TrafficLimitBytes: 100, PeriodEnd: time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano)}
-	tracker := NewRateLimitTracker(RuntimeMetadata{RateLimits: RuntimeRateLimits{Users: map[string]RuntimeUserLimit{"alice": stale}}})
+	tracker := authorizedQuotaFixture(RuntimeMetadata{RateLimits: RuntimeRateLimits{Users: map[string]RuntimeUserLimit{"alice": stale}}})
 	state := tracker.stateForKey("user:alice")
 	state.addTraffic(5, 0)
 	state.addTraffic(4, 0)
@@ -281,7 +281,7 @@ func TestExpiredRuntimePolicyResetsCountersOnlyOnce(t *testing.T) {
 }
 
 func TestZeroOfflineLeaseRejectsNewBillableTraffic(t *testing.T) {
-	tracker := NewRateLimitTracker(RuntimeMetadata{RateLimits: RuntimeRateLimits{Users: map[string]RuntimeUserLimit{
+	tracker := authorizedQuotaFixture(RuntimeMetadata{RateLimits: RuntimeRateLimits{Users: map[string]RuntimeUserLimit{
 		"alice": {UserID: 7, Billable: true, TrafficLimitBytes: 100, UsedBaselineBytes: 50, LeaseBytes: 0, LeaseEnforced: true, QuotaState: "active", EnforcementMode: "reject_new"},
 	}}})
 	state := tracker.stateForKey("user:alice")
@@ -298,19 +298,19 @@ func TestZeroOfflineLeaseRejectsNewBillableTraffic(t *testing.T) {
 }
 
 func TestZeroOfflineLeaseStillHonorsGlobalQuotaAndExceededState(t *testing.T) {
-	exhausted := NewRateLimitTracker(RuntimeMetadata{RateLimits: RuntimeRateLimits{Users: map[string]RuntimeUserLimit{
+	exhausted := authorizedQuotaFixture(RuntimeMetadata{RateLimits: RuntimeRateLimits{Users: map[string]RuntimeUserLimit{
 		"alice": {UserID: 7, Billable: true, TrafficLimitBytes: 10, UsedBaselineBytes: 10, LeaseEnforced: true, QuotaState: "active"},
 	}}})
 	if !exhausted.stateForKey("user:alice").denied() {
 		t.Fatal("empty lease must still deny once the global quota is consumed")
 	}
-	marked := NewRateLimitTracker(RuntimeMetadata{RateLimits: RuntimeRateLimits{Users: map[string]RuntimeUserLimit{
+	marked := authorizedQuotaFixture(RuntimeMetadata{RateLimits: RuntimeRateLimits{Users: map[string]RuntimeUserLimit{
 		"alice": {UserID: 7, Billable: true, TrafficLimitBytes: 100, UsedBaselineBytes: 4, LeaseEnforced: true, QuotaState: "quota_exceeded", EnforcementMode: "disconnect_and_reject"},
 	}}})
 	if !marked.stateForKey("user:alice").denied() {
 		t.Fatal("quota_exceeded must still deny even when the remaining lease is empty")
 	}
-	limited := NewRateLimitTracker(RuntimeMetadata{RateLimits: RuntimeRateLimits{Users: map[string]RuntimeUserLimit{
+	limited := authorizedQuotaFixture(RuntimeMetadata{RateLimits: RuntimeRateLimits{Users: map[string]RuntimeUserLimit{
 		"alice": {UserID: 7, Billable: true, TrafficLimitBytes: 100, UsedBaselineBytes: 4, LeaseBytes: 6, LeaseEnforced: true, QuotaState: "active"},
 	}}})
 	state := limited.stateForKey("user:alice")
@@ -321,7 +321,7 @@ func TestZeroOfflineLeaseStillHonorsGlobalQuotaAndExceededState(t *testing.T) {
 }
 
 func TestZeroLeaseIsEnforcedBelowGlobalQuota(t *testing.T) {
-	tracker := NewRateLimitTracker(RuntimeMetadata{RateLimits: RuntimeRateLimits{Users: map[string]RuntimeUserLimit{
+	tracker := authorizedQuotaFixture(RuntimeMetadata{RateLimits: RuntimeRateLimits{Users: map[string]RuntimeUserLimit{
 		"alice": {UserID: 7, Billable: true, TrafficLimitBytes: 100, UsedBaselineBytes: 50, LeaseBytes: 0, LeaseEnforced: true, QuotaState: "active", EnforcementMode: "reject_new"},
 	}}})
 	state := tracker.stateForKey("user:alice")
@@ -379,7 +379,7 @@ func TestStaleEpochAcknowledgementIsIgnored(t *testing.T) {
 
 func TestExpiredPolicyRestoresAssignedResetLease(t *testing.T) {
 	stale := RuntimeUserLimit{UserID: 7, Billable: true, TrafficLimitBytes: 100, LeaseBytes: 0, ResetLeaseBytes: 25, LeaseEnforced: true, PeriodEnd: time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano)}
-	tracker := NewRateLimitTracker(RuntimeMetadata{RateLimits: RuntimeRateLimits{Users: map[string]RuntimeUserLimit{"alice": stale}}})
+	tracker := authorizedQuotaFixture(RuntimeMetadata{RateLimits: RuntimeRateLimits{Users: map[string]RuntimeUserLimit{"alice": stale}}})
 	state := tracker.stateForKey("user:alice")
 	state.addTraffic(24, 0)
 	if state.denied() {
@@ -392,7 +392,7 @@ func TestExpiredPolicyRestoresAssignedResetLease(t *testing.T) {
 }
 
 func TestQuotaPolicyDisconnectsExistingConnection(t *testing.T) {
-	tracker := NewRateLimitTracker(RuntimeMetadata{RateLimits: RuntimeRateLimits{Users: map[string]RuntimeUserLimit{
+	tracker := authorizedQuotaFixture(RuntimeMetadata{RateLimits: RuntimeRateLimits{Users: map[string]RuntimeUserLimit{
 		"alice": {UserID: 7, Billable: true, TrafficLimitBytes: 100},
 	}}})
 	client, server := net.Pipe()
@@ -407,7 +407,7 @@ func TestQuotaPolicyDisconnectsExistingConnection(t *testing.T) {
 }
 
 func TestRejectNewPolicyKeepsExistingConnectionAndRejectsNewOne(t *testing.T) {
-	tracker := NewRateLimitTracker(RuntimeMetadata{RateLimits: RuntimeRateLimits{Users: map[string]RuntimeUserLimit{
+	tracker := authorizedQuotaFixture(RuntimeMetadata{RateLimits: RuntimeRateLimits{Users: map[string]RuntimeUserLimit{
 		"alice": {UserID: 7, Billable: true, TrafficLimitBytes: 100},
 	}}})
 	client, server := net.Pipe()
@@ -441,7 +441,7 @@ func baseTrackedConn(conn net.Conn) *trackedConn {
 }
 
 func TestTrackedPacketConnCountsConsumedWriteBuffer(t *testing.T) {
-	tracker := NewRateLimitTracker(RuntimeMetadata{RateLimits: RuntimeRateLimits{Users: map[string]RuntimeUserLimit{
+	tracker := authorizedQuotaFixture(RuntimeMetadata{RateLimits: RuntimeRateLimits{Users: map[string]RuntimeUserLimit{
 		"alice": {UserID: 7, Billable: true},
 	}}})
 	packet := &testPacketConn{readPayload: []byte("up"), consumeWrite: true}
@@ -463,7 +463,7 @@ func TestTrackedPacketConnCountsConsumedWriteBuffer(t *testing.T) {
 }
 
 func TestConcurrentTrafficPolicyUpdatesAndSnapshots(t *testing.T) {
-	tracker := NewRateLimitTracker(RuntimeMetadata{RateLimits: RuntimeRateLimits{Users: map[string]RuntimeUserLimit{
+	tracker := authorizedQuotaFixture(RuntimeMetadata{RateLimits: RuntimeRateLimits{Users: map[string]RuntimeUserLimit{
 		"alice": {UserID: 7, Billable: true, PeriodKey: "2026-07", TrafficLimitBytes: 1 << 30},
 	}}})
 	state := tracker.stateForKey("user:alice")
@@ -521,7 +521,7 @@ func BenchmarkRuntimeStateQuotaCheck(b *testing.B) {
 }
 
 func BenchmarkRateLimitTrackerSnapshot(b *testing.B) {
-	tracker := NewRateLimitTracker(RuntimeMetadata{RateLimits: RuntimeRateLimits{Users: map[string]RuntimeUserLimit{
+	tracker := authorizedQuotaFixture(RuntimeMetadata{RateLimits: RuntimeRateLimits{Users: map[string]RuntimeUserLimit{
 		"alice": {UserID: 7, Billable: true, PeriodKey: "2026-07"},
 	}}})
 	tracker.stateForKey("user:alice").addTraffic(1500, 1500)
@@ -532,7 +532,7 @@ func BenchmarkRateLimitTrackerSnapshot(b *testing.B) {
 }
 
 func BenchmarkRateLimitTrackerPolicyUpdate(b *testing.B) {
-	tracker := NewRateLimitTracker(RuntimeMetadata{RateLimits: RuntimeRateLimits{Users: map[string]RuntimeUserLimit{
+	tracker := authorizedQuotaFixture(RuntimeMetadata{RateLimits: RuntimeRateLimits{Users: map[string]RuntimeUserLimit{
 		"alice": {UserID: 7, Billable: true, PeriodKey: "2026-07"},
 	}}})
 	b.ReportAllocs()

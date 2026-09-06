@@ -22,12 +22,14 @@ import (
 	"github.com/sagernet/sing/service"
 	"golang.org/x/time/rate"
 
+	"github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/authorization"
 	"github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/protocol/familyselector"
 )
 
 const rateLimitIOChunk = 64 * 1024
 
 type RateLimitTracker struct {
+	authorization         *authorization.Store
 	mu                    sync.RWMutex
 	states                map[string]*runtimeState
 	active                map[string]map[*trackedConn]struct{}
@@ -63,13 +65,14 @@ func (t *RateLimitTracker) SetSocketGovernor(governor *SocketBufferGovernor) {
 }
 
 type runtimeState struct {
-	key      string
-	user     string
-	inbound  string
-	config   atomic.Pointer[runtimeConfig]
-	periodMu sync.Mutex
-	usage    *runtimeUserUsage
-	now      func() time.Time
+	authorization *authorization.Store
+	key           string
+	user          string
+	inbound       string
+	config        atomic.Pointer[runtimeConfig]
+	periodMu      sync.Mutex
+	usage         *runtimeUserUsage
+	now           func() time.Time
 }
 
 type runtimeConfig struct {
@@ -140,6 +143,8 @@ func newRateLimitTracker(metadata RuntimeMetadata, now func() time.Time) *RateLi
 		now = time.Now
 	}
 	tracker := &RateLimitTracker{states: map[string]*runtimeState{}, active: map[string]map[*trackedConn]struct{}{}, activePacket: map[string]map[*trackedPacketConn]struct{}{}, now: now}
+	tracker.authorization = authorization.NewStore("")
+	_ = tracker.authorization.Update(metadata.Authorization)
 	auditEnabled := metadata.ConnectionAudit != nil && metadata.ConnectionAudit.Enabled
 	tracker.auditEnabled.Store(auditEnabled)
 	if auditEnabled {
@@ -166,6 +171,7 @@ func newRateLimitTracker(metadata RuntimeMetadata, now func() time.Time) *RateLi
 		}
 		key := "user:" + user
 		state := newRuntimeStateWithClock(key, user, "", limit, now)
+		state.authorization = tracker.authorization
 		state.usage = usageFor(limit.UserID)
 		tracker.states[key] = state
 	}
@@ -175,6 +181,7 @@ func newRateLimitTracker(metadata RuntimeMetadata, now func() time.Time) *RateLi
 		}
 		key := "inbound:" + inbound
 		state := newRuntimeStateWithClock(key, "", inbound, limit, now)
+		state.authorization = tracker.authorization
 		state.usage = usageFor(limit.UserID)
 		tracker.states[key] = state
 	}
@@ -342,15 +349,21 @@ func (s *runtimeState) addTraffic(upload, download int64) {
 }
 
 func (s *runtimeState) denied() bool {
+	if s.authorizationDenied() {
+		return true
+	}
 	config := s.currentConfig()
 	return runtimeConfigDenied(config, s.unacknowledged(config))
 }
 
 func (s *runtimeState) deniedForConnection(admitted bool) bool {
+	if s.authorizationDenied() {
+		return true
+	}
 	config := s.currentConfig()
 	switch normalizeCredentialStatus(config.policy.CredentialStatus) {
 	case "active":
-	case "reject_new", "revoked", "disabled":
+	case "reject_new":
 		return !admitted
 	default:
 		return true
@@ -1005,7 +1018,7 @@ func (t *RateLimitTracker) UpdatePolicies(policies map[string]RuntimeUserLimit) 
 	updates := map[*runtimeState]RuntimeUserLimit{}
 	for key, policy := range policies {
 		if state := states[key]; state != nil {
-			updates[state] = policy
+			updates[state] = mergeRuntimePolicy(state.loadedPolicy(), policy)
 		}
 		if policy.UserID <= 0 {
 			continue
@@ -1019,7 +1032,7 @@ func (t *RateLimitTracker) UpdatePolicies(policies map[string]RuntimeUserLimit) 
 	}
 	for state, policy := range updates {
 		state.updatePolicy(policy)
-		if policy.EnforcementMode != "reject_new" && state.denied() {
+		if state.deniedForConnection(true) {
 			t.closeActive(state.key)
 		}
 	}
@@ -1044,6 +1057,11 @@ func (t *RateLimitTracker) AcknowledgeTraffic(acknowledged map[string]TrafficCou
 
 func mergeRuntimePolicy(current, update RuntimeUserLimit) RuntimeUserLimit {
 	update.InboundID = current.InboundID
+	update.UserID = current.UserID
+	update.AuthorizationKey = current.AuthorizationKey
+	update.DeviceIDHash = current.DeviceIDHash
+	update.CredentialEpoch = current.CredentialEpoch
+	update.CredentialStatus = current.CredentialStatus
 	update.PathID = current.PathID
 	return update
 }
@@ -1062,8 +1080,7 @@ func (t *RateLimitTracker) registerConn(key string, c *trackedConn) {
 	if t.socketGovernor != nil {
 		t.socketGovernor.ObserveConnections(active)
 	}
-	policy := c.state.currentPolicy()
-	if policy.EnforcementMode != "reject_new" && c.state.denied() {
+	if c.state.deniedForConnection(c.admitted) {
 		t.closeActive(key)
 	}
 }
@@ -1095,8 +1112,7 @@ func (t *RateLimitTracker) registerPacketConn(key string, c *trackedPacketConn) 
 	}
 	t.activePacket[key][c] = struct{}{}
 	t.mu.Unlock()
-	policy := c.state.currentPolicy()
-	if policy.EnforcementMode != "reject_new" && c.state.denied() {
+	if c.state.deniedForConnection(c.admitted) {
 		t.closeActive(key)
 	}
 }

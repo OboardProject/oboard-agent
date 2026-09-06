@@ -15,6 +15,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/OboardProject/oboard-agent/internal/authorization"
 )
 
 const (
@@ -151,7 +153,7 @@ func readCoreBuildIdentity(binary string, timeout time.Duration) (coreBuildIdent
 // running kernel over the local API instead of requiring a restart. They stay
 // outside the operational digest. The kernel implements the same list in
 // minibox.NormalizeOperationalConfig; the two must not diverge.
-var runtimeOnlyCoreMetadataKeys = []string{"rate_limits", "connection_audit"}
+var runtimeOnlyCoreMetadataKeys = []string{"connection_audit", "authorization"}
 
 // normalizeOperationalCoreConfig returns the canonical JSON form of a kernel
 // configuration with runtime-only metadata removed.
@@ -173,6 +175,7 @@ func normalizeOperationalCoreConfig(raw []byte) ([]byte, error) {
 		return nil, fmt.Errorf("core configuration root must be a JSON object")
 	}
 	if metadata, ok := object["_oboard"].(map[string]any); ok {
+		authorization.RetainInstalledKeys(metadata)
 		for _, key := range runtimeOnlyCoreMetadataKeys {
 			delete(metadata, key)
 		}

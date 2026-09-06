@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"os"
 
+	"github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/authorization"
+
 	"github.com/sagernet/sing-box/option"
 	badjson "github.com/sagernet/sing/common/json"
 )
@@ -18,6 +20,7 @@ type HY2Tuning struct {
 }
 
 type RuntimeMetadata struct {
+	Authorization   *authorization.Lease    `json:"authorization,omitempty"`
 	RateLimits      RuntimeRateLimits       `json:"rate_limits,omitempty"`
 	ConnectionAudit *RuntimeConnectionAudit `json:"connection_audit,omitempty"`
 }
@@ -32,6 +35,7 @@ type RuntimeRateLimits struct {
 }
 
 type RuntimeUserLimit struct {
+	AuthorizationKey  string `json:"authorization_key,omitempty"`
 	UserID            int64  `json:"user_id,omitempty"`
 	InboundID         int64  `json:"inbound_id,omitempty"`
 	PathID            int64  `json:"path_id,omitempty"`
@@ -93,6 +97,9 @@ func splitRuntimeMetadata(data []byte) ([]byte, RuntimeMetadata, error) {
 		delete(root, "_oboard")
 	}
 	cleanData, err := json.Marshal(root)
+	if err == nil {
+		err = metadata.Authorization.Validate()
+	}
 	if err != nil {
 		return nil, RuntimeMetadata{}, err
 	}

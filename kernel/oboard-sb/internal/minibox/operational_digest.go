@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+
+	"github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/authorization"
 )
 
 // runtimeOnlyMetadataKeys are the `_oboard` members that carry runtime policy
@@ -15,7 +17,7 @@ import (
 // without restarting the kernel, so they must stay outside the operational
 // digest that Agent uses to decide whether the running process matches the
 // desired configuration.
-var runtimeOnlyMetadataKeys = []string{"rate_limits", "connection_audit"}
+var runtimeOnlyMetadataKeys = []string{"connection_audit", "authorization"}
 
 // NormalizeOperationalConfig returns the canonical JSON form of a kernel
 // configuration with runtime-only metadata removed. Agent implements the same
@@ -39,6 +41,7 @@ func NormalizeOperationalConfig(raw []byte) ([]byte, error) {
 		return nil, fmt.Errorf("core configuration root must be a JSON object")
 	}
 	if metadata, ok := object["_oboard"].(map[string]any); ok {
+		authorization.RetainInstalledKeys(metadata)
 		for _, key := range runtimeOnlyMetadataKeys {
 			delete(metadata, key)
 		}
