@@ -85,6 +85,8 @@ type Runner struct {
 	coreLifecycleMu             sync.Mutex
 	forwardLifecycleMu          sync.Mutex
 	logMu                       sync.Mutex
+	syncLogMu                   sync.Mutex
+	syncLogStates               map[string]syncLogState
 	trafficHealthMu             sync.Mutex
 	controllerAuth              controllerAuthBackoff
 	trafficReportFailures       int
@@ -669,7 +671,8 @@ func (r *Runner) Run(ctx context.Context) error {
 		// callbacks too, and a session that actually ran proves the identity
 		// is valid and releases them.
 		if authFailure {
-			r.controllerAuth.arm(time.Now())
+			_, _, status, _ := classifyControllerLinkError(err)
+			r.controllerAuth.armWithStatus(time.Now(), status)
 		} else if lived >= 60*time.Second {
 			// The same threshold the reconnect counter already treats as a
 			// real session: it can only be reached after the Controller
@@ -723,7 +726,7 @@ func (r *Runner) connect(ctx context.Context) error {
 		return newControllerHandshakeError(err, handshakeResponse)
 	}
 	r.recordControllerLinkConnected(time.Now().UTC())
-	logging.Infof("controller connection established: server_id=%d remote=%s", cfg.ServerID, conn.RemoteAddr())
+	logging.Debugf("controller connection peer: server_id=%d remote=%s", cfg.ServerID, conn.RemoteAddr())
 	defer conn.Close()
 	connectionCtx, cancelConnection := context.WithCancel(ctx)
 	defer cancelConnection()
@@ -2701,7 +2704,7 @@ func (r *Runner) postControllerJSON(ctx context.Context, path string, body any, 
 	}
 	if auth {
 		if isControllerAuthRejection(resp.StatusCode) {
-			r.controllerAuth.arm(time.Now())
+			r.controllerAuth.armWithStatus(time.Now(), resp.StatusCode)
 		} else if resp.StatusCode < 300 {
 			r.controllerAuth.clear()
 		}

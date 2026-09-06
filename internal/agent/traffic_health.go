@@ -1,27 +1,29 @@
 package agent
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"time"
 
+	"github.com/OboardProject/oboard-agent/internal/authorization"
 	"github.com/OboardProject/oboard-agent/internal/logging"
 )
 
 // trafficReportFailureLogInterval throttles the repeated failure record. The
 // report loop runs every 15-30s; logging every attempt would bury the first
 // occurrence, which is the one that dates the incident.
-const trafficReportFailureLogInterval = 5 * time.Minute
+const trafficReportFailureLogInterval = time.Minute
 
-// trafficLeaseAtRiskAfter is when a run of failed reports stops being a
-// transient network blip and starts being the thing that will silently strip
-// every user's remaining lease. It is well inside trafficLeaseStaleAfter so the
-// warning arrives long before the kernel starts refusing connections.
-const trafficLeaseAtRiskAfter = 30 * time.Minute
+// Warn within the five-minute authorization window.
+const trafficLeaseAtRiskAfter = time.Minute
 
-// noteTrafficReportOutcome records the result of one report cycle. A failing
-// cycle means no policy refresh came back, so every user on this server is
-// spending a lease that will not be topped up: that has to leave a trace.
+// A cycle can fail after authorization succeeds; report its stage separately.
 func (r *Runner) noteTrafficReportOutcome(err error) {
+	if errors.Is(err, context.Canceled) {
+		return
+	}
+	r.noteAuthorizationAvailability()
 	now := time.Now()
 	r.trafficHealthMu.Lock()
 	if err == nil {
@@ -32,7 +34,7 @@ func (r *Runner) noteTrafficReportOutcome(err error) {
 		r.trafficReportLastLoggedAt = time.Time{}
 		r.trafficHealthMu.Unlock()
 		if failures > 0 {
-			logging.Warnf("traffic report recovered after %d consecutive failure(s) over %s; lease renewal resumed", failures, now.Sub(since).Round(time.Second))
+			logging.Infof("traffic report recovered after %d consecutive failure(s) over %s; traffic synchronization resumed", failures, now.Sub(since).Round(time.Second))
 		} else {
 			logging.Tracef("traffic report accepted")
 		}
@@ -51,15 +53,15 @@ func (r *Runner) noteTrafficReportOutcome(err error) {
 	r.trafficHealthMu.Unlock()
 
 	if !shouldLog {
-		logging.Debugf("traffic report failed (%d consecutive): %v", failures, err)
+		logging.Debugf("traffic report failed (%d consecutive): %v", failures, safeSyncError(err))
 		return
 	}
 	outage := now.Sub(since).Round(time.Second)
 	if outage >= trafficLeaseAtRiskAfter {
-		logging.Errorf("traffic report failing for %s (%d consecutive attempts); traffic leases are no longer being renewed and users will be cut off as their current lease runs out: %v", outage, failures, err)
+		logging.Warnf("traffic synchronization incomplete for %s (%d consecutive attempts); inspect authorization and traffic_limits stages; proxy authorization expires within five minutes without renewal: %v", outage, failures, safeSyncError(err))
 		return
 	}
-	logging.Warnf("traffic report failed (%d consecutive, %s): %v", failures, outage, err)
+	logging.Warnf("traffic report failed (%d consecutive, %s): %v", failures, outage, safeSyncError(err))
 }
 
 // trafficSyncDiagnostics is the operator-facing view of lease renewal health.
@@ -128,11 +130,14 @@ func trafficLeaseRenewalVerdict(lastSuccess string, failures int, failingSince, 
 		}
 		return "healthy"
 	}
+	if !failingSince.IsZero() && now.Sub(failingSince) >= authorization.MaxLifetime {
+		return "stale"
+	}
+	if parsed, err := time.Parse(time.RFC3339Nano, lastSuccess); err == nil && now.Sub(parsed) >= authorization.MaxLifetime {
+		return "stale"
+	}
 	if !failingSince.IsZero() && now.Sub(failingSince) >= trafficLeaseAtRiskAfter {
 		return "at_risk"
-	}
-	if parsed, err := time.Parse(time.RFC3339Nano, lastSuccess); err == nil && now.Sub(parsed) >= trafficLeaseStaleAfter {
-		return "stale"
 	}
 	return "degraded"
 }

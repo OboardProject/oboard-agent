@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/OboardProject/oboard-agent/internal/logging"
 )
 
 // controllerAuthBackoff pauses authenticated Controller callbacks after the
@@ -19,8 +21,9 @@ import (
 // longer exists. The same window is reused here so both channels quiet down
 // together.
 type controllerAuthBackoff struct {
-	mu    sync.Mutex
-	until time.Time
+	mu         sync.Mutex
+	until      time.Time
+	restricted bool
 }
 
 // remaining reports how long callbacks stay paused, or zero when they may run.
@@ -36,10 +39,18 @@ func (b *controllerAuthBackoff) remaining(now time.Time) time.Duration {
 // arm starts or extends the pause. The window is randomized so a fleet that
 // lost its Controller identity together does not resume in lockstep.
 func (b *controllerAuthBackoff) arm(now time.Time) {
+	b.armWithStatus(now, 0)
+}
+
+func (b *controllerAuthBackoff) armWithStatus(now time.Time, status int) {
 	span := reconnectAuthMax - reconnectAuthMin
 	until := now.Add(reconnectAuthMin + time.Duration(rand.Int63n(int64(span)+1)))
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if !b.restricted {
+		logging.Warnf("controller access restricted: http_status=%d callbacks=paused retry_in=%s; credential and traffic-limit renewal may be interrupted", status, until.Sub(now).Round(time.Second))
+		b.restricted = true
+	}
 	if until.After(b.until) {
 		b.until = until
 	}
@@ -49,6 +60,10 @@ func (b *controllerAuthBackoff) arm(now time.Time) {
 func (b *controllerAuthBackoff) clear() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.restricted {
+		logging.Infof("controller access recovered: authenticated callbacks resumed")
+		b.restricted = false
+	}
 	b.until = time.Time{}
 }
 

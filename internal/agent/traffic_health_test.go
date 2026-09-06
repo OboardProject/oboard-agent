@@ -16,11 +16,14 @@ func TestTrafficLeaseRenewalVerdictNamesTheOutage(t *testing.T) {
 	if got := trafficLeaseRenewalVerdict("", 0, time.Time{}, now); got != "unknown" {
 		t.Fatalf("verdict = %q, want unknown", got)
 	}
-	if got := trafficLeaseRenewalVerdict(recent, 3, now.Add(-time.Minute), now); got != "degraded" {
+	if got := trafficLeaseRenewalVerdict(recent, 3, now.Add(-30*time.Second), now); got != "degraded" {
 		t.Fatalf("verdict = %q, want degraded", got)
 	}
-	if got := trafficLeaseRenewalVerdict(recent, 200, now.Add(-time.Hour), now); got != "at_risk" {
-		t.Fatalf("verdict = %q, want at_risk", got)
+	if got := trafficLeaseRenewalVerdict(recent, 200, now.Add(-time.Hour), now); got != "stale" {
+		t.Fatalf("verdict = %q, want stale", got)
+	}
+	if got := trafficLeaseRenewalVerdict(recent, 3, now.Add(-2*time.Minute), now); got != "at_risk" {
+		t.Fatalf("verdict = %q, want at_risk before expiry", got)
 	}
 }
 

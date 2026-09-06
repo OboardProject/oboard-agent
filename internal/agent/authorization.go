@@ -81,7 +81,14 @@ func configHasAuthorizationUsers(raw []byte) (bool, error) {
 	return false, nil
 }
 
-func (r *Runner) stageConfigAuthorization(raw []byte) error {
+func (r *Runner) stageConfigAuthorization(raw []byte) (resultErr error) {
+	stage := "validate"
+	revision, count := int64(0), 0
+	defer func() {
+		if revision > 0 || resultErr != nil {
+			r.noteSyncOutcome("credential_install", stage, revision, count, resultErr)
+		}
+	}()
 	lease, err := configAuthorization(raw)
 	if err != nil {
 		return err
@@ -90,6 +97,10 @@ func (r *Runner) stageConfigAuthorization(raw []byte) error {
 	if err != nil {
 		return err
 	}
+	if lease != nil {
+		revision, count = lease.Revision, len(lease.Grants)
+	}
+	stage = "kernel_capability"
 	if lease != nil && hasUsers {
 		output, err := commandOutput(r.commandTimeout(), r.coreBinary(), "-version")
 		if err != nil {
@@ -103,6 +114,7 @@ func (r *Runner) stageConfigAuthorization(raw []byte) error {
 			return fmt.Errorf("update oboard-sb before applying proxy authorization: authorization_lease_v1 required")
 		}
 	}
+	stage = "persist"
 	return r.authorizationState().Update(lease)
 }
 
@@ -114,11 +126,22 @@ func (r *Runner) applyConfigAuthorization(ctx context.Context, raw []byte) error
 	return r.applyAuthorization(ctx, lease)
 }
 
-func (r *Runner) applyAuthorization(ctx context.Context, lease *model.AuthorizationLease) error {
+func (r *Runner) applyAuthorization(ctx context.Context, lease *model.AuthorizationLease) (resultErr error) {
+	stage := "persist"
+	revision, count := int64(0), 0
+	if lease != nil {
+		revision, count = lease.Revision, len(lease.Grants)
+	}
+	defer func() {
+		if lease != nil || resultErr != nil {
+			r.noteSyncOutcome("authorization", stage, revision, count, resultErr)
+		}
+	}()
 	store := r.authorizationState()
 	if err := store.Update(lease); err != nil {
 		return err
 	}
+	stage = "ssh_runtime"
 	r.mu.Lock()
 	manager := r.sshInboundManager
 	r.mu.Unlock()
@@ -127,6 +150,8 @@ func (r *Runner) applyAuthorization(ctx context.Context, lease *model.Authorizat
 	if err != nil || latest == nil {
 		return err
 	}
+	revision, count = latest.Revision, len(latest.Grants)
+	stage = "read_kernel_config"
 	raw, err := os.ReadFile(filepath.Join(r.stateDir(), "sing-box.json"))
 	if os.IsNotExist(err) {
 		return nil
@@ -141,6 +166,7 @@ func (r *Runner) applyAuthorization(ctx context.Context, lease *model.Authorizat
 	if !hasUsers {
 		return nil
 	}
+	stage = "kernel_apply"
 	body, err := json.Marshal(latest)
 	if err != nil {
 		return err

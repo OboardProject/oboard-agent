@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/OboardProject/oboard-agent/internal/logging"
+
 	"github.com/gorilla/websocket"
 )
 
@@ -80,6 +82,7 @@ func configureControllerSocket(conn *websocket.Conn, readTimeout time.Duration) 
 
 func (r *Runner) recordControllerLinkConnected(at time.Time) {
 	r.controllerLinkMu.Lock()
+	failures := r.controllerLink.ConsecutiveFailures
 	r.controllerLink.ConnectedAt = at.UTC()
 	r.controllerLink.LastConnectedAt = at.UTC()
 	r.controllerLink.ReconnectCount++
@@ -88,6 +91,7 @@ func (r *Runner) recordControllerLinkConnected(at time.Time) {
 	snapshot := r.controllerLink
 	r.controllerLinkMu.Unlock()
 	r.writeControllerLinkDiagnostics(snapshot)
+	logging.Infof("controller connection established: reconnects=%d previous_failures=%d", snapshot.ReconnectCount, failures)
 }
 
 func (r *Runner) recordControllerLinkClosed(at time.Time, lived time.Duration, err error) controllerLinkDiagnostics {

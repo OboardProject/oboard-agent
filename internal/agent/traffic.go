@@ -604,7 +604,21 @@ func (r *Runner) convertLegacyPendingToRangesLocked(state *trafficLocalState) bo
 	return changed
 }
 
-func (r *Runner) reportTrafficLedger(ctx context.Context, state *trafficLocalState, items []trafficSnapshotItem) error {
+func (r *Runner) reportTrafficLedger(ctx context.Context, state *trafficLocalState, items []trafficSnapshotItem) (resultErr error) {
+	stage := "controller_request"
+	var resp trafficReportResponse
+	defer func() {
+		if state == nil {
+			return
+		}
+		r.noteSyncOutcome("traffic_limits", stage, resp.PolicyRevision, len(resp.Policies), resultErr)
+		if resultErr != nil && ctx.Err() == nil {
+			state.Sync.Status, state.Sync.LastError = trafficStatusStale, stage+": "+safeSyncError(resultErr)
+			if err := r.saveTrafficState(*state); err != nil {
+				r.noteSyncOutcome("traffic_checkpoint", "persist_failure", state.PolicyRevision, 0, err)
+			}
+		}
+	}()
 	if state == nil {
 		return nil
 	}
@@ -613,19 +627,14 @@ func (r *Runner) reportTrafficLedger(ctx context.Context, state *trafficLocalSta
 		"streams":           trafficStreamWireBatch(state, items),
 		"reports":           trafficLedgerReportBatch(state.PendingReports),
 	}
-	var resp trafficReportResponse
 	if err := r.postControllerJSON(ctx, "/api/v1/agent/traffic-reports", req, &resp, true); err != nil {
-		// Sync status is otherwise only written on success, which leaves a
-		// stalled Agent advertising the "healthy" it recorded before the
-		// outage began. Record the failure so the state file dates it.
-		state.Sync.Status = trafficStatusStale
-		state.Sync.LastError = err.Error()
-		_ = r.saveTrafficState(*state)
 		return err
 	}
+	stage = "authorization_apply"
 	if err := r.applyAuthorization(ctx, resp.Authorization); err != nil {
 		return err
 	}
+	stage = "checkpoint_persist"
 	applyTrafficLedgerResponse(state, resp)
 	if err := r.saveTrafficState(*state); err != nil {
 		return err
@@ -636,6 +645,7 @@ func (r *Runner) reportTrafficLedger(ctx context.Context, state *trafficLocalSta
 	if revision == 0 {
 		revision = trafficPolicyRevisionFromPolicies(typed)
 	}
+	stage = "revision_check"
 	if revision > 0 {
 		skipped, err := checkTrafficPolicyRevision(state.PolicyRevision, state.Policies, revision, typed)
 		if err != nil {
@@ -645,9 +655,11 @@ func (r *Runner) reportTrafficLedger(ctx context.Context, state *trafficLocalSta
 			return nil
 		}
 	}
+	stage = "runtime_apply"
 	if err := r.pushTrafficPolicies(ctx, policies, state.Acknowledged); err != nil {
 		return err
 	}
+	stage = "policy_persist"
 	state.PolicyRevision = revision
 	state.Policies = typed
 	return r.saveTrafficState(*state)
@@ -1492,7 +1504,11 @@ func applyStaleLeasePolicies(policies map[string]interface{}, state *trafficLoca
 	return out
 }
 
-func (r *Runner) applyTrafficPolicyTask(payload model.ApplyTrafficPolicyTaskPayload) (map[string]any, error) {
+func (r *Runner) applyTrafficPolicyTask(payload model.ApplyTrafficPolicyTaskPayload) (result map[string]any, resultErr error) {
+	stage := "authorization_apply"
+	defer func() {
+		r.noteSyncOutcome("traffic_policy_task", stage, payload.PolicyRevision, len(payload.Policies), resultErr)
+	}()
 	if err := r.applyAuthorization(context.Background(), payload.Authorization); err != nil {
 		return nil, err
 	}
@@ -1502,21 +1518,24 @@ func (r *Runner) applyTrafficPolicyTask(payload model.ApplyTrafficPolicyTaskPayl
 	r.trafficMu.Lock()
 	defer r.trafficMu.Unlock()
 	state := r.trafficStateLocked()
+	stage = "revision_check"
 	skipped, err := checkTrafficPolicyRevision(state.PolicyRevision, state.Policies, payload.PolicyRevision, payload.Policies)
 	if err != nil {
 		return map[string]any{"message": "traffic policy rejected"}, err
 	}
-	result := map[string]any{"message": "traffic policy applied", "policy_revision": payload.PolicyRevision}
+	result = map[string]any{"message": "traffic policy applied", "policy_revision": payload.PolicyRevision}
 	if skipped {
 		result["message"] = "traffic policy unchanged"
 		result["skipped"] = true
 		return result, nil
 	}
+	stage = "runtime_apply"
 	if err := r.pushTrafficPolicies(context.Background(), trafficPoliciesToWire(payload.Policies), state.Acknowledged); err != nil {
 		return map[string]any{"message": "traffic policy apply failed"}, err
 	}
 	state.PolicyRevision = payload.PolicyRevision
 	state.Policies = payload.Policies
+	stage = "policy_persist"
 	if err := r.saveTrafficState(*state); err != nil {
 		return map[string]any{"message": "traffic policy persist failed"}, err
 	}
