@@ -425,6 +425,9 @@ func validateManagedPath(field, value string) error {
 	if cleaned != value || strings.Contains(cleaned, "..") {
 		return fmt.Errorf("%s must be a cleaned absolute path without dot-dot segments", field)
 	}
+	if i := strings.IndexFunc(cleaned, unsafeManagedPathRune); i >= 0 {
+		return fmt.Errorf("%s must not contain %q", field, cleaned[i:i+1])
+	}
 	switch field {
 	case "state_dir":
 		for _, blocked := range []string{"/", "/etc", "/bin", "/sbin", "/usr", "/usr/bin", "/usr/sbin", "/boot", "/dev", "/proc", "/sys", "/root"} {
@@ -463,6 +466,17 @@ func validateManagedPath(field, value string) error {
 		}
 	}
 	return nil
+}
+
+// unsafeManagedPathRune reports whether a rune must never appear in a managed
+// path. Uninstall renders these paths into a root /bin/sh script, so a quote or
+// substitution character would only ever be an attempt to escape the quoting
+// rather than a legitimate installation directory.
+func unsafeManagedPathRune(r rune) bool {
+	if r < 0x20 || r == 0x7f {
+		return true
+	}
+	return strings.ContainsRune("'\"`$\\;&|<>()*?[]{}!#~ \t\n\r", r)
 }
 
 // allowedCoreBinaryDir reports whether a directory is an acceptable location

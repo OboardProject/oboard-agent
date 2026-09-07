@@ -2,6 +2,7 @@ package agent
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -83,6 +84,61 @@ func TestUninstallFinalizerCommandCoversPurgeAndServices(t *testing.T) {
 		if !strings.Contains(command, want) {
 			t.Fatalf("finalizer command missing %q: %s", want, command)
 		}
+	}
+}
+
+// TestUninstallFinalizerRejectsShellInjectionFromManagedPath runs the rendered
+// finalizer through a real /bin/sh to prove that a managed path carrying a
+// command substitution stays inert data instead of executing as root.
+func TestUninstallFinalizerRejectsShellInjectionFromManagedPath(t *testing.T) {
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "pwned")
+	hostile := "/var/lib/oboard-agent/x'$(touch " + marker + ")'"
+	paths := uninstallPaths{
+		AgentPath:      "/opt/oboard/oboard-agent",
+		CorePath:       "/opt/oboard/oboard-sb",
+		InstallDir:     "/opt/oboard",
+		ConfigPath:     "/etc/oboard-agent/config.json",
+		StateDir:       hostile,
+		ServiceManager: "systemd",
+	}
+	// Render the finalizer and neutralise only the destructive verbs, so the
+	// quoting under test is exactly what a real uninstall would execute.
+	command := uninstallFinalizerCommand(paths)
+	script := strings.NewReplacer("rm -rf ", "echo ", "rm -f ", "echo ", "systemctl", ":").Replace(command)
+	out, err := exec.Command("/bin/sh", "-c", script).CombinedOutput()
+	if err != nil {
+		t.Fatalf("finalizer script did not parse as POSIX sh: %v (%s)", err, out)
+	}
+	if _, statErr := os.Stat(marker); statErr == nil {
+		t.Fatalf("command substitution from state_dir executed: %s", script)
+	}
+	if !strings.Contains(string(out), hostile) {
+		t.Fatalf("state_dir was not passed through literally: %s", out)
+	}
+}
+
+func TestValidateManagedPathRejectsShellMetacharacters(t *testing.T) {
+	for _, value := range []string{
+		"/var/lib/oboard-agent/x'$(id)'",
+		"/var/lib/oboard-agent/x;reboot",
+		"/var/lib/oboard-agent/x`id`",
+		"/var/lib/oboard-agent/x y",
+		"/var/lib/oboard-agent/x\nrm -rf /",
+		"/var/lib/oboard-agent/x|tee",
+		"/var/lib/oboard-agent/x&",
+		"/var/lib/oboard-agent/x>out",
+		"/var/lib/oboard-agent/x*",
+	} {
+		if err := validateManagedPath("state_dir", value); err == nil {
+			t.Fatalf("state_dir %q was accepted", value)
+		}
+	}
+	if err := validateManagedPath("state_dir", "/var/lib/oboard-agent"); err != nil {
+		t.Fatalf("ordinary state_dir rejected: %v", err)
+	}
+	if err := validateManagedPath("state_dir", "/opt/oboard-agent/node-1_state.d"); err != nil {
+		t.Fatalf("ordinary state_dir rejected: %v", err)
 	}
 }
 
