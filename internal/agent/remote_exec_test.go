@@ -2,6 +2,7 @@ package agent
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -40,6 +41,28 @@ func TestRemoteExecArgvRejectsShellBinary(t *testing.T) {
 		status, raw = runner.executeRemoteExecTask(model.AgentTask{PayloadJSON: string(wrapped)})
 		if status != "failed" || !strings.Contains(raw, "cannot invoke a shell") {
 			t.Fatalf("wrapper argv %v status=%s result=%s", argv, status, raw)
+		}
+	}
+	for i, argv := range [][]string{
+		{"find", "/", "-name", "x", "-exec", "sh", "-c", "id", ";"},
+		{"find", "/", "-execdir", "/bin/bash", "-c", "id", ";"},
+		{"find", ".", "-ok", "env", "sh", "-c", "id", ";"},
+		{"script", "-c", "id"},
+		{"su"},
+		{"runuser", "root"},
+		{"setsid", "sh", "-c", "id"},
+		{"env", "env", "env", "env", "sh", "-c", "id"},
+	} {
+		wrapped, _ := json.Marshal(model.RemoteExecTaskPayload{
+			RequestID: fmt.Sprintf("req-shell-find-%d", i),
+			Origin:    model.RemoteExecOriginMCP,
+			Privilege: model.PrivilegeRemoteExec,
+			Command:   model.RemoteExecCommand{Mode: model.RemoteExecModeArgv, Argv: argv},
+			Limits:    model.RemoteExecLimits{TimeoutSeconds: 5},
+		})
+		status, raw = runner.executeRemoteExecTask(model.AgentTask{PayloadJSON: string(wrapped)})
+		if status != "failed" || !strings.Contains(raw, "cannot invoke a shell") {
+			t.Fatalf("find/script argv %v status=%s result=%s", argv, status, raw)
 		}
 	}
 }
