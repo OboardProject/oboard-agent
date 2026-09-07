@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/OboardProject/oboard-agent/internal/core"
@@ -1090,6 +1091,10 @@ func (r *Runner) applySSHTunnel(dir string, t model.Tunnel) error {
 						lastErr = err
 					}
 				case <-time.After(500 * time.Millisecond):
+					if err, exited := sshTunnelWaitExit(cmd, waitCh); exited {
+						lastErr = err
+						break
+					}
 					return writeManagedPIDFile(pidPath, cmd.Process.Pid, "ssh")
 				}
 			}
@@ -1098,6 +1103,36 @@ func (r *Runner) applySSHTunnel(dir string, t model.Tunnel) error {
 			return fmt.Errorf("ssh tunnel %q failed before forwarding became ready: %w%s", t.Name, lastErr, sshFailureLogSuffix(logPath))
 		}
 		time.Sleep(500 * time.Millisecond)
+	}
+}
+
+func sshTunnelProcessAlive(cmd *exec.Cmd) bool {
+	if cmd == nil || cmd.Process == nil {
+		return false
+	}
+	return syscall.Kill(cmd.Process.Pid, syscall.Signal(0)) == nil
+}
+
+func sshTunnelWaitExit(cmd *exec.Cmd, waitCh <-chan error) (error, bool) {
+	select {
+	case err := <-waitCh:
+		if err == nil {
+			err = errors.New("process exited before forwarding became ready")
+		}
+		return err, true
+	default:
+	}
+	if sshTunnelProcessAlive(cmd) {
+		return nil, false
+	}
+	select {
+	case err := <-waitCh:
+		if err == nil {
+			err = errors.New("process exited before forwarding became ready")
+		}
+		return err, true
+	case <-time.After(200 * time.Millisecond):
+		return errors.New("process exited before forwarding became ready"), true
 	}
 }
 

@@ -181,7 +181,7 @@ const defaultUpdateRepo = "OboardProject/oboard-agent"
 func New(cfg Config) *Runner {
 	cfg = normalizeConfig(cfg)
 	resources := DetectResourceInfo(cfg.ResourceProfile)
-	tuning := ApplyRuntimeTuning(resources)
+	tuning := agentRuntimeTuning(resources)
 	clock := newRuntimeClock(cfg.StateDir)
 	profile := StorageProfile(strings.ToLower(strings.TrimSpace(cfg.StorageProfile)))
 	if profile == StorageProfileAuto {
@@ -656,6 +656,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	if cfg.AgentID == "" || cfg.AgentToken == "" {
 		return errors.New("agent is not enrolled")
 	}
+	r.tuning = ApplyRuntimeTuning(r.resources)
 	r.logStartupSummary(cfg)
 	r.applyLowMemorySocketTuning()
 	r.reconcileUpdateArtifacts()

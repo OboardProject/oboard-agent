@@ -29,8 +29,8 @@ jobs:
       - name: Run Go race tests
         run: |
           go test -race -shuffle=on ./...
-          (cd kernel/oboard-sb && go test -race -shuffle=on ./...)
-          (cd kernel/oboard-sb && go test -tags with_utls,with_gvisor ./...)
+          (cd kernel/oboard-sb && go test -race -shuffle=on ./cmd/... ./internal/...)
+          (cd kernel/oboard-sb && go test -tags with_utls,with_gvisor ./cmd/... ./internal/...)
       - name: Build current-platform binaries
         run: |
           go build ./cmd/agent

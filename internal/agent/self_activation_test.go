@@ -38,8 +38,12 @@ func TestSelfExecutablePathResolvesReplacedBinary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != installed {
-		t.Fatalf("resolved path = %q, want %q", got, installed)
+	wantInstalled, err := canonicalFilePath(installed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != wantInstalled {
+		t.Fatalf("resolved path = %q, want %q", got, wantInstalled)
 	}
 
 	// A file that really is named this way must not be rewritten.
@@ -52,8 +56,12 @@ func TestSelfExecutablePathResolvesReplacedBinary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != literal {
-		t.Fatalf("resolved path = %q, want %q", got, literal)
+	wantLiteral, err := canonicalFilePath(literal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != wantLiteral {
+		t.Fatalf("resolved path = %q, want %q", got, wantLiteral)
 	}
 }
 
@@ -72,11 +80,15 @@ func TestSignedReleaseTargetsAcceptsReplacedAgentBinary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a stale Agent must still resolve its own update targets: %v", err)
 	}
-	if targets.Agent != installed {
-		t.Fatalf("agent target = %q, want %q", targets.Agent, installed)
+	wantAgent, err := canonicalFilePath(installed)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if want := filepath.Join(dir, "oboard-sb"); targets.Core != want {
-		t.Fatalf("core target = %q, want %q", targets.Core, want)
+	if targets.Agent != wantAgent {
+		t.Fatalf("agent target = %q, want %q", targets.Agent, wantAgent)
+	}
+	if wantCore := filepath.Join(filepath.Dir(wantAgent), "oboard-sb"); targets.Core != wantCore {
+		t.Fatalf("core target = %q, want %q", targets.Core, wantCore)
 	}
 }
 

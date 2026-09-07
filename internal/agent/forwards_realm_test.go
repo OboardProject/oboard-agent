@@ -39,7 +39,11 @@ func writeFakeRealm(t *testing.T, dir, script string) string {
 func TestRealmBinaryResolvesBesideAgent(t *testing.T) {
 	dir := installFakeAgentTree(t)
 	r := New(Config{StateDir: t.TempDir()})
-	want := filepath.Join(dir, "oboard-realm")
+	agentPath, err := canonicalFilePath(filepath.Join(dir, "oboard-agent"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(filepath.Dir(agentPath), "oboard-realm")
 	if got := r.realmBinary(); got != want {
 		t.Fatalf("realmBinary() = %q, want %q", got, want)
 	}

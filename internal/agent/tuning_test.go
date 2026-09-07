@@ -1,6 +1,9 @@
 package agent
 
 import (
+	"math"
+	"runtime"
+	"runtime/debug"
 	"testing"
 	"time"
 )
@@ -80,6 +83,21 @@ func TestProbeIntervalFollowsProfile(t *testing.T) {
 	}
 	if got := (ResourceInfo{Profile: ResourceProfileLarge}).PublicIPProbeInterval(); got != 5*time.Minute {
 		t.Fatalf("large public-ip interval = %s", got)
+	}
+}
+
+func TestNewDoesNotClampProcessRuntimeLimits(t *testing.T) {
+	beforeLimit := debug.SetMemoryLimit(math.MaxInt64)
+	debug.SetMemoryLimit(beforeLimit)
+	beforeProcs := runtime.GOMAXPROCS(0)
+	_ = New(Config{StateDir: t.TempDir(), ResourceProfile: "small", CommandTimeoutSeconds: 20})
+	afterLimit := debug.SetMemoryLimit(math.MaxInt64)
+	debug.SetMemoryLimit(afterLimit)
+	if afterLimit != beforeLimit {
+		t.Fatalf("New applied GOMEMLIMIT %d, want unchanged %d", afterLimit, beforeLimit)
+	}
+	if runtime.GOMAXPROCS(0) != beforeProcs {
+		t.Fatalf("New changed GOMAXPROCS from %d to %d", beforeProcs, runtime.GOMAXPROCS(0))
 	}
 }
 

@@ -77,6 +77,13 @@ const deletedExecutableSuffix = " (deleted)"
 // osExecutable is a seam for tests. Production always resolves /proc/self/exe.
 var osExecutable = os.Executable
 
+func canonicalFilePath(path string) (string, error) {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		path = resolved
+	}
+	return filepath.Abs(path)
+}
+
 func selfExecutablePath() (string, error) {
 	path, err := osExecutable()
 	if err != nil {
@@ -85,10 +92,7 @@ func selfExecutablePath() (string, error) {
 	if _, statErr := os.Lstat(path); statErr != nil && strings.HasSuffix(path, deletedExecutableSuffix) {
 		path = strings.TrimSuffix(path, deletedExecutableSuffix)
 	}
-	if resolved, err := filepath.EvalSymlinks(path); err == nil {
-		path = resolved
-	}
-	return filepath.Abs(path)
+	return canonicalFilePath(path)
 }
 
 func (r *Runner) signedReleaseTargets() (signedReleaseTargets, error) {
