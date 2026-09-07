@@ -4,11 +4,45 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/OboardProject/oboard-agent/internal/model"
 )
+
+func TestRemoteExecArgvRejectsShellBinary(t *testing.T) {
+	dir := t.TempDir()
+	runner := New(Config{StateDir: dir, CommandTimeoutSeconds: 20, ResourceProfile: "small", TimeCorrectionMode: "off", LogMaxMB: 8, CoreLogMaxMB: 8})
+	payload, _ := json.Marshal(model.RemoteExecTaskPayload{
+		RequestID: "req-shell-bypass",
+		Origin:    model.RemoteExecOriginMCP,
+		Privilege: model.PrivilegeRemoteExec,
+		Command:   model.RemoteExecCommand{Mode: model.RemoteExecModeArgv, Argv: []string{"/bin/sh", "-c", "id"}},
+		Limits:    model.RemoteExecLimits{TimeoutSeconds: 5},
+	})
+	status, raw := runner.executeRemoteExecTask(model.AgentTask{PayloadJSON: string(payload)})
+	if status != "failed" || !strings.Contains(raw, "cannot invoke a shell") {
+		t.Fatalf("shell argv bypass status=%s result=%s", status, raw)
+	}
+	for _, argv := range [][]string{
+		{"/usr/bin/env", "sh", "-c", "id"},
+		{"timeout", "1", "bash", "-c", "id"},
+		{"env", "PATH=/bin", "/bin/sh", "-c", "id"},
+	} {
+		wrapped, _ := json.Marshal(model.RemoteExecTaskPayload{
+			RequestID: "req-shell-wrap-" + argv[0],
+			Origin:    model.RemoteExecOriginMCP,
+			Privilege: model.PrivilegeRemoteExec,
+			Command:   model.RemoteExecCommand{Mode: model.RemoteExecModeArgv, Argv: argv},
+			Limits:    model.RemoteExecLimits{TimeoutSeconds: 5},
+		})
+		status, raw = runner.executeRemoteExecTask(model.AgentTask{PayloadJSON: string(wrapped)})
+		if status != "failed" || !strings.Contains(raw, "cannot invoke a shell") {
+			t.Fatalf("wrapper argv %v status=%s result=%s", argv, status, raw)
+		}
+	}
+}
 
 func TestRemoteExecArgvDoesNotExpandShell(t *testing.T) {
 	dir := t.TempDir()

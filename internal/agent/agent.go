@@ -2267,14 +2267,57 @@ func tcpDiagnosticProbe(host, port string) map[string]any {
 }
 
 var diagnosticSecretPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`(?i)("?(?:password|token|secret|private_key|agent_token|enrollment_token)"?\s*[:=]\s*"?)[^",\s}]+`),
+	regexp.MustCompile(`(?i)("?(?:password|token|secret|private_key|agent_token|enrollment_token|uuid|psk)"?\s*[:=]\s*"?)[^",\s}]+`),
+	regexp.MustCompile(`(?i)("key"\s*:\s*")[^"]+`),
 }
 
 func scrubDiagnosticOutput(out string) string {
+	trimmed := strings.TrimSpace(out)
+	if strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") {
+		var value any
+		if json.Unmarshal([]byte(trimmed), &value) == nil {
+			scrubDiagnosticValue(value)
+			if encoded, err := json.Marshal(value); err == nil {
+				return string(encoded)
+			}
+		}
+	}
 	for _, pattern := range diagnosticSecretPatterns {
 		out = pattern.ReplaceAllString(out, `${1}[redacted]`)
 	}
 	return out
+}
+
+func scrubDiagnosticValue(value any) {
+	switch node := value.(type) {
+	case map[string]any:
+		for key, child := range node {
+			lower := strings.ToLower(key)
+			if strings.Contains(lower, "password") || strings.Contains(lower, "token") || strings.Contains(lower, "secret") ||
+				strings.Contains(lower, "private") || strings.Contains(lower, "uuid") || lower == "key" || lower == "psk" {
+				node[key] = "[redacted]"
+				continue
+			}
+			if text, ok := child.(string); ok {
+				trimmed := strings.TrimSpace(text)
+				if strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") {
+					var nested any
+					if json.Unmarshal([]byte(trimmed), &nested) == nil {
+						scrubDiagnosticValue(nested)
+						if encoded, err := json.Marshal(nested); err == nil {
+							node[key] = string(encoded)
+							continue
+						}
+					}
+				}
+			}
+			scrubDiagnosticValue(child)
+		}
+	case []any:
+		for _, child := range node {
+			scrubDiagnosticValue(child)
+		}
+	}
 }
 
 func (r *Runner) applyCoreConfigTask(version int64, payload model.ApplyCoreConfigTaskPayload) (map[string]any, error) {
