@@ -1036,6 +1036,7 @@ func applyTrafficLedgerResponse(state *trafficLocalState, resp trafficReportResp
 func terminalTrafficRejectionReason(reason string) bool {
 	switch strings.TrimSpace(reason) {
 	case "user_deleted", "user_inactive", "binding_removed", "inbound_deleted", "inbound_disabled", "path_removed", "invalid_report",
+		"unattributable_traffic", "legal_tail",
 		// Tolerated for a Controller older than the split that made
 		// binding_removed a per-report reason. That Controller answered the
 		// same situation with these, and a rolling upgrade can put a newer

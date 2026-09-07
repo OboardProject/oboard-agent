@@ -70,7 +70,7 @@ func TestTerminalTrafficRejectionCoversAuthorizationRefusals(t *testing.T) {
 	// situation from a Controller older than that split, which a rolling
 	// upgrade can still put in front of this Agent. Resending any of them is
 	// what stalled lease renewal for a whole server.
-	for _, reason := range []string{"binding_removed", "unauthorized", "forbidden"} {
+	for _, reason := range []string{"binding_removed", "unauthorized", "forbidden", "unattributable_traffic"} {
 		if !terminalTrafficRejectionReason(reason) {
 			t.Fatalf("%q must be terminal so the Agent stops resending it", reason)
 		}
