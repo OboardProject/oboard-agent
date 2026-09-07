@@ -1484,6 +1484,8 @@ func (r *Runner) executeAgentTask(task model.AgentTask) (string, string) {
 		return r.executeRemoteExecTask(task)
 	case model.AgentTaskTypeRemoteOperation:
 		return r.executeRemoteOperationTask(task)
+	case model.AgentTaskTypeHostPowerAction:
+		return r.executeHostPowerTask(task)
 	default:
 		return "failed", jsonResult("unknown task type")
 	}
@@ -3235,7 +3237,7 @@ func buildHealthReport(binary string, timeout time.Duration, host hostStaticInfo
 		AgentVersion:       version.Version,
 		AgentBuild:         version.Build,
 		SingBoxVersion:     coreVersion,
-		KernelCapabilities: append(append([]string(nil), kernelCapabilities...), model.AgentCapabilityTrafficPolicy, model.AgentCapabilityAuthorizationControl, model.AgentCapabilityRuntimeUsers),
+		KernelCapabilities: append(append([]string(nil), kernelCapabilities...), model.AgentCapabilityTrafficPolicy, model.AgentCapabilityAuthorizationControl, model.AgentCapabilityRuntimeUsers, model.AgentCapabilityHostPower),
 		TCPFastOpenState:   tfoState,
 		TCPFastOpenValue:   tfoValue,
 		Timestamp:          time.Now().UTC(),

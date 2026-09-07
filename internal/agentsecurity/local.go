@@ -41,6 +41,12 @@ func (p Policy) Normalized() Policy {
 
 func (p Policy) Allows(feature string) bool {
 	p = p.Normalized()
+	switch feature {
+	case "scripts", "scripts_enabled":
+		return p.Allow.ScriptsEnabled
+	case "host_power", "host_power_enabled", "host-power":
+		return p.Allow.HostPowerEnabled
+	}
 	if p.Mode != model.RemoteAccessModeHardened {
 		return true
 	}
@@ -138,6 +144,10 @@ func (s *Store) SetAllow(feature string, allow bool) error {
 		policy.Allow.RemoteTerminal = allow
 	case "mcp-operations", "mcp_remote_operations", "mcp-exec", "mcp_structured_exec", "mcp-shell", "mcp_raw_shell", "mcp_interactive_terminal", "mcp_interactive", "mcp-interactive", "mcp_enabled", "mcp":
 		policy.Allow.MCPEnabled = allow
+	case "scripts", "scripts_enabled":
+		policy.Allow.ScriptsEnabled = allow
+	case "host-power", "host_power", "host_power_enabled":
+		policy.Allow.HostPowerEnabled = allow
 	default:
 		return errors.New("unknown remote-access feature")
 	}

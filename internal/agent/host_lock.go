@@ -86,3 +86,35 @@ func (r *Runner) acquireHostCoreLock(timeout time.Duration) (*hostCoreLock, erro
 		time.Sleep(250 * time.Millisecond)
 	}
 }
+
+func (r *Runner) acquireStrictHostLock(timeout time.Duration) (*hostCoreLock, error) {
+	if timeout <= 0 {
+		timeout = hostCoreLockWait
+	}
+	dir := r.stateDir()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, err
+	}
+	path := r.hostCoreLockPath()
+	// #nosec G304 -- a fixed file name below the Agent's configured state directory.
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err == nil {
+			_ = file.Truncate(0)
+			_, _ = file.WriteAt([]byte(fmt.Sprintf("agent %d host-power\n", os.Getpid())), 0)
+			return &hostCoreLock{file: file}, nil
+		} else if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EAGAIN) {
+			_ = file.Close()
+			return nil, err
+		}
+		if time.Now().After(deadline) {
+			_ = file.Close()
+			return nil, errHostCoreLockBusy
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+}

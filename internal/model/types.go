@@ -756,7 +756,10 @@ const (
 	AgentTaskTypeIssueCertificateHTTP  = "issue_certificate_http01"
 	AgentTaskTypeRemoteExec            = "remote_exec"
 	AgentTaskTypeRemoteOperation       = "remote_operation"
+	AgentTaskTypeHostPowerAction       = "host_power_action"
 )
+
+const AgentCapabilityHostPower = "host_power_v1"
 
 const AgentCapabilityTrafficPolicy = "traffic_policy_v1"
 

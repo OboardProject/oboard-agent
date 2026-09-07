@@ -12,8 +12,9 @@ const (
 	RemoteAccessCapabilityInteractiveMCP   = "remote_interactive_mcp_v1"
 	RemoteAccessCapabilityLocalGate        = "remote_access_local_gate_v1"
 
-	RemoteExecOriginMCP   = "mcp"
-	RemoteExecOriginPanel = "panel"
+	RemoteExecOriginMCP    = "mcp"
+	RemoteExecOriginPanel  = "panel"
+	RemoteExecOriginScript = "script"
 	RemoteExecModeArgv    = "argv"
 	RemoteExecModeShell   = "shell"
 
@@ -39,8 +40,10 @@ type RemoteAccessReport struct {
 }
 
 type RemoteAccessLocalAllow struct {
-	RemoteTerminal bool `json:"remote_terminal"`
-	MCPEnabled     bool `json:"mcp_enabled"`
+	RemoteTerminal   bool `json:"remote_terminal"`
+	MCPEnabled       bool `json:"mcp_enabled"`
+	ScriptsEnabled   bool `json:"scripts_enabled"`
+	HostPowerEnabled bool `json:"host_power_enabled"`
 }
 
 type RemoteExecCommand struct {

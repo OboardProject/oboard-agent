@@ -320,7 +320,11 @@ func (r *Runner) executeRemoteOperationTask(task model.AgentTask) (string, strin
 	if err := json.Unmarshal([]byte(task.PayloadJSON), &payload); err != nil {
 		return "failed", jsonResult(err.Error())
 	}
-	if !r.localGateAllows("mcp_enabled") {
+	gate := "mcp_enabled"
+	if payload.Origin == model.RemoteExecOriginScript {
+		gate = "scripts"
+	}
+	if !r.localGateAllows(gate) {
 		return "failed", jsonMap(map[string]any{"error": "agent local security policy denied remote operations", "code": "agent_local_gate_denied"})
 	}
 	result, err := r.runRemoteOperation(payload)
@@ -354,22 +358,9 @@ func (r *Runner) runRemoteOperation(payload model.RemoteOperationTaskPayload) (m
 	case model.RemoteOperationListeners:
 		return r.captureCommandOutput("ss", "-lntp")
 	case model.RemoteOperationServiceStatus:
-		service := strings.TrimSpace(payload.Service)
-		if service == "" || service == "all" {
-			agent, _ := r.captureCommandOutput("systemctl", "is-active", "oboard-agent")
-			core, _ := r.captureCommandOutput("systemctl", "is-active", "oboard-sb")
-			return map[string]any{"oboard-agent": agent, "oboard-sb": core}, nil
-		}
-		if service != "oboard-agent" && service != "oboard-sb" {
-			return nil, errors.New("service is not an OBoard managed unit")
-		}
-		return r.captureCommandOutput("systemctl", "is-active", service)
+		return r.managedServiceStatus(strings.TrimSpace(payload.Service))
 	case model.RemoteOperationServiceRestart:
-		service := strings.TrimSpace(payload.Service)
-		if service != "oboard-agent" && service != "oboard-sb" {
-			return nil, errors.New("service is not an OBoard managed unit")
-		}
-		return r.captureCommandOutput("systemctl", "restart", service)
+		return r.restartManagedService(strings.TrimSpace(payload.Service))
 	case model.RemoteOperationLogs:
 		lines := payload.Lines
 		if lines <= 0 {
