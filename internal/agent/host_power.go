@@ -13,6 +13,7 @@ import (
 )
 
 var hostPowerInvoker = invokeHostPowerCommand
+var hostPowerInContainer = runningInContainer
 
 func (r *Runner) executeHostPowerTask(task model.AgentTask) (string, string) {
 	var payload model.HostPowerTaskPayload
@@ -41,7 +42,7 @@ func (r *Runner) executeHostPowerTask(task model.AgentTask) (string, string) {
 	if payload.ExpectedBootID != "" && payload.ExpectedBootID != currentBootID() {
 		return "failed", jsonMap(map[string]any{"error_code": "condition_changed", "error": "host boot identity changed"})
 	}
-	if runningInContainer() {
+	if hostPowerInContainer() {
 		return "failed", jsonMap(map[string]any{"error_code": "capability_unsupported", "error": "container hosts cannot control host power"})
 	}
 	digest := payload.PayloadDigest

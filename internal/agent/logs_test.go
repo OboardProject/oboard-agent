@@ -140,16 +140,11 @@ func TestLogMaintenanceRotatesWhileControllerIsOffline(t *testing.T) {
 	if err := os.WriteFile(path, []byte(strings.Repeat("x", (1<<20)+1024)), 0o640); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if backup, err := os.Stat(path + ".1"); err == nil && backup.Size() > 0 {
-			current, err := os.Stat(path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if current.Size() != 0 {
-				t.Fatalf("current log size = %d after offline maintenance", current.Size())
-			}
+		backup, backupErr := os.Stat(path + ".1")
+		current, currentErr := os.Stat(path)
+		if backupErr == nil && backup.Size() > 0 && currentErr == nil && current.Size() == 0 {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)

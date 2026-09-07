@@ -20,17 +20,26 @@ func testAgentConfig(dir string, serverID int64) Config {
 	}
 }
 
+func stubHostPower(t *testing.T, invoker func(string) error) {
+	t.Helper()
+	hostPowerInvoker = invoker
+	hostPowerInContainer = func() bool { return false }
+	t.Cleanup(func() {
+		hostPowerInvoker = invokeHostPowerCommand
+		hostPowerInContainer = runningInContainer
+	})
+}
+
 func TestHostPowerUsesStubAndRecordsIntent(t *testing.T) {
 	dir := t.TempDir()
 	called := 0
-	hostPowerInvoker = func(action string) error {
+	stubHostPower(t, func(action string) error {
 		called++
 		if action != model.HostPowerActionReboot {
 			t.Fatalf("unexpected action %s", action)
 		}
 		return nil
-	}
-	t.Cleanup(func() { hostPowerInvoker = invokeHostPowerCommand })
+	})
 	cfg := testAgentConfig(dir, 9)
 	if err := agentsecurity.NewStore(agentsecurity.PathForConfig(cfg.ConfigPath)).SetAllow("host-power", true); err != nil {
 		t.Fatal(err)
@@ -62,11 +71,10 @@ func TestHostPowerUsesStubAndRecordsIntent(t *testing.T) {
 
 func TestHostPowerLocalPolicyDeniesByDefault(t *testing.T) {
 	dir := t.TempDir()
-	hostPowerInvoker = func(string) error {
+	stubHostPower(t, func(string) error {
 		t.Fatal("invoker must not run")
 		return nil
-	}
-	t.Cleanup(func() { hostPowerInvoker = invokeHostPowerCommand })
+	})
 	runner := New(testAgentConfig(dir, 9))
 	payload := model.HostPowerTaskPayload{
 		ProtocolVersion: model.HostPowerProtocolVersion,
