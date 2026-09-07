@@ -640,6 +640,81 @@ func TestConnectRejectsLegacyTaskSignatureVersion(t *testing.T) {
 	t.Setenv("OBOARD_DISABLE_PUBLIC_IP_DETECT", "1")
 	token := "agent-token"
 	task := model.AgentTask{ID: 44, ServerID: 9, Type: "unknown", PayloadJSON: "{}", ConfigVersion: 1, Nonce: "legacy-signature"}
+	ack := make(chan map[string]any, 1)
+	reported := make(chan model.AgentTaskResultReport, 1)
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		switch req.URL.Path {
+		case "/api/v1/agent/connect":
+			conn, err := upgrader.Upgrade(w, req, nil)
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+			var initial map[string]any
+			if conn.ReadJSON(&initial) != nil {
+				return
+			}
+			_ = conn.WriteJSON(map[string]any{"type": "hello", "server_id": task.ServerID})
+			_ = conn.WriteJSON(map[string]any{"type": "task_request", "task": task, "signature_version": 1, "signature": "legacy"})
+			_ = conn.WriteJSON(map[string]any{"type": "heartbeat"})
+			for {
+				var message map[string]any
+				if conn.ReadJSON(&message) != nil {
+					return
+				}
+				if message["type"] == "task_ack" {
+					ack <- message
+				}
+			}
+		case "/api/v1/agent/task-results":
+			var report model.AgentTaskResultReport
+			if err := json.NewDecoder(req.Body).Decode(&report); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			reported <- report
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, req)
+		}
+	}))
+	defer server.Close()
+	r := New(Config{ControllerURL: server.URL, AgentID: "agent-1", AgentToken: token, StateDir: t.TempDir(), ServerID: task.ServerID})
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- r.connect(ctx) }()
+	select {
+	case report := <-reported:
+		if report.TaskID != task.ID || report.Status != "failed" || !strings.Contains(report.ResultJSON, "signature version 1") {
+			t.Fatalf("rejected task report = %#v", report)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("legacy signature was not reported as a failed task")
+	}
+	select {
+	case message := <-ack:
+		if message["task_id"] != float64(task.ID) {
+			t.Fatalf("task_ack = %#v", message)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("legacy signature closed the control channel before task_ack")
+	}
+	cancel()
+	<-done
+}
+
+func TestConnectKeepsControlChannelWhenLatencyPlanIsRejected(t *testing.T) {
+	t.Setenv("OBOARD_DISABLE_PUBLIC_IP_DETECT", "1")
+	current := model.LatencyProbeTargetsPlan{
+		Version: 20, ResourceVersion: "resource-v1", Mode: model.LatencyProbeModeTCP,
+		Enabled: true, IntervalSeconds: 60, SampleCount: 1, IntervalMS: 150, TimeoutMS: 1000,
+		Targets: []model.LatencyProbeTarget{{ProbeID: "public-cloudflare", Kind: "public", Host: "cp.cloudflare.com", Port: 443}},
+	}
+	stale := current
+	stale.Version = 9
+	health := make(chan string, 2)
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if req.URL.Path != "/api/v1/agent/connect" {
@@ -655,16 +730,36 @@ func TestConnectRejectsLegacyTaskSignatureVersion(t *testing.T) {
 		if conn.ReadJSON(&initial) != nil {
 			return
 		}
-		_ = conn.WriteJSON(map[string]any{"type": "hello", "server_id": task.ServerID})
-		_ = conn.WriteJSON(map[string]any{"type": "task_request", "task": task, "signature_version": 1, "signature": "legacy"})
+		_ = conn.WriteJSON(map[string]any{"type": "hello", "server_id": int64(3), "latency_probe_plan": stale})
+		_ = conn.WriteJSON(map[string]any{"type": "heartbeat"})
+		for {
+			var message map[string]any
+			if conn.ReadJSON(&message) != nil {
+				return
+			}
+			if message["type"] == "health_report" {
+				health <- "health"
+			}
+		}
 	}))
 	defer server.Close()
-	r := New(Config{ControllerURL: server.URL, AgentID: "agent-1", AgentToken: token, StateDir: t.TempDir()})
+	r := New(Config{ControllerURL: server.URL, AgentID: "agent-1", AgentToken: "agent-token", StateDir: t.TempDir(), ServerID: 3})
+	if err := r.setLatencyProbePlan(current); err != nil {
+		t.Fatal(err)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	if err := r.connect(ctx); err == nil || !strings.Contains(err.Error(), "signature version 1") {
-		t.Fatalf("legacy signature version was not rejected: %v", err)
+	done := make(chan error, 1)
+	go func() { done <- r.connect(ctx) }()
+	select {
+	case <-health:
+	case err := <-done:
+		t.Fatalf("stale latency plan closed the control channel: %v", err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("expected a heartbeat health report after a rejected latency plan")
 	}
+	cancel()
+	<-done
 }
 
 func TestWGCFProfileToSingBoxEmitsCurrentWireGuardEndpointSchema(t *testing.T) {

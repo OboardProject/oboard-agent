@@ -164,11 +164,11 @@ type Runner struct {
 	agentRestartCommand         func() error
 	// coreRestartCommand overrides the service-manager restart in tests. A
 	// nil value keeps the managed presets.
-	coreRestartCommand           func() error
+	coreRestartCommand func() error
 	// coreServiceActiveCheck overrides the service liveness probe in tests.
-	coreServiceActiveCheck       func() error
-	controllerLinkMu            sync.Mutex
-	controllerLink              controllerLinkDiagnostics
+	coreServiceActiveCheck func() error
+	controllerLinkMu       sync.Mutex
+	controllerLink         controllerLinkDiagnostics
 }
 
 const (
@@ -767,7 +767,7 @@ func (r *Runner) connect(ctx context.Context) error {
 		case <-done:
 		}
 	}()
-	conn.SetReadLimit(1 << 20)
+	conn.SetReadLimit(controllerSocketReadLimit)
 	configureControllerSocket(conn, controllerSocketReadTimeout)
 	defer r.closeAllTerminalSessions("controller_disconnect")
 	type websocketWriteRequest struct {
@@ -1102,11 +1102,7 @@ func (r *Runner) connect(ctx context.Context) error {
 				return err
 			}
 			r.setMonitoringPolicy(typed.MonitoringMode)
-			if typed.LatencyProbePlan != nil {
-				if err := r.setLatencyProbePlan(*typed.LatencyProbePlan); err != nil {
-					return err
-				}
-			}
+			r.applyControllerLatencyProbePlan(typed.LatencyProbePlan)
 			r.setConnectionAuditPolicy(typed.ConnectionAuditEnabled)
 			// A reconnect may have missed a revoke pushed while the link was
 			// down; the independent lane pulls the current snapshot now.
@@ -1164,14 +1160,11 @@ func (r *Runner) connect(ctx context.Context) error {
 			if typed.Task == nil {
 				continue
 			}
-			if typed.SignatureVersion != 2 {
-				return fmt.Errorf("controller task signature version %d is not supported", typed.SignatureVersion)
-			}
-			if !r.verifyTaskSignature(*typed.Task, typed.Signature) {
-				return fmt.Errorf("controller task signature verification failed for task %d", typed.Task.ID)
-			}
-			if err := r.validateTaskServerID(*typed.Task); err != nil {
-				return err
+			if err := r.acceptControlTask(*typed.Task, typed.SignatureVersion, typed.Signature); err != nil {
+				if rejectErr := r.rejectControlTask(ctx, *typed.Task, err, writePriority); rejectErr != nil {
+					return rejectErr
+				}
+				continue
 			}
 			select {
 			case taskCh <- pendingControlTask{task: *typed.Task}:
@@ -1182,11 +1175,7 @@ func (r *Runner) connect(ctx context.Context) error {
 			}
 		case "heartbeat":
 			r.setMonitoringPolicy(typed.MonitoringMode)
-			if typed.LatencyProbePlan != nil {
-				if err := r.setLatencyProbePlan(*typed.LatencyProbePlan); err != nil {
-					return err
-				}
-			}
+			r.applyControllerLatencyProbePlan(typed.LatencyProbePlan)
 			r.setConnectionAuditPolicy(typed.ConnectionAuditEnabled)
 			_ = r.maybeRunPeriodicDNSBenchmark(ctx)
 			_ = r.maybeRunPeriodicForwardProbes(ctx)
@@ -1253,6 +1242,39 @@ func (r *Runner) validateTaskServerID(task model.AgentTask) error {
 	}
 	if task.ServerID != serverID {
 		return fmt.Errorf("task %d belongs to server %d, enrolled server is %d", task.ID, task.ServerID, serverID)
+	}
+	return nil
+}
+
+func (r *Runner) applyControllerLatencyProbePlan(plan *model.LatencyProbeTargetsPlan) {
+	if plan == nil {
+		return
+	}
+	if err := r.setLatencyProbePlan(*plan); err != nil {
+		// A stale or conflicting probe plan must not take down the control
+		// channel. Remote terminal, authorization, and task delivery share
+		// this socket.
+		logging.Warnf("latency probe plan rejected: %v", err)
+	}
+}
+
+func (r *Runner) acceptControlTask(task model.AgentTask, signatureVersion int, signature string) error {
+	if signatureVersion != 2 {
+		return fmt.Errorf("controller task signature version %d is not supported", signatureVersion)
+	}
+	if !r.verifyTaskSignature(task, signature) {
+		return fmt.Errorf("controller task signature verification failed for task %d", task.ID)
+	}
+	return r.validateTaskServerID(task)
+}
+
+func (r *Runner) rejectControlTask(ctx context.Context, task model.AgentTask, reason error, writePriority func(any, bool) error) error {
+	logging.Warnf("rejecting task %d: %v", task.ID, reason)
+	if err := r.ReportTaskResult(ctx, task.ID, "failed", jsonResult(reason.Error()), r.taskResultHealth()); err != nil {
+		logging.Errorf("report rejected task %d: %v", task.ID, err)
+	}
+	if err := writePriority(map[string]any{"type": "task_ack", "task_id": task.ID}, true); err != nil {
+		return err
 	}
 	return nil
 }

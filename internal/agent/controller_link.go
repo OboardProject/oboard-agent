@@ -52,6 +52,12 @@ const (
 const (
 	controllerSocketReadTimeout  = 120 * time.Second
 	controllerSocketWriteTimeout = 20 * time.Second
+	// controllerSocketReadLimit is the reassembled application-message cap
+	// for the authenticated Controller WebSocket. apply_deployment can carry
+	// core config, certificates, forwards, tunnels and SSH credentials; 1 MiB
+	// was enough to drop the control channel (and remote terminal) on a
+	// routine task_request. Keep this identical to Controller.
+	controllerSocketReadLimit = 16 << 20
 )
 
 // configureControllerSocket arms the read deadline and keeps it refreshed from
