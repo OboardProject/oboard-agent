@@ -27,6 +27,18 @@ func tunnelDesiredStateID(plan model.TunnelPlan) (string, error) {
 	return desiredStateID(plan)
 }
 
+func (r *Runner) resetRuntimeDesiredStateCaches() {
+	r.forwardLifecycleMu.Lock()
+	r.forwardDesiredState = ""
+	r.forwardLifecycleMu.Unlock()
+	r.tunnelLifecycleMu.Lock()
+	r.tunnelDesiredState = ""
+	r.tunnelLifecycleMu.Unlock()
+	r.sshInboundLifecycleMu.Lock()
+	r.sshInboundDesiredState = ""
+	r.sshInboundLifecycleMu.Unlock()
+}
+
 func sshInboundDesiredStateID(plan model.SSHInboundPlan) (string, error) {
 	plan.Version = 0
 	for index := range plan.Inbounds {

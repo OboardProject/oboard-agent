@@ -2357,7 +2357,7 @@ func (r *Runner) applyCoreConfigTask(version int64, payload model.ApplyCoreConfi
 	if err != nil {
 		return map[string]any{"message": "managed asset sync failed", "version": version, "managed_assets_changed": false}, err
 	}
-	result, err := r.applyCoreConfigUnlocked(version, resolvedConfig)
+	result, err := r.applyCoreConfigUnlocked(version, resolvedConfig, false)
 	if err != nil {
 		return result, err
 	}
@@ -2378,7 +2378,7 @@ func (r *Runner) applyCoreConfigTask(version int64, payload model.ApplyCoreConfi
 	return result, nil
 }
 
-func (r *Runner) applyCoreConfigUnlocked(version int64, config string) (map[string]any, error) {
+func (r *Runner) applyCoreConfigUnlocked(version int64, config string, forceRestart bool) (map[string]any, error) {
 	r.coreLifecycleMu.Lock()
 	defer r.coreLifecycleMu.Unlock()
 	// An operator running the shell update at the same moment is replacing the
@@ -2457,7 +2457,7 @@ func (r *Runner) applyCoreConfigUnlocked(version int64, config string) (map[stri
 		}
 		return finishOperationalApply("core restarted after runtime configuration drift", "runtime_drift_restart", false)
 	}
-	if len(previousConfig) > 0 && bytes.Equal(bytes.TrimSpace(previousConfig), bytes.TrimSpace([]byte(config))) {
+	if !forceRestart && len(previousConfig) > 0 && bytes.Equal(bytes.TrimSpace(previousConfig), bytes.TrimSpace([]byte(config))) {
 		result["validated"] = true
 		result["unchanged"] = true
 		check := r.checkCoreRuntimeConfig(ctx, []byte(config))
@@ -2493,7 +2493,7 @@ func (r *Runner) applyCoreConfigUnlocked(version int64, config string) (map[stri
 		result["reload_strategy"] = "metadata_compare_failed"
 		return result, metadataErr
 	}
-	if metadataOnly {
+	if metadataOnly && !forceRestart {
 		// Runtime policy is pushed into the live process, so it must not be
 		// used to skip a restart while that process still runs an older
 		// operational configuration.

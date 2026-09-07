@@ -44,7 +44,7 @@ func (r *Runner) executeDeploymentTask(payload model.DeploymentTaskPayload) (str
 	// version state alone. That is only truthful while the running kernel still
 	// serves the recorded configuration, so a drifted kernel gets the full
 	// deployment instead, which restarts it.
-	if verdict == appliedVersionReplay && r.coreRuntimeConverged(ctx) {
+	if verdict == appliedVersionReplay && !payload.ForceRefresh && r.coreRuntimeConverged(ctx) {
 		if strings.TrimSpace(payload.Config.Config) != "" {
 			if err := r.applyConfigAuthorization(ctx, []byte(payload.Config.Config)); err != nil {
 				return "failed", jsonResult("authorization reconciliation failed: " + err.Error())
@@ -71,6 +71,11 @@ func (r *Runner) executeDeploymentTask(payload model.DeploymentTaskPayload) (str
 			}
 		}
 		steps = append(steps, step)
+	}
+
+	if payload.ForceRefresh {
+		r.resetRuntimeDesiredStateCaches()
+		payload.ConfigChanged = true
 	}
 
 	controllerConfig := payload.Config.Config
@@ -147,7 +152,7 @@ func (r *Runner) executeDeploymentTask(payload model.DeploymentTaskPayload) (str
 			configErr = errors.New("deployment marked core config changed but did not include a config")
 		}
 	} else {
-		applyResult, err := r.applyCoreConfigUnlocked(payload.Version, payload.Config.Config)
+		applyResult, err := r.applyCoreConfigUnlocked(payload.Version, payload.Config.Config, payload.ForceRefresh)
 		applyResult["effective_config_sha256"] = effectiveConfigSHA256
 		result, configErr = applyResult, err
 		unchanged, _ = applyResult["unchanged"].(bool)

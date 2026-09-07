@@ -1488,6 +1488,27 @@ func TestPortForwardDesiredStateSkipsVersionOnlyUpdate(t *testing.T) {
 	}
 }
 
+func TestResetRuntimeDesiredStateCachesForcesRebuild(t *testing.T) {
+	r := New(Config{StateDir: t.TempDir()})
+	plan := model.PortForwardPlan{Version: 1}
+	if _, err := r.applyPortForwards(plan); err != nil {
+		t.Fatal(err)
+	}
+	plan.Version = 2
+	replay, err := r.applyPortForwards(plan)
+	if err != nil || !replay.Unchanged {
+		t.Fatalf("expected version-only replay, got %#v err=%v", replay, err)
+	}
+	r.resetRuntimeDesiredStateCaches()
+	rebuilt, err := r.applyPortForwards(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rebuilt.Unchanged {
+		t.Fatal("force refresh left the listener desired-state shortcut in place")
+	}
+}
+
 func TestDesiredStateIDsIgnorePlanVersion(t *testing.T) {
 	forwardOne, err := portForwardDesiredStateID(model.PortForwardPlan{Version: 1, Rules: []model.PortForward{{ID: 1}}})
 	if err != nil {
