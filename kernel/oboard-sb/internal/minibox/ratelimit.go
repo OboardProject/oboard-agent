@@ -1054,6 +1054,77 @@ func (t *RateLimitTracker) Snapshot() []TrafficCounter {
 	return out
 }
 
+// ReplaceScopedUsers upserts tracker identities for the users just installed
+// on the named inbounds. Removed users keep their counters for tail traffic;
+// they can no longer authenticate, and authorization closes remaining sessions.
+func (t *RateLimitTracker) ReplaceScopedUsers(scope []string, entries []UserInstallEntry) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for _, entry := range entries {
+		user := strings.TrimSpace(entry.AuthUser)
+		if user == "" {
+			continue
+		}
+		policy := entry.Policy
+		if entry.AuthorizationKey != "" {
+			policy.AuthorizationKey = entry.AuthorizationKey
+		}
+		if entry.Identity.UserID > 0 {
+			policy.UserID = entry.Identity.UserID
+		}
+		if entry.Identity.InboundID > 0 {
+			policy.InboundID = entry.Identity.InboundID
+		}
+		policy.PathID = entry.Identity.PathID
+		policy.DeviceIDHash = entry.Identity.DeviceIDHash
+		policy.CredentialEpoch = entry.Identity.CredentialEpoch
+		policy.CredentialStatus = entry.Identity.CredentialStatus
+		if !policy.Billable && policy.UserID > 0 {
+			policy.Billable = true
+		}
+		key := "user:" + user
+		if state := t.states[key]; state != nil {
+			state.updatePolicy(mergeRuntimeIdentity(state.loadedPolicy(), policy))
+			continue
+		}
+		state := newRuntimeStateWithClock(key, user, "", policy, t.now)
+		state.authorization = t.authorization
+		t.states[key] = state
+	}
+	_ = scope
+}
+
+func mergeRuntimeIdentity(current, update RuntimeUserLimit) RuntimeUserLimit {
+	if update.AuthorizationKey != "" {
+		current.AuthorizationKey = update.AuthorizationKey
+	}
+	if update.UserID > 0 {
+		current.UserID = update.UserID
+	}
+	if update.InboundID > 0 {
+		current.InboundID = update.InboundID
+	}
+	current.PathID = update.PathID
+	current.DeviceIDHash = update.DeviceIDHash
+	current.CredentialEpoch = update.CredentialEpoch
+	current.CredentialStatus = update.CredentialStatus
+	if update.SpeedLimitMbps != 0 {
+		current.SpeedLimitMbps = update.SpeedLimitMbps
+	}
+	if update.TrafficLimitBytes != 0 {
+		current.TrafficLimitBytes = update.TrafficLimitBytes
+	}
+	if update.LeaseBytes != 0 {
+		current.LeaseBytes = update.LeaseBytes
+	}
+	current.Billable = update.Billable || current.Billable
+	current.LeaseEnforced = update.LeaseEnforced || current.LeaseEnforced
+	return current
+}
+
 func (t *RateLimitTracker) UpdatePolicies(policies map[string]RuntimeUserLimit) {
 	if t == nil || len(policies) == 0 {
 		return

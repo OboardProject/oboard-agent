@@ -41,6 +41,7 @@ func NormalizeOperationalConfig(raw []byte) ([]byte, error) {
 		return nil, fmt.Errorf("core configuration root must be a JSON object")
 	}
 	if metadata, ok := object["_oboard"].(map[string]any); ok {
+		stripRuntimeUserFields(object, metadata)
 		authorization.RetainInstalledKeys(metadata)
 		for _, key := range runtimeOnlyMetadataKeys {
 			delete(metadata, key)
@@ -50,6 +51,73 @@ func NormalizeOperationalConfig(raw []byte) ([]byte, error) {
 		}
 	}
 	return json.Marshal(object)
+}
+
+func stripRuntimeUserFields(root map[string]any, metadata map[string]any) {
+	declared, _ := metadata["runtime_users"].(map[string]any)
+	if declared == nil {
+		return
+	}
+	rawTags, _ := declared["inbounds"].([]any)
+	if len(rawTags) == 0 {
+		return
+	}
+	tags := map[string]struct{}{}
+	for _, raw := range rawTags {
+		tag, _ := raw.(string)
+		if tag != "" {
+			tags[tag] = struct{}{}
+		}
+	}
+	if len(tags) == 0 {
+		return
+	}
+	names := map[string]struct{}{}
+	inbounds, _ := root["inbounds"].([]any)
+	for _, raw := range inbounds {
+		inbound, _ := raw.(map[string]any)
+		tag, _ := inbound["tag"].(string)
+		if _, ok := tags[tag]; !ok {
+			continue
+		}
+		if users, ok := inbound["users"].([]any); ok {
+			for _, userRaw := range users {
+				user, _ := userRaw.(map[string]any)
+				if name, _ := user["name"].(string); name != "" {
+					names[name] = struct{}{}
+				}
+			}
+		}
+		delete(inbound, "users")
+	}
+	if limits, ok := metadata["rate_limits"].(map[string]any); ok {
+		if users, ok := limits["users"].(map[string]any); ok {
+			if len(names) == 0 {
+				delete(limits, "users")
+			} else {
+				for name := range names {
+					delete(users, name)
+				}
+				if len(users) == 0 {
+					delete(limits, "users")
+				}
+			}
+		}
+	}
+	outbounds, _ := root["outbounds"].([]any)
+	for _, raw := range outbounds {
+		outbound, _ := raw.(map[string]any)
+		tag, _ := outbound["tag"].(string)
+		kind, _ := outbound["type"].(string)
+		if kind != "user-selector" {
+			continue
+		}
+		for inboundTag := range tags {
+			if tag == "userselector-"+inboundTag {
+				delete(outbound, "users")
+			}
+		}
+	}
 }
 
 // OperationalConfigDigest is the stable identity of the operational part of a

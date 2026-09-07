@@ -71,6 +71,11 @@ type Runner struct {
 	authorizationStore          *authorization.Store
 	authorizationApplyMu        sync.Mutex
 	authorizationSyncWake       chan struct{}
+	runtimeUsersMu              sync.Mutex
+	runtimeUsersApplyMu         sync.Mutex
+	runtimeUsersCurrent         *model.UsersInstallRequest
+	runtimeUsersBootID          string
+	usersSyncWake               chan struct{}
 	config                      atomic.Pointer[Config]
 	client                      *http.Client
 	coreClient                  *http.Client
@@ -182,7 +187,7 @@ func New(cfg Config) *Runner {
 	if profile == StorageProfileAuto {
 		profile = detectStorageProfile(cfg.StateDir, StorageProfileAuto)
 	}
-	runner := &Runner{coreClient: unixHTTPClient(coreAPISocket), lastForwardProbe: map[int64]time.Time{}, resources: resources, tuning: tuning, hostInfo: detectHostStaticInfo(), logDir: "/var/log", logMaintenanceEvery: logMaintenanceIntervalForProfile(profile), monitoringMode: "lightweight", metricReportWake: make(chan struct{}, 1), authorizationSyncWake: make(chan struct{}, 1), connectionAudit: newConnectionAuditAccumulator(cfg.ConnectionAuditEnabled), clock: clock}
+	runner := &Runner{coreClient: unixHTTPClient(coreAPISocket), lastForwardProbe: map[int64]time.Time{}, resources: resources, tuning: tuning, hostInfo: detectHostStaticInfo(), logDir: "/var/log", logMaintenanceEvery: logMaintenanceIntervalForProfile(profile), monitoringMode: "lightweight", metricReportWake: make(chan struct{}, 1), authorizationSyncWake: make(chan struct{}, 1), usersSyncWake: make(chan struct{}, 1), connectionAudit: newConnectionAuditAccumulator(cfg.ConnectionAuditEnabled), clock: clock}
 	runner.client = &http.Client{Timeout: 20 * time.Second, Transport: runner.lowOverheadTransport()}
 	runner.storeConfig(cfg)
 	runner.refreshLogLevel()
@@ -659,6 +664,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	r.startLogMaintenance(ctx)
 	r.startTrafficLoop(ctx)
 	r.startAuthorizationSyncLoop(ctx)
+	r.startUsersSyncLoop(ctx)
 	r.startLatencyProbeLoop(ctx)
 	r.startMetricReportLoop(ctx)
 	_ = r.configureCoreConnectionAudit(ctx, cfg.ConnectionAuditEnabled)
@@ -840,6 +846,7 @@ func (r *Runner) connect(ctx context.Context) error {
 	// never queued behind the single task worker. Only the newest envelope is
 	// kept: an older one is superseded by construction.
 	authorizationCh := make(chan model.AuthorizationEnvelope, 1)
+	usersCh := make(chan model.UsersEnvelope, 64)
 	go func() {
 		for {
 			select {
@@ -852,6 +859,62 @@ func (r *Runner) connect(ctx context.Context) error {
 					cancelConnection()
 					return
 				}
+			}
+		}
+	}()
+	go func() {
+		var pending *model.UsersEnvelope
+		timer := time.NewTimer(usersMergeDebounce)
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		flush := func() {
+			if pending == nil {
+				return
+			}
+			envelope := *pending
+			pending = nil
+			ack := r.applyUsersEnvelope(connectionCtx, envelope)
+			if err := writePriority(ack, true); err != nil {
+				logging.Errorf("acknowledge users message %s: %v", envelope.MessageID, err)
+				cancelConnection()
+			}
+		}
+		for {
+			select {
+			case <-connectionCtx.Done():
+				return
+			case envelope := <-usersCh:
+				req, err := r.verifyUsersEnvelope(envelope)
+				if err != nil || usersInstallIsRevoke(req) || req.Chunk != nil {
+					pending = nil
+					if !timer.Stop() {
+						select {
+						case <-timer.C:
+						default:
+						}
+					}
+					ack := r.applyUsersEnvelope(connectionCtx, envelope)
+					if err := writePriority(ack, true); err != nil {
+						logging.Errorf("acknowledge users message %s: %v", envelope.MessageID, err)
+						cancelConnection()
+						return
+					}
+					continue
+				}
+				pending = &envelope
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				timer.Reset(usersMergeDebounce)
+			case <-timer.C:
+				flush()
 			}
 		}
 	}()
@@ -1034,6 +1097,7 @@ func (r *Runner) connect(ctx context.Context) error {
 			// A reconnect may have missed a revoke pushed while the link was
 			// down; the independent lane pulls the current snapshot now.
 			r.wakeAuthorizationSync()
+			r.wakeUsersSync()
 		case model.AgentControlAuthorizationUpdate:
 			var envelope model.AuthorizationEnvelope
 			if err := json.Unmarshal(data, &envelope); err != nil {
@@ -1050,6 +1114,35 @@ func (r *Runner) connect(ctx context.Context) error {
 				}
 				select {
 				case authorizationCh <- envelope:
+				default:
+				}
+			}
+		case model.AgentControlUsersUpdate:
+			var envelope model.UsersEnvelope
+			if err := json.Unmarshal(data, &envelope); err != nil {
+				logging.Warnf("users_update decode failed: %v", err)
+				continue
+			}
+			var peek struct {
+				Chunk *model.UsersInstallChunk `json:"chunk"`
+			}
+			_ = json.Unmarshal([]byte(envelope.UsersJSON), &peek)
+			if peek.Chunk != nil {
+				select {
+				case usersCh <- envelope:
+				case <-connectionCtx.Done():
+				}
+				continue
+			}
+			select {
+			case usersCh <- envelope:
+			default:
+				select {
+				case <-usersCh:
+				default:
+				}
+				select {
+				case usersCh <- envelope:
 				default:
 				}
 			}
@@ -2231,6 +2324,9 @@ func (r *Runner) applyCoreConfigUnlocked(version int64, config string) (map[stri
 		if err := r.applyConfigAuthorization(context.Background(), []byte(config)); err != nil {
 			return result, err
 		}
+		if err := r.reapplyPersistedRuntimeUsers(context.Background()); err != nil {
+			result["runtime_users_error"] = err.Error()
+		}
 		result["message"] = message
 		result["reload_strategy"] = strategy
 		result["connection_draining"] = draining
@@ -2344,6 +2440,9 @@ func (r *Runner) applyCoreConfigUnlocked(version int64, config string) (map[stri
 		if err := r.applyConfigAuthorization(context.Background(), []byte(config)); err != nil {
 			result["reload_strategy"] = "runtime_authorization_sync_failed"
 			return result, fmt.Errorf("sync runtime-only authorization: %w", err)
+		}
+		if err := r.reapplyPersistedRuntimeUsers(context.Background()); err != nil {
+			result["runtime_users_error"] = err.Error()
 		}
 		result["message"] = "runtime policy updated without core reload"
 		result["reload_strategy"] = "runtime_policy_only"
@@ -2834,6 +2933,7 @@ func (r *Runner) taskResultHealth() *model.HealthReport {
 		health.AppliedConfigDigest = applied.PayloadID
 	}
 	health.AppliedAuthorization = r.appliedAuthorization()
+	health.AppliedUsers = r.appliedUsers()
 	return &health
 }
 
@@ -2975,6 +3075,7 @@ func (r *Runner) Probe(force bool) model.HealthReport {
 	health.Timestamp = now
 	health.RemoteAccess = r.remoteAccessReport()
 	health.AppliedAuthorization = r.appliedAuthorization()
+	health.AppliedUsers = r.appliedUsers()
 	diskInfo := r.storageDiskInfo()
 	health.DiskAvailableBytes = diskInfo.AvailableBytes
 	health.DiskPressure = diskInfo.Pressure
@@ -3055,7 +3156,7 @@ func buildHealthReport(binary string, timeout time.Duration, host hostStaticInfo
 		AgentVersion:       version.Version,
 		AgentBuild:         version.Build,
 		SingBoxVersion:     coreVersion,
-		KernelCapabilities: append(append([]string(nil), kernelCapabilities...), model.AgentCapabilityTrafficPolicy, model.AgentCapabilityAuthorizationControl),
+		KernelCapabilities: append(append([]string(nil), kernelCapabilities...), model.AgentCapabilityTrafficPolicy, model.AgentCapabilityAuthorizationControl, model.AgentCapabilityRuntimeUsers),
 		TCPFastOpenState:   tfoState,
 		TCPFastOpenValue:   tfoValue,
 		Timestamp:          time.Now().UTC(),

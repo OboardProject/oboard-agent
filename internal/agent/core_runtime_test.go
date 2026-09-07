@@ -53,6 +53,10 @@ type fakeCoreKernel struct {
 	authorizationSequence int64
 	authorizationDigest    string
 	authorizationDenied    []string
+	runtimeUsers           bool
+	usersRevision          int64
+	usersDigest            string
+	usersBootID            string
 }
 
 func (k *fakeCoreKernel) deniedKeys() []string {
@@ -95,6 +99,9 @@ func newFakeCoreKernel(t *testing.T, configPath string, runtimeSupported bool) *
 		build := kernel.loadedBuild
 		if kernel.authorizationControl {
 			capabilities = append(capabilities, kernelCapabilityAuthorizationControl)
+		}
+		if kernel.runtimeUsers {
+			capabilities = append(capabilities, kernelCapabilityRuntimeUsers)
 		}
 		kernel.mu.Unlock()
 		payload := map[string]any{"name": "oboard-sb", "capabilities": capabilities}
@@ -168,6 +175,21 @@ func newFakeCoreKernel(t *testing.T, configPath string, runtimeSupported bool) *
 			revision = kernel.authorizationRevisions[len(kernel.authorizationRevisions)-1]
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"revision": revision, "sequence": kernel.authorizationSequence, "digest": kernel.authorizationDigest, "boot_id": "kernel-boot", "denied_count": len(kernel.authorizationDenied)})
+	})
+	mux.HandleFunc("/users/install", func(w http.ResponseWriter, r *http.Request) {
+		var req model.UsersInstallRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		kernel.mu.Lock()
+		kernel.usersRevision = req.UsersRevision
+		kernel.usersDigest = req.UsersDigest
+		kernel.usersBootID = "users-boot"
+		kernel.mu.Unlock()
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "status": map[string]any{"users_revision": req.UsersRevision, "users_digest": req.UsersDigest, "boot_id": "users-boot"}})
+	})
+	mux.HandleFunc("/users/status", func(w http.ResponseWriter, r *http.Request) {
+		kernel.mu.Lock()
+		defer kernel.mu.Unlock()
+		_ = json.NewEncoder(w).Encode(map[string]any{"users_revision": kernel.usersRevision, "users_digest": kernel.usersDigest, "boot_id": kernel.usersBootID})
 	})
 	server := &http.Server{Handler: mux}
 	go func() { _ = server.Serve(listener) }()

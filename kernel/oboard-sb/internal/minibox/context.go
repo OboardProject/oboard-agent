@@ -18,25 +18,30 @@ import (
 	"github.com/sagernet/sing-box/protocol/block"
 	"github.com/sagernet/sing-box/protocol/direct"
 	outboundDNS "github.com/sagernet/sing-box/protocol/dns"
-	"github.com/sagernet/sing-box/protocol/hysteria2"
-	"github.com/sagernet/sing-box/protocol/shadowsocks"
-	"github.com/sagernet/sing-box/protocol/snell"
+	upstreamHY2 "github.com/sagernet/sing-box/protocol/hysteria2"
+	upstreamSS "github.com/sagernet/sing-box/protocol/shadowsocks"
+	upstreamSnell "github.com/sagernet/sing-box/protocol/snell"
 	"github.com/sagernet/sing-box/protocol/socks"
-	"github.com/sagernet/sing-box/protocol/vless"
+	upstreamVLESS "github.com/sagernet/sing-box/protocol/vless"
 	"github.com/sagernet/sing-box/protocol/wireguard"
 	"github.com/sagernet/sing/common/ntp"
 	singService "github.com/sagernet/sing/service"
 
 	"github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/dnsgroup"
 	"github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/protocol/familyselector"
+	"github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/protocol/hysteria2"
 	"github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/protocol/mieru"
+	"github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/protocol/shadowsocks"
+	"github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/protocol/snell"
 	"github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/protocol/sourceprefix"
+	"github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/protocol/userselector"
+	"github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/protocol/vless"
 )
 
 // SupportedProtocols is the intentionally small protocol surface exposed by the
 // OBoard sing-box kernel. Do not add protocols here unless the Controller can
 // generate, validate, audit, and subscribe them.
-var SupportedProtocols = []string{"vless", "hysteria2", "anytls", "shadowsocks", "mieru", "snell", "socks", "wireguard", "source-prefix", "family-selector"}
+var SupportedProtocols = []string{"vless", "hysteria2", "anytls", "shadowsocks", "mieru", "snell", "socks", "wireguard", "source-prefix", "family-selector", "user-selector"}
 
 // Context returns a sing-box context with only the inbounds/outbounds that
 // OBoard supports in the first kernel line: VLESS, HY2, AnyTLS, and SS.
@@ -57,14 +62,15 @@ func Context(parent context.Context, clocks ...*RuntimeClock) context.Context {
 	direct.RegisterOutbound(outbounds)
 	block.RegisterOutbound(outbounds)
 	outboundDNS.RegisterOutbound(outbounds)
-	vless.RegisterOutbound(outbounds)
-	hysteria2.RegisterOutbound(outbounds)
+	upstreamVLESS.RegisterOutbound(outbounds)
+	upstreamHY2.RegisterOutbound(outbounds)
 	anytls.RegisterOutbound(outbounds)
-	shadowsocks.RegisterOutbound(outbounds)
+	upstreamSS.RegisterOutbound(outbounds)
 	mieru.RegisterOutbound(outbounds)
-	snell.RegisterOutbound(outbounds)
+	upstreamSnell.RegisterOutbound(outbounds)
 	sourceprefix.RegisterOutbound(outbounds)
 	familyselector.RegisterOutbound(outbounds)
+	userselector.RegisterOutbound(outbounds)
 	socks.RegisterOutbound(outbounds)
 
 	endpoints := endpoint.NewRegistry()

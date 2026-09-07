@@ -765,9 +765,15 @@ const AgentCapabilityTrafficPolicy = "traffic_policy_v1"
 // with authorization_ack / applied_authorization health fields.
 const AgentCapabilityAuthorizationControl = "authorization_control_v1"
 
+// AgentCapabilityRuntimeUsers is advertised by Agents that verify and apply
+// signed users_update envelopes outside the task slot.
+const AgentCapabilityRuntimeUsers = "runtime_users_control_v1"
+
 const (
 	AgentControlAuthorizationUpdate = "authorization_update"
 	AgentControlAuthorizationAck    = "authorization_ack"
+	AgentControlUsersUpdate         = "users_update"
+	AgentControlUsersAck            = "users_ack"
 )
 
 // AuthorizationEnvelope carries one signed AuthorizationLease. LeaseJSON is the
@@ -801,6 +807,100 @@ type AuthorizationAck struct {
 	Runtimes  map[string]string             `json:"runtimes,omitempty"`
 	Error     string                        `json:"error,omitempty"`
 	Applied   *AuthorizationAppliedSnapshot `json:"applied,omitempty"`
+}
+
+// UsersEnvelope carries one signed runtime-user install request.
+type UsersEnvelope struct {
+	Type      string `json:"type,omitempty"`
+	MessageID string `json:"message_id"`
+	ServerID  int64  `json:"server_id"`
+	UsersJSON string `json:"users_json"`
+	Signature string `json:"signature"`
+}
+
+type UsersInstallChunk struct {
+	Index  int    `json:"index"`
+	Total  int    `json:"total"`
+	SHA256 string `json:"sha256"`
+}
+
+type UsersInstallRequest struct {
+	Scope         []string            `json:"scope"`
+	UsersRevision int64               `json:"users_revision"`
+	UsersDigest   string              `json:"users_digest"`
+	Mode          string              `json:"mode"`
+	BaseRevision  int64               `json:"base_revision,omitempty"`
+	Chunk         *UsersInstallChunk  `json:"chunk,omitempty"`
+	Entries       []UsersInstallEntry `json:"entries"`
+}
+
+type UsersInstallEntry struct {
+	InboundTag       string              `json:"inbound_tag"`
+	AuthUser         string              `json:"auth_user"`
+	Credential       UsersCredential     `json:"credential"`
+	AuthorizationKey string              `json:"authorization_key"`
+	Identity         UsersIdentity       `json:"identity"`
+	RouteOutbound    string              `json:"route_outbound"`
+	Policy           UsersRuntimePolicy  `json:"policy"`
+}
+
+type UsersCredential struct {
+	UUID     string `json:"uuid,omitempty"`
+	Password string `json:"password,omitempty"`
+	UserKey  string `json:"userkey,omitempty"`
+	Flow     string `json:"flow,omitempty"`
+}
+
+type UsersIdentity struct {
+	UserID           int64  `json:"user_id,omitempty"`
+	InboundID        int64  `json:"inbound_id,omitempty"`
+	PathID           int64  `json:"path_id,omitempty"`
+	DeviceIDHash     string `json:"device_id_hash,omitempty"`
+	CredentialEpoch  int64  `json:"credential_epoch,omitempty"`
+	CredentialStatus string `json:"credential_status,omitempty"`
+}
+
+type UsersRuntimePolicy struct {
+	AuthorizationKey  string `json:"authorization_key,omitempty"`
+	UserID            int64  `json:"user_id,omitempty"`
+	InboundID         int64  `json:"inbound_id,omitempty"`
+	PathID            int64  `json:"path_id,omitempty"`
+	DeviceIDHash      string `json:"device_id_hash,omitempty"`
+	CredentialEpoch   int64  `json:"credential_epoch,omitempty"`
+	CredentialStatus  string `json:"credential_status,omitempty"`
+	Billable          bool   `json:"billable"`
+	SpeedLimitMbps    int    `json:"speed_limit_mbps,omitempty"`
+	TrafficLimitBytes int64  `json:"traffic_limit_bytes,omitempty"`
+	UsedBaselineBytes int64  `json:"used_baseline_bytes,omitempty"`
+	LeaseBytes        int64  `json:"lease_bytes,omitempty"`
+	ResetLeaseBytes   int64  `json:"reset_lease_bytes,omitempty"`
+	LeaseEnforced     bool   `json:"lease_enforced,omitempty"`
+	PeriodKey         string `json:"period_key,omitempty"`
+	PeriodStart       string `json:"period_start,omitempty"`
+	PeriodEnd         string `json:"period_end,omitempty"`
+	ResetMode         string `json:"reset_mode,omitempty"`
+	ResetDay          int    `json:"reset_day,omitempty"`
+	Timezone          string `json:"timezone,omitempty"`
+	QuotaState        string `json:"quota_state,omitempty"`
+	EnforcementMode   string `json:"enforcement_mode,omitempty"`
+}
+
+type UsersAppliedSnapshot struct {
+	Revision int64  `json:"revision"`
+	Digest   string `json:"digest,omitempty"`
+	BootID   string `json:"boot_id,omitempty"`
+}
+
+type UsersAck struct {
+	Type      string                `json:"type,omitempty"`
+	MessageID string                `json:"message_id"`
+	Revision  int64                 `json:"revision"`
+	Digest    string                `json:"digest,omitempty"`
+	Confirmed bool                  `json:"confirmed"`
+	BootID    string                `json:"boot_id,omitempty"`
+	Runtimes  map[string]string     `json:"runtimes,omitempty"`
+	Error     string                `json:"error,omitempty"`
+	Applied   *UsersAppliedSnapshot `json:"applied,omitempty"`
 }
 
 type NetworkInterfaceInfo struct {
@@ -1322,6 +1422,7 @@ type HealthReport struct {
 	NetworkInventory          *NetworkInterfaceInventory `json:"network_inventory,omitempty"`
 	Storage                   *StorageDiskInfo           `json:"storage,omitempty"`
 	AppliedAuthorization      *AuthorizationAppliedSnapshot `json:"applied_authorization,omitempty"`
+	AppliedUsers              *UsersAppliedSnapshot         `json:"applied_users,omitempty"`
 }
 
 type StorageDiskInfo struct {

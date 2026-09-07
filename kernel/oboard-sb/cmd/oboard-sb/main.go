@@ -23,7 +23,7 @@ import (
 	C "github.com/sagernet/sing-box/constant"
 )
 
-var kernelCapabilities = []string{"authorization_lease_v1", "authorization_control_v1", "outbound_egress_probe_v1", "outbound_relay_v1", "route_relay_v1", "runtime_clock_v1", "connection_presence_v1", "family_selector_v1", "traffic_ledger", "runtime_config_digest_v1", "runtime_build_identity_v1", "dns_doq_v1", "dns_group_v1"}
+var kernelCapabilities = []string{"authorization_lease_v1", "authorization_control_v1", "runtime_users_v1", "runtime_users:vless", "runtime_users:hysteria2", "runtime_users:shadowsocks-multi", "runtime_users:snell-multi", "outbound_egress_probe_v1", "outbound_relay_v1", "route_relay_v1", "runtime_clock_v1", "connection_presence_v1", "family_selector_v1", "traffic_ledger", "runtime_config_digest_v1", "runtime_build_identity_v1", "dns_doq_v1", "dns_group_v1"}
 
 // runtimeConfigState is the payload-free identity of the configuration this
 // process actually loaded. Agent compares it with the desired configuration so
@@ -117,17 +117,25 @@ func main() {
 	if err := tracker.UpdateAuthorization(agentLease); err != nil {
 		log.Fatal(err)
 	}
+	var declaredUsers []string
+	if runtimeMetadata.RuntimeUsers != nil {
+		declaredUsers = runtimeMetadata.RuntimeUsers.Inbounds
+	}
+	runtimeUsers := minibox.NewRuntimeUsers(filepath.Join(filepath.Dir(*config), "kernel-users.json"), b, tracker, declaredUsers)
 	go tracker.RunAuthorizationReaper(ctx)
 	socketGovernor := minibox.StartAdaptiveSocketGovernor(ctx, runtimeTuning)
 	tracker.SetSocketGovernor(socketGovernor)
 	if *api != "" {
 		go func() {
-			if err := serveHealth(ctx, *api, b, tracker, runtimeClock, runtimeTuning, memoryReclaimer, socketGovernor, runtimeConfig); err != nil && ctx.Err() == nil {
+			if err := serveHealth(ctx, *api, b, tracker, runtimeUsers, runtimeClock, runtimeTuning, memoryReclaimer, socketGovernor, runtimeConfig); err != nil && ctx.Err() == nil {
 				log.Println(err)
 			}
 		}()
 	}
 	if err := b.Start(); err != nil {
+		log.Fatal(err)
+	}
+	if err := runtimeUsers.Restore(); err != nil {
 		log.Fatal(err)
 	}
 	<-ctx.Done()
@@ -151,7 +159,7 @@ func printVersion() {
 	fmt.Println(string(data))
 }
 
-func serveHealth(ctx context.Context, listen string, instance *box.Box, tracker *minibox.RateLimitTracker, runtimeClock *minibox.RuntimeClock, tuning minibox.RuntimeTuning, memoryReclaimer *minibox.MemoryReclaimer, socketGovernor *minibox.SocketBufferGovernor, runtimeConfig runtimeConfigState) error {
+func serveHealth(ctx context.Context, listen string, instance *box.Box, tracker *minibox.RateLimitTracker, runtimeUsers *minibox.RuntimeUsers, runtimeClock *minibox.RuntimeClock, tuning minibox.RuntimeTuning, memoryReclaimer *minibox.MemoryReclaimer, socketGovernor *minibox.SocketBufferGovernor, runtimeConfig runtimeConfigState) error {
 	if err := validateLocalAPIListen(listen); err != nil {
 		return err
 	}
@@ -230,6 +238,7 @@ func serveHealth(ctx context.Context, listen string, instance *box.Box, tracker 
 	})
 	registerClockConfigHandler(mux, listen, runtimeClock)
 	registerAuthorizationHandler(mux, listen, tracker)
+	registerUsersHandler(mux, listen, runtimeUsers)
 
 	var (
 		ln         net.Listener

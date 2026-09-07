@@ -159,6 +159,84 @@ func TestSSHInboundCredentialStatusUpdatePreservesExistingConnection(t *testing.
 
 }
 
+func TestSSHInboundUserAddRemoveStaysRuntimeOnly(t *testing.T) {
+	alice := testSSHInboundUser(19, "alice-device", "alice-password")
+	alice.DeviceIDHash = "0123456789abcdef"
+	alice.CredentialEpoch = 2
+	alice.CredentialStatus = "active"
+	bob := testSSHInboundUser(20, "bob-device", "bob-password")
+	bob.DeviceIDHash = "fedcba9876543210"
+	bob.CredentialEpoch = 1
+	bob.CredentialStatus = "active"
+	bob.AuthorizationKey = "fedcba9876543210fedcba9876543210"
+	reserve, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := reserve.Addr().(*net.TCPAddr).Port
+	_ = reserve.Close()
+	runner := newTestSSHRunner(t, Config{StateDir: t.TempDir()})
+	now := time.Now().UTC()
+	if err := runner.authorizationState().Update(&model.AuthorizationLease{Revision: 3, IssuedAt: now.Format(time.RFC3339Nano), Grants: map[string]string{
+		alice.AuthorizationKey: now.Add(5 * time.Minute).Format(time.RFC3339Nano),
+		bob.AuthorizationKey:   now.Add(5 * time.Minute).Format(time.RFC3339Nano),
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	plan := model.SSHInboundPlan{Version: 1, Inbounds: []model.SSHInbound{{InboundID: 71, ServerID: 1, Name: "restricted", ListenIP: "127.0.0.1", Port: port, Enabled: true, Users: []model.SSHInboundUser{alice}}}}
+	if _, err := runner.applySSHInbounds(plan); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _, _ = runner.applySSHInbounds(model.SSHInboundPlan{Version: 4}) }()
+	aliceClient, err := ssh.Dial("tcp", net.JoinHostPort("127.0.0.1", fmt.Sprint(port)), &ssh.ClientConfig{User: alice.Username, Auth: []ssh.AuthMethod{ssh.Password(alice.Password)}, HostKeyCallback: ssh.InsecureIgnoreHostKey()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer aliceClient.Close()
+
+	plan.Version = 2
+	plan.Inbounds[0].Users = []model.SSHInboundUser{alice, bob}
+	result, err := runner.applySSHInbounds(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.RuntimeOnly || result.Unchanged {
+		t.Fatalf("add user apply = %#v", result)
+	}
+	if _, _, err := aliceClient.SendRequest("keepalive@openssh.com", true, nil); err != nil {
+		t.Fatalf("existing SSH connection was interrupted by add: %v", err)
+	}
+	bobClient, err := ssh.Dial("tcp", net.JoinHostPort("127.0.0.1", fmt.Sprint(port)), &ssh.ClientConfig{User: bob.Username, Auth: []ssh.AuthMethod{ssh.Password(bob.Password)}, HostKeyCallback: ssh.InsecureIgnoreHostKey()})
+	if err != nil {
+		t.Fatalf("added SSH user was rejected: %v", err)
+	}
+	defer bobClient.Close()
+
+	plan.Version = 3
+	plan.Inbounds[0].Users = []model.SSHInboundUser{bob}
+	result, err = runner.applySSHInbounds(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.RuntimeOnly || result.Unchanged {
+		t.Fatalf("remove user apply = %#v", result)
+	}
+	if _, _, err := bobClient.SendRequest("keepalive@openssh.com", true, nil); err != nil {
+		t.Fatalf("surviving SSH connection was interrupted: %v", err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		_, _, err := aliceClient.SendRequest("keepalive@openssh.com", true, nil)
+		if err != nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("removed SSH user kept an existing connection")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 func TestSSHInboundApplyReportsPersistentHostIdentity(t *testing.T) {
 	stateDir := filepath.Join(t.TempDir(), "state")
 	runner := newTestSSHRunner(t, Config{StateDir: stateDir})

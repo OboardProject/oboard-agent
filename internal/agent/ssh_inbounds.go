@@ -918,26 +918,6 @@ func (m *sshInboundManager) credentialStateOnlyCompatible(plan model.SSHInboundP
 		if current == nil || current.plan.InboundID != planned.InboundID || current.plan.ServerID != planned.ServerID || current.plan.Name != planned.Name || current.plan.ListenIP != planned.ListenIP || current.plan.Address != planned.Address || current.plan.Port != planned.Port || current.plan.Enabled != planned.Enabled {
 			return false
 		}
-		wanted := sshInboundCredentials(planned.Users)
-		current.authMu.RLock()
-		if len(current.auth) != len(wanted) {
-			current.authMu.RUnlock()
-			return false
-		}
-		compatible := true
-		for username, expected := range wanted {
-			actual, ok := current.auth[username]
-			actual.credentialStatus = ""
-			expected.credentialStatus = ""
-			if !ok || actual != expected {
-				compatible = false
-				break
-			}
-		}
-		current.authMu.RUnlock()
-		if !compatible {
-			return false
-		}
 	}
 	return enabled == len(m.listeners)
 }
@@ -955,11 +935,33 @@ func (m *sshInboundManager) applyCredentialStates(plan model.SSHInboundPlan) {
 		}
 		wanted := sshInboundCredentials(planned.Users)
 		current.authMu.Lock()
-		for username, credential := range wanted {
-			current.auth[username] = credential
-		}
+		current.auth = wanted
 		current.plan = planned
 		current.authMu.Unlock()
+		m.ensureSSHInboundCounters(current, planned)
+	}
+}
+
+func (m *sshInboundManager) ensureSSHInboundCounters(inbound *managedSSHInbound, planned model.SSHInbound) {
+	if inbound == nil {
+		return
+	}
+	if inbound.counters == nil {
+		inbound.counters = map[int64]*sshInboundCounter{}
+	}
+	if m.usage == nil {
+		m.usage = map[int64]*sshInboundUserUsage{}
+	}
+	for _, user := range planned.Users {
+		if !user.Enabled || inbound.counters[user.UserID] != nil {
+			continue
+		}
+		usage := m.usage[user.UserID]
+		if usage == nil {
+			usage = &sshInboundUserUsage{periods: map[string]*sshInboundUsagePeriod{}}
+			m.usage[user.UserID] = usage
+		}
+		inbound.counters[user.UserID] = &sshInboundCounter{epoch: newTrafficCounterEpoch(), usage: usage}
 	}
 }
 

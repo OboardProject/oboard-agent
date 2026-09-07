@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"strings"
 
 	"github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/authorization"
 
@@ -23,6 +24,11 @@ type RuntimeMetadata struct {
 	Authorization   *authorization.Lease    `json:"authorization,omitempty"`
 	RateLimits      RuntimeRateLimits       `json:"rate_limits,omitempty"`
 	ConnectionAudit *RuntimeConnectionAudit `json:"connection_audit,omitempty"`
+	RuntimeUsers    *RuntimeUsersMeta       `json:"runtime_users,omitempty"`
+}
+
+type RuntimeUsersMeta struct {
+	Inbounds []string `json:"inbounds,omitempty"`
 }
 
 type RuntimeConnectionAudit struct {
@@ -84,7 +90,52 @@ func LoadConfig(path string, tuning HY2Tuning) (option.Options, RuntimeMetadata,
 		opts.Log.Level = "warn"
 	}
 	ApplyHY2Tuning(&opts, tuning)
+	prepareRuntimeUserInbounds(&opts, metadata)
 	return opts, metadata, nil
+}
+
+// prepareRuntimeUserInbounds forces declared runtime-managed listeners onto
+// the adapter path that can accept a later /users/install. Shadowsocks empty
+// user tables unmarshal as nil (omitempty), which would otherwise construct
+// a single-user inbound that cannot be updated.
+func prepareRuntimeUserInbounds(opts *option.Options, metadata RuntimeMetadata) {
+	if opts == nil || metadata.RuntimeUsers == nil {
+		return
+	}
+	declared := map[string]struct{}{}
+	for _, tag := range metadata.RuntimeUsers.Inbounds {
+		tag = strings.TrimSpace(tag)
+		if tag != "" {
+			declared[tag] = struct{}{}
+		}
+	}
+	if len(declared) == 0 {
+		return
+	}
+	for i := range opts.Inbounds {
+		if _, ok := declared[opts.Inbounds[i].Tag]; !ok {
+			continue
+		}
+		switch opts.Inbounds[i].Type {
+		case "shadowsocks":
+			ss, ok := opts.Inbounds[i].Options.(*option.ShadowsocksInboundOptions)
+			if !ok || ss == nil {
+				continue
+			}
+			if len(ss.Users) == 0 {
+				ss.Users = nil
+				ss.Managed = true
+			}
+		case "snell":
+			snell, ok := opts.Inbounds[i].Options.(*option.SnellInboundOptions)
+			if !ok || snell == nil {
+				continue
+			}
+			if snell.Users == nil {
+				snell.Users = []option.SnellUser{}
+			}
+		}
+	}
 }
 
 func splitRuntimeMetadata(data []byte) ([]byte, RuntimeMetadata, error) {
