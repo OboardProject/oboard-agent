@@ -2,12 +2,15 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"math"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -155,6 +158,76 @@ func TestTimeCheckKeepsEffectiveOffsetWhenCorrectionIsNotNeeded(t *testing.T) {
 		if result.Status != "ok" || result.RawOffsetMS != 12_000 || result.EffectiveOffsetMS != 12_000 || result.LogicalTimeActive {
 			t.Fatalf("mode %s result = %#v", mode, result)
 		}
+	}
+}
+
+func TestTimeCheckConfigFailureAndRecovery(t *testing.T) {
+	for _, failure := range []struct {
+		name string
+		err  error
+	}{
+		{"bind-mounted config", syscall.EBUSY},
+		{"permission denied", os.ErrPermission},
+	} {
+		t.Run(failure.name, func(t *testing.T) {
+			var queries atomic.Int32
+			withNTPQueryStub(t, func(context.Context, string) (time.Duration, error) {
+				queries.Add(1)
+				return -13 * time.Millisecond, nil
+			})
+			cfg := Config{StateDir: t.TempDir(), ConfigPath: filepath.Join(t.TempDir(), "config.json"), TimeCorrectionMode: model.TimeCorrectionOff, TimeSyncCommand: "none", ResourceProfile: "large"}
+			if err := SaveConfig(cfg.ConfigPath, cfg); err != nil {
+				t.Fatal(err)
+			}
+			runner := New(cfg)
+			previousSave := saveTimeCorrectionConfig
+			t.Cleanup(func() { saveTimeCorrectionConfig = previousSave })
+			saveTimeCorrectionConfig = func(path string, _ Config) error {
+				return &os.LinkError{Op: "rename", Old: path + ".tmp", New: path, Err: failure.err}
+			}
+			plan := model.TimeCheckPlan{CorrectionMode: model.TimeCorrectionNTP, NTPServers: []string{"one.example", "two.example", "three.example"}}
+			payload, err := json.Marshal(plan)
+			if err != nil {
+				t.Fatal(err)
+			}
+			task := model.AgentTask{Type: model.AgentTaskTypeCheckTime, PayloadJSON: string(payload)}
+			status, raw := runner.executeAgentTask(task)
+			var result model.TimeCheckResult
+			if err := json.Unmarshal([]byte(raw), &result); err != nil {
+				t.Fatal(err)
+			}
+			if status != "failed" || result.Status != model.TimeCheckStatusConfigError || !strings.Contains(result.Error, failure.err.Error()) {
+				t.Fatalf("config failure = %s %s", status, raw)
+			}
+			if queries.Load() != 0 || result.Source != "" || runner.Config().TimeCorrectionMode != model.TimeCorrectionOff || runner.clock.Snapshot().Enabled {
+				t.Fatalf("config failure changed clock/mode or measured time: result=%#v queries=%d", result, queries.Load())
+			}
+			saved, err := LoadConfig(cfg.ConfigPath)
+			if err != nil || saved.TimeCorrectionMode != model.TimeCorrectionOff {
+				t.Fatalf("persisted mode after failure = %s, err=%v", saved.TimeCorrectionMode, err)
+			}
+
+			saveTimeCorrectionConfig = previousSave
+			status, raw = runner.executeAgentTask(task)
+			result = model.TimeCheckResult{}
+			if err := json.Unmarshal([]byte(raw), &result); err != nil {
+				t.Fatal(err)
+			}
+			if status != "succeeded" || result.Status != "ok" || result.RawOffsetMS != -13 || result.EffectiveOffsetMS != -13 || result.Error != "" || queries.Load() != 3 {
+				t.Fatalf("writable config recovery = %s %s, queries=%d", status, raw, queries.Load())
+			}
+			saved, err = LoadConfig(cfg.ConfigPath)
+			if err != nil || saved.TimeCorrectionMode != model.TimeCorrectionNTP || runner.Config().TimeCorrectionMode != model.TimeCorrectionNTP {
+				t.Fatalf("persisted mode after recovery = %s, err=%v", saved.TimeCorrectionMode, err)
+			}
+			saveTimeCorrectionConfig = func(string, Config) error {
+				t.Fatal("unchanged mode must not rewrite config")
+				return failure.err
+			}
+			if status, raw = runner.executeAgentTask(task); status != "succeeded" {
+				t.Fatalf("unchanged mode = %s %s", status, raw)
+			}
+		})
 	}
 }
 

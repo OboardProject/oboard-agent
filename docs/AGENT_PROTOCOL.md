@@ -797,7 +797,19 @@ Result:
 }
 ```
 
-`status` is `ok`, `skewed`, `corrected`, or `unavailable`. Agent persists an
+`status` is `ok`, `skewed`, `corrected`, `unavailable`, or `config_error`.
+`config_error` means the requested correction mode could not be saved before
+measurement (for example, atomic rename over a single-file bind mount returns
+EBUSY). The standalone task fails, and Controller preserves this status and
+`error`, including in deployment step results. No clock measurement or
+correction was attempted; zero offset fields are not measurements. Agent keeps
+the previous in-memory and persisted mode. Use a writable configuration directory
+whose files can be atomically replaced (mount the directory rather than the
+individual config file); Agent never falls back to a non-atomic config overwrite.
+Retry after correcting the configuration storage. An unchanged mode does not
+rewrite the configuration. `unavailable` means the time check could not complete
+and is not evidence of clock skew. Only `skewed` indicates a measured excessive
+offset. Agent persists an
 enabled logical clock in `state_dir/runtime-clock.json` with mode `0600`,
 restores it on startup, and sends it to the local kernel after startup and core
 recovery. Agent HTTPS/WSS TLS and trusted-forward timestamps use this clock.

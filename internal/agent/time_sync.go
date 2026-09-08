@@ -43,6 +43,7 @@ type ntpSample struct {
 }
 
 var queryNTPSource = queryNTP
+var saveTimeCorrectionConfig = SaveConfig
 
 func (r *Runner) runTimeCheckTask(ctx context.Context, plan model.TimeCheckPlan) (model.TimeCheckResult, error) {
 	plan.CorrectionMode = normalizeTimeCorrectionMode(plan.CorrectionMode)
@@ -61,7 +62,8 @@ func (r *Runner) runTimeCheckTask(ctx context.Context, plan model.TimeCheckPlan)
 	}
 	plan.NTPServers = normalizedServers
 	if err := r.persistTimeCorrectionMode(plan.CorrectionMode); err != nil {
-		return model.TimeCheckResult{Status: "unavailable", CorrectionMode: plan.CorrectionMode, CheckedAt: r.clock.Now().UTC(), Error: err.Error()}, err
+		err = fmt.Errorf("保存 Agent 校时配置失败: %w", err)
+		return model.TimeCheckResult{Status: model.TimeCheckStatusConfigError, CorrectionMode: plan.CorrectionMode, CheckedAt: r.clock.Now().UTC(), Error: err.Error()}, err
 	}
 
 	reference, err := r.resolveTimeReference(ctx, plan.NTPServers)
@@ -187,7 +189,7 @@ func (r *Runner) persistTimeCorrectionMode(mode model.TimeCorrectionMode) error 
 	}
 	cfg.TimeCorrectionMode = mode
 	if strings.TrimSpace(cfg.ConfigPath) != "" {
-		if err := SaveConfig(cfg.ConfigPath, cfg); err != nil {
+		if err := saveTimeCorrectionConfig(cfg.ConfigPath, cfg); err != nil {
 			return err
 		}
 	}
