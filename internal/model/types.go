@@ -683,6 +683,14 @@ type PortForwardPlan struct {
 // SSHInboundPlan configures OBoard's deliberately restricted SSH proxy
 // listeners.  It is separate from the core configuration because it is
 // implemented by the Agent, not sing-box.
+type SSHAuthenticationVerification struct {
+	AuthenticationPlanDigest string `json:"authentication_plan_digest"`
+	Version                  int64  `json:"version"`
+	AuthenticationVerified   bool   `json:"authentication_verified"`
+	AuthenticatedUsers       int    `json:"authenticated_users"`
+	RejectedUsers            int    `json:"rejected_users"`
+}
+
 type SSHInboundPlan struct {
 	Version  int64        `json:"version"`
 	Inbounds []SSHInbound `json:"inbounds"`

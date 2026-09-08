@@ -46,7 +46,7 @@ var (
 )
 
 type sshInboundApplyResult struct {
-	Version              int64    `json:"version"`
+	model.SSHAuthenticationVerification
 	Unchanged            bool     `json:"unchanged,omitempty"`
 	RuntimeOnly          bool     `json:"runtime_only,omitempty"`
 	RuntimeReconciled    bool     `json:"runtime_reconciled,omitempty"`
@@ -82,6 +82,7 @@ type managedSSHInbound struct {
 	mu       sync.Mutex
 	conns    map[net.Conn]int64
 	sessions map[*ssh.ServerConn]string
+	probes   map[string]chan sshAuthenticationObservation
 }
 
 type sshInboundCredential struct {
@@ -436,11 +437,38 @@ func (r *Runner) currentSSHDiagnostics() sshDiagnostics {
 	return r.sshDiagnostics(plan)
 }
 
-func (r *Runner) applySSHInbounds(plan model.SSHInboundPlan) (sshInboundApplyResult, error) {
+func (r *Runner) applySSHInbounds(plan model.SSHInboundPlan) (result sshInboundApplyResult, applyErr error) {
 	r.sshInboundLifecycleMu.Lock()
 	defer r.sshInboundLifecycleMu.Unlock()
 
-	result := sshInboundApplyResult{Version: plan.Version}
+	result = sshInboundApplyResult{SSHAuthenticationVerification: model.SSHAuthenticationVerification{Version: plan.Version}}
+	previous, readErr := os.ReadFile(filepath.Join(r.stateDir(), sshInboundsCurrent))
+	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+		return result, readErr
+	}
+	defer func() {
+		if applyErr != nil {
+			return
+		}
+		result.AuthenticatedUsers, result.RejectedUsers, applyErr = r.verifySSHAuthentication(plan)
+		if applyErr == nil {
+			result.AuthenticationVerified = true
+			result.AuthenticationPlanDigest = model.SSHAuthenticationPlanDigest(plan)
+			return
+		}
+		result.Unchanged = false
+		fileErr := restoreSSHInboundPlanFile(filepath.Join(r.stateDir(), sshInboundsCurrent), previous)
+		runtimeErr := r.restoreSSHInboundPlanLocked(previous)
+		var previousPlan model.SSHInboundPlan
+		var policyErr error
+		if len(previous) > 0 {
+			policyErr = json.Unmarshal(previous, &previousPlan)
+		}
+		if runtimeErr == nil && policyErr == nil {
+			policyErr = r.reconcileSSHAndCoreTrafficPolicies(context.Background(), previousPlan)
+		}
+		applyErr = errors.Join(applyErr, fileErr, runtimeErr, policyErr)
+	}()
 	if err := os.MkdirAll(r.stateDir(), 0o700); err != nil {
 		return result, err
 	}
@@ -1227,6 +1255,18 @@ func logSSHAuthFailure(inboundID, userID int64, username, reason string) {
 func (m *managedSSHInbound) handle(raw net.Conn, signer ssh.Signer) {
 	serverConfig := &ssh.ServerConfig{ServerVersion: "SSH-2.0-OBoard-RestrictedSSH"}
 	serverConfig.PasswordCallback = func(metadata ssh.ConnMetadata, password []byte) (*ssh.Permissions, error) {
+		m.mu.Lock()
+		probe := m.probes[metadata.RemoteAddr().String()]
+		m.mu.Unlock()
+		observation := sshAuthenticationObservation{Reason: "credential_mismatch"}
+		if probe != nil {
+			defer func() {
+				select {
+				case probe <- observation:
+				default:
+				}
+			}()
+		}
 		m.authMu.RLock()
 		credential, ok := m.auth[metadata.User()]
 		m.authMu.RUnlock()
@@ -1238,20 +1278,30 @@ func (m *managedSSHInbound) handle(raw net.Conn, signer ssh.Signer) {
 			logSSHAuthFailure(m.plan.InboundID, credential.userID, metadata.User(), "password_mismatch")
 			return nil, errors.New("password is not authorized")
 		}
+		observation.CredentialMatched = true
+		observation.Reason = "authorization_denied"
+		if credential.credentialStatus != "active" {
+			observation.Reason = "credential_inactive"
+		}
 		if !m.credentialAuthorized(credential, false) {
-			m.audit.recordCredentialRejected(connectionAuditSnapshotItem{UserID: credential.userID, InboundID: m.plan.InboundID, PathID: credential.pathID, DeviceIDHash: credential.deviceIDHash, CredentialEpoch: credential.credentialEpoch, SourceIP: sourceIPFromNetAddr(metadata.RemoteAddr()), Network: "tcp"})
+			if probe == nil {
+				m.audit.recordCredentialRejected(connectionAuditSnapshotItem{UserID: credential.userID, InboundID: m.plan.InboundID, PathID: credential.pathID, DeviceIDHash: credential.deviceIDHash, CredentialEpoch: credential.credentialEpoch, SourceIP: sourceIPFromNetAddr(metadata.RemoteAddr()), Network: "tcp"})
+			}
 			logSSHAuthFailure(m.plan.InboundID, credential.userID, metadata.User(), "credential_inactive")
 			return nil, errors.New("password is not authorized")
 		}
 		counter := m.counterFor(credential.userID)
+		observation.Reason = "policy_missing"
 		if counter == nil {
 			logSSHAuthFailure(m.plan.InboundID, credential.userID, metadata.User(), "policy_missing")
 			return nil, errors.New("user traffic quota is exhausted")
 		}
+		observation.Reason = "quota_exhausted"
 		if !counter.allowNewConnection() {
 			logSSHAuthFailure(m.plan.InboundID, credential.userID, metadata.User(), "quota_exhausted")
 			return nil, errors.New("user traffic quota is exhausted")
 		}
+		observation.Reason = ""
 		return &ssh.Permissions{Extensions: map[string]string{
 			"oboard_user_id":       strconv.FormatInt(credential.userID, 10),
 			"oboard_inbound_id":    strconv.FormatInt(m.plan.InboundID, 10),
