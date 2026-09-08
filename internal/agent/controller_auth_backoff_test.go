@@ -2,8 +2,10 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -15,9 +17,10 @@ import (
 // identity that no longer exists.
 func TestControllerRejectionPausesAuthenticatedCallbacks(t *testing.T) {
 	for name, status := range map[string]int{
-		"unauthorized":      http.StatusUnauthorized,
-		"forbidden":         http.StatusForbidden,
-		"too many requests": http.StatusTooManyRequests,
+		"unauthorized":        http.StatusUnauthorized,
+		"forbidden":           http.StatusForbidden,
+		"too many requests":   http.StatusTooManyRequests,
+		"service unavailable": http.StatusServiceUnavailable,
 	} {
 		t.Run(name, func(t *testing.T) {
 			var requests atomic.Int64
@@ -77,5 +80,56 @@ func TestControllerAuthBackoffScopeAndRelease(t *testing.T) {
 	}
 	if wait := runner.controllerAuth.remaining(time.Now()); wait != 0 {
 		t.Fatalf("a successful callback left the pause armed for %s", wait)
+	}
+}
+
+func TestControllerThrottleHonorsRetryAfter(t *testing.T) {
+	var backoff controllerAuthBackoff
+	header := make(http.Header)
+	header.Set("Retry-After", "12")
+	now := time.Now()
+	backoff.armWithResponse(now, http.StatusTooManyRequests, header)
+	wait := backoff.remaining(now)
+	if wait < 12*time.Second || wait > 12*time.Second+controllerThrottleJitterMax+time.Second {
+		t.Fatalf("throttle wait = %s, want about 12s plus jitter", wait)
+	}
+	if backoff.class != "throttle" {
+		t.Fatalf("class = %q, want throttle", backoff.class)
+	}
+}
+
+func TestControllerAuthBackoffGrowsExponentially(t *testing.T) {
+	var backoff controllerAuthBackoff
+	now := time.Now()
+	backoff.armWithResponse(now, http.StatusUnauthorized, nil)
+	first := backoff.remaining(now)
+	// Re-arm without clearing so authStep advances inside one pause window.
+	backoff.armWithResponse(now.Add(time.Millisecond), http.StatusUnauthorized, nil)
+	second := backoff.remaining(now)
+	if first < 20*time.Second {
+		t.Fatalf("first auth backoff = %s", first)
+	}
+	if second <= first {
+		t.Fatalf("auth backoff did not grow: first=%s second=%s", first, second)
+	}
+}
+
+func TestUpdateAgentConfigClearsControllerBackoff(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.json")
+	runner := New(Config{ControllerURL: "http://127.0.0.1:9", AgentID: "agent-1", AgentToken: "tok", StateDir: dir, ConfigPath: cfgPath})
+	if err := SaveConfig(cfgPath, runner.Config()); err != nil {
+		t.Fatal(err)
+	}
+	runner.controllerAuth.armWithResponse(time.Now(), http.StatusUnauthorized, nil)
+	if runner.controllerAuth.remaining(time.Now()) == 0 {
+		t.Fatal("expected auth pause")
+	}
+	fields := map[string]json.RawMessage{"controller_url": json.RawMessage(`"http://127.0.0.1:9"`)}
+	if _, err := runner.updateAgentConfig(runner.Config(), fields); err != nil {
+		t.Fatal(err)
+	}
+	if wait := runner.controllerAuth.remaining(time.Now()); wait != 0 {
+		t.Fatalf("config update left auth pause armed for %s", wait)
 	}
 }

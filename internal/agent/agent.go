@@ -1792,6 +1792,9 @@ func (r *Runner) updateAgentConfig(patch Config, fields map[string]json.RawMessa
 		return map[string]any{"message": "agent config update failed", "path": path}, err
 	}
 	r.storeConfig(next)
+	// A repaired controller URL / identity must be allowed to retry immediately
+	// instead of waiting out a stale auth or throttle pause.
+	r.controllerAuth.clear()
 	if coreIdentityChanged {
 		r.mu.Lock()
 		r.coreBinaryCache = ""
@@ -2988,7 +2991,7 @@ func (r *Runner) controllerJSON(ctx context.Context, method, path string, header
 	}
 	if auth {
 		if isControllerAuthRejection(resp.StatusCode) {
-			r.controllerAuth.armWithStatus(time.Now(), resp.StatusCode)
+			r.controllerAuth.armWithResponse(time.Now(), resp.StatusCode, resp.Header)
 		} else if resp.StatusCode < 300 {
 			r.controllerAuth.clear()
 		}
