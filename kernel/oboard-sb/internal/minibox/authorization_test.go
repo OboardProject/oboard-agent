@@ -63,10 +63,7 @@ func TestAuthorizationExpiryClosesConnectionsAndPolicyCannotRegrant(t *testing.T
 	}
 }
 
-// Authorization revocation is not a quota action: a revoked grant closes an
-// already admitted connection even when the quota policy would keep it under
-// reject_new, and a quota reject_new never closes a still-authorized one.
-func TestAuthorizationRevocationOverridesQuotaRejectNew(t *testing.T) {
+func TestAuthorizationRevocationClosesConnectionWithinQuota(t *testing.T) {
 	now := time.Now().UTC()
 	lease := &authorization.Lease{Revision: 1, IssuedAt: now.Format(time.RFC3339Nano), Grants: map[string]string{"installed": now.Add(time.Minute).Format(time.RFC3339Nano)}}
 	tracker := newRateLimitTracker(RuntimeMetadata{Authorization: lease, RateLimits: RuntimeRateLimits{Users: map[string]RuntimeUserLimit{
@@ -75,17 +72,14 @@ func TestAuthorizationRevocationOverridesQuotaRejectNew(t *testing.T) {
 	client, server := net.Pipe()
 	defer client.Close()
 	admitted := baseTrackedConn(tracker.RoutedConnection(context.Background(), server, adapter.InboundContext{User: "opaque"}, nil, nil))
-	tracker.UpdatePolicies(map[string]RuntimeUserLimit{
-		"user:7": {UserID: 7, AuthorizationKey: "installed", Billable: true, TrafficLimitBytes: 100, QuotaState: "quota_exceeded", EnforcementMode: "reject_new"},
-	})
 	if admitted.closed.Load() {
-		t.Fatal("quota reject_new closed a still-authorized connection")
+		t.Fatal("unexhausted quota closed a still-authorized connection")
 	}
 	if err := tracker.UpdateAuthorization(&authorization.Lease{Revision: 2, IssuedAt: now.Add(time.Second).Format(time.RFC3339Nano), Grants: map[string]string{}}); err != nil {
 		t.Fatal(err)
 	}
 	if !admitted.closed.Load() {
-		t.Fatal("revoked authorization left an admitted connection open under quota reject_new")
+		t.Fatal("revoked authorization left an admitted connection open within quota")
 	}
 }
 

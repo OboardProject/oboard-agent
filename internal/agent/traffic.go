@@ -640,7 +640,7 @@ func (r *Runner) reportTrafficLedger(ctx context.Context, state *trafficLocalSta
 	if err := r.saveTrafficState(*state); err != nil {
 		return err
 	}
-	policies := applyConservativeTrafficPolicies(resp.Policies, state)
+	policies := applyStaleLeasePolicies(resp.Policies, state)
 	typed := trafficPoliciesFromWire(policies)
 	revision := resp.PolicyRevision
 	if revision == 0 {
@@ -1439,42 +1439,6 @@ func trafficRangeReportID(agentID string, report *trafficPendingRange) string {
 	payload := fmt.Sprintf("range\x00%s\x00%s\x00%s\x00%s\x00%d\x00%d\x00%d\x00%d", agentID, report.StreamID, report.CounterEpoch, report.PeriodKey, report.FromUpload, report.ToUpload, report.FromDownload, report.ToDownload)
 	sum := sha256.Sum256([]byte(payload))
 	return "tr_" + base64.RawURLEncoding.EncodeToString(sum[:])
-}
-
-func applyConservativeTrafficPolicies(policies map[string]interface{}, state *trafficLocalState) map[string]interface{} {
-	policies = applyStaleLeasePolicies(policies, state)
-	if state == nil || len(policies) == 0 {
-		return policies
-	}
-	blocked := map[int64]bool{}
-	for _, stream := range state.Streams {
-		if stream == nil {
-			continue
-		}
-		switch stream.Status {
-		case trafficStatusCounterRegression, trafficStatusCheckpointGap, trafficStatusCheckpointOverlap, trafficStatusEpochConflict, trafficStatusStateCorrupt:
-			blocked[stream.UserID] = true
-		}
-	}
-	if len(blocked) == 0 {
-		return policies
-	}
-	out := map[string]interface{}{}
-	for key, raw := range policies {
-		encoded, err := json.Marshal(raw)
-		if err != nil {
-			out[key] = raw
-			continue
-		}
-		var policy model.TrafficRuntimePolicy
-		if json.Unmarshal(encoded, &policy) != nil || !blocked[policy.UserID] || policy.TrafficLimitBytes <= 0 {
-			out[key] = raw
-			continue
-		}
-		policy.EnforcementMode = "reject_new"
-		out[key] = policy
-	}
-	return out
 }
 
 func applyStaleLeasePolicies(policies map[string]interface{}, state *trafficLocalState) map[string]interface{} {

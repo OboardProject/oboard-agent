@@ -893,7 +893,6 @@ type UsersRuntimePolicy struct {
 	ResetDay          int    `json:"reset_day,omitempty"`
 	Timezone          string `json:"timezone,omitempty"`
 	QuotaState        string `json:"quota_state,omitempty"`
-	EnforcementMode   string `json:"enforcement_mode,omitempty"`
 }
 
 type UsersAppliedSnapshot struct {
@@ -1343,7 +1342,6 @@ type TrafficRuntimePolicy struct {
 	PreviousPeriodKey string `json:"previous_period_key,omitempty"`
 	Timezone          string `json:"timezone,omitempty"`
 	QuotaState        string `json:"quota_state,omitempty"`
-	EnforcementMode   string `json:"enforcement_mode,omitempty"`
 	PolicyRevision    int64  `json:"policy_revision,omitempty"`
 }
 

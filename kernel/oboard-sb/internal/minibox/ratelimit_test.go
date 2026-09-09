@@ -282,7 +282,7 @@ func TestExpiredRuntimePolicyResetsCountersOnlyOnce(t *testing.T) {
 
 func TestZeroOfflineLeaseRejectsNewBillableTraffic(t *testing.T) {
 	tracker := authorizedQuotaFixture(RuntimeMetadata{RateLimits: RuntimeRateLimits{Users: map[string]RuntimeUserLimit{
-		"alice": {UserID: 7, Billable: true, TrafficLimitBytes: 100, UsedBaselineBytes: 50, LeaseBytes: 0, LeaseEnforced: true, QuotaState: "active", EnforcementMode: "reject_new"},
+		"alice": {UserID: 7, Billable: true, TrafficLimitBytes: 100, UsedBaselineBytes: 50, LeaseBytes: 0, LeaseEnforced: true, QuotaState: "active"},
 	}}})
 	state := tracker.stateForKey("user:alice")
 	if !state.denied() {
@@ -305,7 +305,7 @@ func TestZeroOfflineLeaseStillHonorsGlobalQuotaAndExceededState(t *testing.T) {
 		t.Fatal("empty lease must still deny once the global quota is consumed")
 	}
 	marked := authorizedQuotaFixture(RuntimeMetadata{RateLimits: RuntimeRateLimits{Users: map[string]RuntimeUserLimit{
-		"alice": {UserID: 7, Billable: true, TrafficLimitBytes: 100, UsedBaselineBytes: 4, LeaseEnforced: true, QuotaState: "quota_exceeded", EnforcementMode: "disconnect_and_reject"},
+		"alice": {UserID: 7, Billable: true, TrafficLimitBytes: 100, UsedBaselineBytes: 4, LeaseEnforced: true, QuotaState: "quota_exceeded"},
 	}}})
 	if !marked.stateForKey("user:alice").denied() {
 		t.Fatal("quota_exceeded must still deny even when the remaining lease is empty")
@@ -322,7 +322,7 @@ func TestZeroOfflineLeaseStillHonorsGlobalQuotaAndExceededState(t *testing.T) {
 
 func TestZeroLeaseIsEnforcedBelowGlobalQuota(t *testing.T) {
 	tracker := authorizedQuotaFixture(RuntimeMetadata{RateLimits: RuntimeRateLimits{Users: map[string]RuntimeUserLimit{
-		"alice": {UserID: 7, Billable: true, TrafficLimitBytes: 100, UsedBaselineBytes: 50, LeaseBytes: 0, LeaseEnforced: true, QuotaState: "active", EnforcementMode: "reject_new"},
+		"alice": {UserID: 7, Billable: true, TrafficLimitBytes: 100, UsedBaselineBytes: 50, LeaseBytes: 0, LeaseEnforced: true, QuotaState: "active"},
 	}}})
 	state := tracker.stateForKey("user:alice")
 	if !state.denied() {
@@ -331,8 +331,8 @@ func TestZeroLeaseIsEnforcedBelowGlobalQuota(t *testing.T) {
 	if !state.deniedForConnection(false) {
 		t.Fatal("limited user with lease=0 must reject a new connection")
 	}
-	if state.deniedForConnection(true) {
-		t.Fatal("reject_new default must keep an already admitted connection")
+	if !state.deniedForConnection(true) {
+		t.Fatal("empty lease must deny an already admitted connection")
 	}
 }
 
@@ -399,14 +399,14 @@ func TestQuotaPolicyDisconnectsExistingConnection(t *testing.T) {
 	defer client.Close()
 	wrapped := baseTrackedConn(tracker.RoutedConnection(context.Background(), server, adapter.InboundContext{User: "alice"}, nil, nil))
 	tracker.UpdatePolicies(map[string]RuntimeUserLimit{
-		"user:7": {UserID: 7, Billable: true, TrafficLimitBytes: 100, QuotaState: "quota_exceeded", EnforcementMode: "disconnect"},
+		"user:7": {UserID: 7, Billable: true, TrafficLimitBytes: 100, QuotaState: "quota_exceeded"},
 	})
 	if !wrapped.closed.Load() {
 		t.Fatal("disconnect policy should close an existing connection")
 	}
 }
 
-func TestRejectNewPolicyKeepsExistingConnectionAndRejectsNewOne(t *testing.T) {
+func TestQuotaExhaustionClosesExistingConnectionAndRejectsNewOne(t *testing.T) {
 	tracker := authorizedQuotaFixture(RuntimeMetadata{RateLimits: RuntimeRateLimits{Users: map[string]RuntimeUserLimit{
 		"alice": {UserID: 7, Billable: true, TrafficLimitBytes: 100},
 	}}})
@@ -414,17 +414,17 @@ func TestRejectNewPolicyKeepsExistingConnectionAndRejectsNewOne(t *testing.T) {
 	defer client.Close()
 	existing := baseTrackedConn(tracker.RoutedConnection(context.Background(), server, adapter.InboundContext{User: "alice"}, nil, nil))
 	tracker.UpdatePolicies(map[string]RuntimeUserLimit{
-		"user:7": {UserID: 7, Billable: true, TrafficLimitBytes: 100, QuotaState: "quota_exceeded", EnforcementMode: "reject_new"},
+		"user:7": {UserID: 7, Billable: true, TrafficLimitBytes: 100, QuotaState: "quota_exceeded"},
 	})
-	if existing.closed.Load() || existing.deny() {
-		t.Fatal("reject_new should preserve an already admitted connection")
+	if !existing.closed.Load() || !existing.deny() {
+		t.Fatal("quota exhaustion must close an already admitted connection")
 	}
 
 	newClient, newServer := net.Pipe()
 	defer newClient.Close()
 	newConnection := baseTrackedConn(tracker.RoutedConnection(context.Background(), newServer, adapter.InboundContext{User: "alice"}, nil, nil))
 	if !newConnection.closed.Load() || !newConnection.deny() {
-		t.Fatal("reject_new should close a connection created after quota exhaustion")
+		t.Fatal("quota exhaustion must reject a new connection")
 	}
 	_ = existing.Close()
 }
@@ -437,6 +437,26 @@ func baseTrackedConn(conn net.Conn) *trackedConn {
 		return typed.trackedConn
 	default:
 		panic("unexpected tracked connection type")
+	}
+}
+
+func TestLocalLeaseExhaustionClosesPacketConnection(t *testing.T) {
+	tracker := authorizedQuotaFixture(RuntimeMetadata{RateLimits: RuntimeRateLimits{Users: map[string]RuntimeUserLimit{
+		"alice": {UserID: 7, Billable: true, TrafficLimitBytes: 100, LeaseBytes: 4, LeaseEnforced: true},
+	}}})
+	packet := &testPacketConn{consumeWrite: true}
+	existing := tracker.RoutedPacketConnection(context.Background(), packet, adapter.InboundContext{User: "alice"}, nil, nil).(*trackedPacketConn)
+	payload := buf.As([]byte("data"))
+	defer payload.Release()
+	if err := existing.WritePacket(payload, M.Socksaddr{}); err != nil {
+		t.Fatal(err)
+	}
+	if !existing.closed.Load() || !existing.deny() {
+		t.Fatal("local lease exhaustion must close admitted UDP traffic without a Controller update")
+	}
+	fresh := tracker.RoutedPacketConnection(context.Background(), &testPacketConn{}, adapter.InboundContext{User: "alice"}, nil, nil).(*trackedPacketConn)
+	if !fresh.closed.Load() || !fresh.deny() {
+		t.Fatal("local lease exhaustion must reject new UDP traffic")
 	}
 }
 

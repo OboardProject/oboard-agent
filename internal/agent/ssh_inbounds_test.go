@@ -456,14 +456,14 @@ func TestEmptySSHInboundPlanRestoresFullCoreLease(t *testing.T) {
 	}
 }
 
-func TestSSHInboundRejectNewPreservesExistingTransfers(t *testing.T) {
+func TestSSHInboundQuotaExhaustionRejectsConnectionsAndTransfers(t *testing.T) {
 	counter := &sshInboundCounter{}
-	counter.setPolicy(model.TrafficRuntimePolicy{UserID: 7, Billable: true, QuotaState: "quota_exceeded", EnforcementMode: "reject_new"})
+	counter.setPolicy(model.TrafficRuntimePolicy{UserID: 7, Billable: true, QuotaState: "quota_exceeded"})
 	if counter.allowNewConnection() {
-		t.Fatal("reject_new accepted a new SSH connection after quota exhaustion")
+		t.Fatal("quota exhaustion accepted a new SSH connection")
 	}
-	if !counter.allowTransfer() {
-		t.Fatal("reject_new interrupted an already admitted SSH transfer")
+	if counter.allowTransfer() {
+		t.Fatal("quota exhaustion allowed an already admitted SSH transfer")
 	}
 }
 
@@ -474,10 +474,10 @@ func TestSSHInboundDisconnectPolicyClosesExistingUserConnection(t *testing.T) {
 	counter.setPolicy(model.TrafficRuntimePolicy{UserID: 7, InboundID: 17, Billable: true})
 	inbound := &managedSSHInbound{plan: model.SSHInbound{InboundID: 17}, counters: map[int64]*sshInboundCounter{7: counter}, conns: map[net.Conn]int64{server: 7}}
 	manager := &sshInboundManager{listeners: map[int64]*managedSSHInbound{17: inbound}}
-	manager.updatePolicies(map[string]interface{}{"user:7": model.TrafficRuntimePolicy{UserID: 7, InboundID: 17, Billable: true, QuotaState: "quota_exceeded", EnforcementMode: "disconnect_and_reject"}}, nil)
+	manager.updatePolicies(map[string]interface{}{"user:7": model.TrafficRuntimePolicy{UserID: 7, InboundID: 17, Billable: true, QuotaState: "quota_exceeded"}}, nil)
 	_ = client.SetWriteDeadline(time.Now().Add(time.Second))
 	if _, err := client.Write([]byte("closed")); err == nil {
-		t.Fatal("disconnect_and_reject left the existing SSH connection open")
+		t.Fatal("quota exhaustion left the existing SSH connection open")
 	}
 }
 

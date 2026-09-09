@@ -1636,8 +1636,8 @@ is accounted in the migrated target period.
 States with the same `user_id` share one quota inside core or
 inside the SSH manager. If both runtimes serve the same user on one Agent, the
 Agent partitions the server lease between them; the shares sum to the
-Controller allocation. `reject_new` preserves admitted connections, while
-`disconnect_and_reject` closes them and rejects new authentication.
+Controller allocation. Quota or local lease exhaustion always closes admitted
+connections and rejects new authentication. There is no enforcement-mode field.
 
 ### `POST /api/v1/agent/connection-reports`
 

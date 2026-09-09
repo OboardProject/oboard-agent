@@ -64,7 +64,6 @@ type RuntimeUserLimit struct {
 	PreviousPeriodKey string `json:"previous_period_key,omitempty"`
 	Timezone          string `json:"timezone,omitempty"`
 	QuotaState        string `json:"quota_state,omitempty"`
-	EnforcementMode   string `json:"enforcement_mode,omitempty"`
 }
 
 func LoadConfig(path string, tuning HY2Tuning) (option.Options, RuntimeMetadata, error) {

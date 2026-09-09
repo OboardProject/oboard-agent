@@ -399,9 +399,8 @@ func (s *runtimeState) authorizationRevokedFor(identity connectionIdentity) bool
 	return identity.authorizationKey != "" && p.AuthorizationKey != "" && (identity.authorizationKey != p.AuthorizationKey || (identity.credentialEpoch > 0 && p.CredentialEpoch > 0 && identity.credentialEpoch != p.CredentialEpoch))
 }
 
-// quotaDeniedFor is the quota/credential-status verdict. reject_new keeps an
-// already admitted connection open; only disconnect_and_reject or a revoked
-// credential status closes it.
+// quotaDeniedFor preserves admitted sessions for credential-only rejection,
+// but quota exhaustion always denies both admission and existing traffic.
 func (s *runtimeState) quotaDeniedFor(admitted bool) bool {
 	config := s.currentConfig()
 	switch normalizeCredentialStatus(config.policy.CredentialStatus) {
@@ -411,10 +410,7 @@ func (s *runtimeState) quotaDeniedFor(admitted bool) bool {
 	default:
 		return true
 	}
-	if !runtimeConfigDenied(config, s.unacknowledged(config)) {
-		return false
-	}
-	return config.policy.EnforcementMode != "reject_new" || !admitted
+	return runtimeConfigDenied(config, s.unacknowledged(config))
 }
 
 func (s *runtimeState) deniedForConnection(admitted bool) bool {

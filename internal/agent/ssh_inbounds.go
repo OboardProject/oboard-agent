@@ -1738,9 +1738,6 @@ func agentClampedMonthDay(year int, month time.Month, day int) int {
 
 func (c *sshInboundCounter) allowNewConnection() bool { return !c.quotaExceeded() }
 func (c *sshInboundCounter) allowTransfer() bool {
-	if c.currentPolicy().EnforcementMode == "reject_new" {
-		return true
-	}
 	return !c.quotaExceeded()
 }
 
@@ -1917,7 +1914,7 @@ func (m *sshInboundManager) updatePolicies(policies map[string]interface{}, ackn
 			}
 			if counter := inbound.counterFor(policy.UserID); counter != nil {
 				counter.setPolicy(policy)
-				if policy.EnforcementMode != "reject_new" && counter.quotaExceeded() {
+				if counter.quotaExceeded() {
 					inbound.closeUserConnections(policy.UserID)
 				}
 			}
