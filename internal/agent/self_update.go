@@ -347,7 +347,19 @@ func releaseHTTPClient(base *http.Client, requireHTTPS bool) *http.Client {
 }
 
 func downloadReleaseAsset(ctx context.Context, client *http.Client, rawURL, path string, maxBytes int64, expected *security.ReleaseManifestFile) error {
-	return downloadReleaseAssetWithPolicy(ctx, client, rawURL, path, maxBytes, expected, defaultReleaseDownloadPolicy)
+	err := downloadReleaseAssetWithPolicy(ctx, client, rawURL, path, maxBytes, expected, defaultReleaseDownloadPolicy)
+	if err == nil || expected == nil || ctx.Err() != nil {
+		return err
+	}
+	u, parseErr := url.Parse(rawURL)
+	if parseErr != nil || !strings.Contains(u.Path, "/downloads/") || u.Query().Get("source") == "controller" {
+		return err
+	}
+	query := u.Query()
+	query.Set("source", "controller")
+	u.RawQuery = query.Encode()
+	_ = os.Remove(path)
+	return downloadReleaseAssetWithPolicy(ctx, client, u.String(), path, maxBytes, expected, defaultReleaseDownloadPolicy)
 }
 
 func downloadReleaseAssetWithPolicy(ctx context.Context, client *http.Client, rawURL, path string, maxBytes int64, expected *security.ReleaseManifestFile, policy releaseDownloadPolicy) error {

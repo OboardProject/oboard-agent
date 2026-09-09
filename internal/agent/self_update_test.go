@@ -70,7 +70,7 @@ func TestDownloadAndInstallSignedRelease(t *testing.T) {
 		mu.Lock()
 		requested = append(requested, r.URL.Path)
 		mu.Unlock()
-		body, ok := assets[r.URL.Path]
+		body, ok := assets[strings.TrimPrefix(r.URL.Path, "/hidden/downloads/github")]
 		if !ok {
 			http.NotFound(w, r)
 			return
@@ -86,7 +86,7 @@ func TestDownloadAndInstallSignedRelease(t *testing.T) {
 	if err := os.WriteFile(targets.Core, []byte("old-core"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	got, err := downloadAndInstallSignedRelease(context.Background(), server.Client(), server.URL, manifest.Repo, manifest.Build, targets)
+	got, err := downloadAndInstallSignedRelease(context.Background(), server.Client(), server.URL+"/hidden/downloads/github", manifest.Repo, manifest.Build, targets)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +108,7 @@ func TestDownloadAndInstallSignedRelease(t *testing.T) {
 		t.Fatalf("requested paths = %#v", gotPaths)
 	}
 	for i := range wantPaths {
-		if gotPaths[i] != wantPaths[i] {
+		if gotPaths[i] != "/hidden/downloads/github"+wantPaths[i] {
 			t.Fatalf("requested paths = %#v", gotPaths)
 		}
 	}
@@ -625,4 +625,93 @@ func TestPreflightStagedCoreSkipsWhenBinaryCannotRun(t *testing.T) {
 	if state != corePreflightSkipped || note == "" {
 		t.Fatalf("preflight state = %q note = %q", state, note)
 	}
+}
+
+func TestDownloadReleaseAssetFallsBackToControllerWithSignedChecksum(t *testing.T) {
+	data := []byte("pinned-controller-binary")
+	expected := security.ReleaseManifestFile{SHA256: sha256Hex(data), Size: int64(len(data))}
+	for _, validFallback := range []bool{true, false} {
+		t.Run(fmt.Sprint(validFallback), func(t *testing.T) {
+			var fallbackRequests atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/hidden/downloads/github/oboard-agent-linux-amd64" {
+					t.Errorf("unexpected path %s", r.URL.Path)
+				}
+				if r.URL.Query().Get("source") != "controller" {
+					http.Error(w, "GitHub resource unavailable", http.StatusNotFound)
+					return
+				}
+				fallbackRequests.Add(1)
+				if validFallback {
+					_, _ = w.Write(data)
+				} else {
+					_, _ = w.Write([]byte("wrong-version"))
+				}
+			}))
+			defer server.Close()
+			path := filepath.Join(t.TempDir(), "agent")
+			err := downloadReleaseAsset(context.Background(), server.Client(), server.URL+"/hidden/downloads/github/oboard-agent-linux-amd64", path, 1024, &expected)
+			if (err == nil) != validFallback {
+				t.Fatalf("fallback error = %v", err)
+			}
+			if fallbackRequests.Load() == 0 {
+				t.Fatal("did not retry Controller directly")
+			}
+			if validFallback {
+				assertFileContent(t, path, data)
+			}
+		})
+	}
+}
+
+func TestGitHubUpdateUsesControllerPinnedManifest(t *testing.T) {
+	oldExecutable, oldKey := osExecutable, version.ReleasePublicKey
+	t.Cleanup(func() { osExecutable, version.ReleasePublicKey = oldExecutable, oldKey })
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	version.ReleasePublicKey = base64.RawStdEncoding.EncodeToString(pub)
+	manifest := security.ReleaseManifest{Version: "dev-012345abcdef", Build: "20260909010101", Repo: defaultUpdateRepo}
+	signature, err := security.SignReleaseManifest(manifest, base64.RawStdEncoding.EncodeToString(priv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := security.CanonicalReleaseManifest(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var paths atomic.Int32
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		paths.Add(1)
+		switch req.URL.Path {
+		case "/hidden/downloads/github/release-manifest.json":
+			_, _ = w.Write(body)
+		case "/hidden/downloads/github/release-manifest.json.sig":
+			_, _ = w.Write([]byte(signature))
+		default:
+			t.Errorf("unexpected release request: %s", req.URL)
+			http.NotFound(w, req)
+		}
+	}))
+	defer server.Close()
+	dir := t.TempDir()
+	agentPath, corePath := filepath.Join(dir, "oboard-agent"), filepath.Join(dir, "oboard-sb")
+	if err := os.WriteFile(agentPath, []byte("old-agent"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(corePath, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	osExecutable = func() (string, error) { return agentPath, nil }
+	r := New(Config{ControllerURL: server.URL + "/hidden", StateDir: filepath.Join(dir, "state"), CoreBinary: corePath, UpdateSource: "github"})
+	r.client = server.Client()
+	result, err := r.updateAgentBinary(`{"source":"github","expected_build":"20260909020202"}`)
+	if err == nil || !strings.Contains(err.Error(), "does not match expected build") || result["installed"] == true {
+		t.Fatalf("accepted mismatched Controller build: %#v, %v", result, err)
+	}
+	if paths.Load() != 2 {
+		t.Fatalf("manifest requests = %v", paths.Load())
+	}
+	assertFileContent(t, agentPath, []byte("old-agent"))
 }

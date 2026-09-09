@@ -1536,10 +1536,10 @@ func (r *Runner) updateAgentBinary(payloadJSON string) (map[string]any, error) {
 		}
 		releaseBaseURL = controllerURL + "/downloads"
 	case "github":
-		if repo == "" {
-			return map[string]any{"message": "agent update failed", "source": source}, errors.New("github repo missing")
+		if _, err := security.ValidateControllerURL(controllerURL, version.IsDev(), r.Config().AllowInsecureController); err != nil {
+			return map[string]any{"message": "agent update failed", "source": source}, err
 		}
-		releaseBaseURL = "https://github.com/" + repo + "/releases/latest/download"
+		releaseBaseURL = controllerURL + "/downloads/github"
 	default:
 		return map[string]any{"message": "agent update failed", "source": source}, fmt.Errorf("unsupported update source %q", source)
 	}

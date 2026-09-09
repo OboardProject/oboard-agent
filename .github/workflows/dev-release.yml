@@ -63,6 +63,8 @@ jobs:
           for asset in "${assets[@]}"; do
             test -f "$asset" || { echo "Release asset $asset declared by the manifest is missing" >&2; exit 1; }
           done
+          resource_tag=$(python3 -c 'import json; m=json.load(open("dist/release/release-manifest.json")); print(m["version"] + "-" + m["build"])')
+          gh release create "$resource_tag" "${assets[@]}" --title "OBoard Agent $resource_tag" --prerelease --latest=false --target "$GITHUB_SHA"
           if gh release view dev >/dev/null 2>&1; then
             gh release upload dev "${assets[@]}" --clobber
             gh release edit dev --title "OBoard Agent development" --prerelease --target "$GITHUB_SHA"
