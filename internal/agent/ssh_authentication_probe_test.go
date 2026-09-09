@@ -4,6 +4,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/OboardProject/oboard-agent/internal/model"
@@ -39,7 +40,7 @@ func TestSSHAuthenticationVerificationChecksLiveListenerOnReplay(t *testing.T) {
 	live := runner.sshInboundManager.listeners[71]
 	_ = live.listener.Close()
 	result, err = runner.applySSHInbounds(plan)
-	if err == nil || result.AuthenticationVerified || result.Unchanged {
+	if err == nil || !strings.Contains(err.Error(), "dial tcp") || result.AuthenticationVerified || result.Unchanged {
 		t.Fatalf("dead listener reported success: %+v, %v", result, err)
 	}
 	if _, _, err := runner.verifySSHAuthentication(plan); err != nil {
@@ -111,5 +112,49 @@ func TestSSHAuthenticationVerificationChecksExhaustedQuota(t *testing.T) {
 	authenticated, rejected, err := runner.verifySSHAuthentication(plan)
 	if err != nil || authenticated != 0 || rejected != 1 {
 		t.Fatalf("quota rejection not verified: authenticated=%d rejected=%d err=%v", authenticated, rejected, err)
+	}
+}
+
+type sshProbeAddressListener struct {
+	net.Listener
+	address net.Addr
+}
+
+func (l sshProbeAddressListener) Addr() net.Addr { return l.address }
+
+func TestSSHAuthenticationVerificationWildcardAddressFamilies(t *testing.T) {
+	for _, test := range []struct{ name, network, host string }{
+		{"IPv4 with dual-stack reported address", "tcp4", "127.0.0.1"},
+		{"IPv6 only", "tcp6", "::1"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			listener, err := net.Listen(test.network, net.JoinHostPort(test.host, "0"))
+			if err != nil {
+				if test.network == "tcp6" {
+					t.Skipf("IPv6 unavailable: %v", err)
+				}
+				t.Fatal(err)
+			}
+			defer listener.Close()
+			runner := newTestSSHRunner(t, Config{StateDir: t.TempDir()})
+			plan := authenticationTestPlan(t)
+			plan.Inbounds[0].ListenIP = "0.0.0.0"
+			plan.Inbounds[0].Port = listener.Addr().(*net.TCPAddr).Port
+			manager, err := runner.newSSHInboundManager(plan)
+			if err != nil {
+				t.Fatal(err)
+			}
+			runner.sshInboundManager = manager
+			defer manager.close()
+			live := manager.listeners[71]
+			live.listener = sshProbeAddressListener{Listener: listener, address: &net.TCPAddr{IP: net.IPv6unspecified, Port: plan.Inbounds[0].Port}}
+			done := make(chan struct{})
+			go func() { defer close(done); live.serve(listener, manager.signer) }()
+			defer func() { listener.Close(); <-done }()
+			authenticated, rejected, err := runner.verifySSHAuthentication(plan)
+			if err != nil || authenticated != 1 || rejected != 0 {
+				t.Fatalf("wildcard authentication: authenticated=%d rejected=%d err=%v", authenticated, rejected, err)
+			}
+		})
 	}
 }

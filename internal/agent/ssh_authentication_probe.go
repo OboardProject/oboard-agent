@@ -77,23 +77,25 @@ func (m *managedSSHInbound) verifyAuthentication(ctx context.Context, hostKey ss
 	if listener == nil {
 		return false, errors.New("listener is not running")
 	}
-	host, port, err := net.SplitHostPort(listener.Addr().String())
+	addresses, err := sshAuthenticationProbeAddresses(listener.Addr().String())
 	if err != nil {
-		return false, errors.New("invalid listener address")
+		return false, err
 	}
-	if ip := net.ParseIP(host); ip != nil && ip.IsUnspecified() {
-		if ip.To4() != nil {
-			host = "127.0.0.1"
-		} else {
-			host = "::1"
-		}
-	}
-	address := net.JoinHostPort(host, port)
 	probeCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	conn, err := (&net.Dialer{}).DialContext(probeCtx, "tcp", address)
-	if err != nil {
-		return false, errors.New("cannot connect to SSH listener")
+	var conn net.Conn
+	var address string
+	var dialErrors []error
+	for _, candidate := range addresses {
+		conn, err = (&net.Dialer{}).DialContext(probeCtx, "tcp", candidate)
+		if err == nil {
+			address = candidate
+			break
+		}
+		dialErrors = append(dialErrors, err)
+	}
+	if conn == nil {
+		return false, fmt.Errorf("cannot connect to SSH listener: %w", errors.Join(dialErrors...))
 	}
 	defer conn.Close()
 	deadline, _ := probeCtx.Deadline()
@@ -130,4 +132,21 @@ func (m *managedSSHInbound) verifyAuthentication(ctx context.Context, hostKey ss
 	default:
 	}
 	return false, errors.New("SSH handshake did not confirm authentication")
+}
+
+func sshAuthenticationProbeAddresses(address string) ([]string, error) {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, fmt.Errorf("invalid SSH listener address: %w", err)
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsUnspecified() {
+		// Go can report [::] for an IPv4 wildcard listener on dual-stack hosts.
+		// IPv6 loopback may be disabled even when that socket accepts IPv4.
+		addresses := []string{net.JoinHostPort("127.0.0.1", port)}
+		if ip.To4() == nil {
+			addresses = append(addresses, net.JoinHostPort("::1", port))
+		}
+		return addresses, nil
+	}
+	return []string{address}, nil
 }
