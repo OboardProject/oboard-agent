@@ -1103,18 +1103,19 @@ func validateSSHInboundPlan(plan model.SSHInboundPlan) error {
 				credentialStatus = "active"
 			}
 			if deviceIDHash == "" {
-				if user.CredentialEpoch != 0 || credentialStatus != "active" {
+				if user.CredentialEpoch != 0 {
 					return fmt.Errorf("SSH inbound legacy user %q has invalid device credential metadata", user.Username)
 				}
-			} else {
-				if !sshDeviceIDHashPattern.MatchString(deviceIDHash) || user.CredentialEpoch <= 0 {
-					return fmt.Errorf("SSH inbound user %q has invalid device credential metadata", user.Username)
-				}
-				switch credentialStatus {
-				case "active", "reject_new", "disconnect_and_reject", "revoked", "disabled":
-				default:
-					return fmt.Errorf("SSH inbound user %q has invalid credential_status", user.Username)
-				}
+			} else if !sshDeviceIDHashPattern.MatchString(deviceIDHash) || user.CredentialEpoch <= 0 {
+				return fmt.Errorf("SSH inbound user %q has invalid device credential metadata", user.Username)
+			}
+			// Credential status is authorization state, not device identity: an
+			// access change stages every candidate credential as reject_new,
+			// including an account that owns no device-bound credential.
+			switch credentialStatus {
+			case "active", "reject_new", "disconnect_and_reject", "revoked", "disabled":
+			default:
+				return fmt.Errorf("SSH inbound user %q has invalid credential_status", user.Username)
 			}
 			if user.PathID <= 0 {
 				return fmt.Errorf("SSH inbound user %q has no path_id", user.Username)

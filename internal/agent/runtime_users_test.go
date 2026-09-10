@@ -3,7 +3,9 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -113,5 +115,47 @@ func TestNormalizeOperationalCoreConfigStripsRuntimeUsers(t *testing.T) {
 	}
 	if _, ok := object["inbounds"].([]any)[0].(map[string]any)["users"]; ok {
 		t.Fatalf("inbound users not stripped: %s", normalized)
+	}
+}
+
+func TestReapplyPersistedRuntimeUsersDropsScopeTheConfigNoLongerDeclares(t *testing.T) {
+	dir := t.TempDir()
+	core := writeFakeCoreBinaryWithCapabilities(t, dir, "build-users", []string{kernelCapabilityRuntimeUsers, coreRuntimeDigestCapability})
+	writeCoreConfig(t, dir, `{"log":{"level":"warn"},"inbounds":[{"tag":"in-a","type":"vless"}],"outbounds":[{"tag":"direct","type":"direct"}]}`)
+	kernel := newFakeCoreKernel(t, filepath.Join(dir, "sing-box.json"), true)
+	kernel.runtimeUsers = true
+	r := newRuntimeTestRunnerWithCore(t, dir, kernel, core)
+	cfg := r.Config()
+	cfg.AgentToken = "users-token"
+	cfg.ServerID = 8
+	r.storeConfig(cfg)
+
+	req := model.UsersInstallRequest{
+		Scope: []string{"in-a"}, UsersRevision: 5, UsersDigest: "digest-5", Mode: "full",
+		Entries: []model.UsersInstallEntry{{InboundTag: "in-a", AuthUser: "alice", AuthorizationKey: "k-alice", Credential: model.UsersCredential{UUID: "11111111-1111-1111-1111-111111111111"}, RouteOutbound: "direct"}},
+	}
+	if ack := r.applyUsersEnvelope(context.Background(), signedTestUsersEnvelope(t, "users-token", 8, "u1", req)); !ack.Confirmed {
+		t.Fatalf("users envelope not confirmed: %+v", ack)
+	}
+
+	withScope := `{"inbounds":[{"tag":"in-a","type":"vless"}],"_oboard":{"runtime_users":{"inbounds":["in-a"]}}}`
+	if err := r.reapplyPersistedRuntimeUsers(context.Background(), []byte(withScope)); err != nil {
+		t.Fatalf("live snapshot was not replayed: %v", err)
+	}
+	if applied := r.appliedUsers(); applied == nil || applied.Revision != 5 {
+		t.Fatalf("live snapshot was dropped: %+v", applied)
+	}
+
+	// The SSH-only configuration declares no runtime-user inbound, so the
+	// snapshot installed against the previous configuration is stale.
+	sshOnly := `{"inbounds":[],"outbounds":[{"tag":"direct","type":"direct"}]}`
+	if err := r.reapplyPersistedRuntimeUsers(context.Background(), []byte(sshOnly)); err != nil {
+		t.Fatalf("stale snapshot replay reported an error: %v", err)
+	}
+	if applied := r.appliedUsers(); applied != nil {
+		t.Fatalf("stale snapshot was kept: %+v", applied)
+	}
+	if _, err := os.Stat(r.runtimeUsersPath()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stale runtime users state was not removed: %v", err)
 	}
 }

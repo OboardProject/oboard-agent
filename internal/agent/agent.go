@@ -2409,7 +2409,7 @@ func (r *Runner) applyCoreConfigUnlocked(version int64, config string, forceRest
 		if err := r.applyConfigAuthorization(context.Background(), []byte(config)); err != nil {
 			return result, err
 		}
-		if err := r.reapplyPersistedRuntimeUsers(context.Background()); err != nil {
+		if err := r.reapplyPersistedRuntimeUsers(context.Background(), []byte(config)); err != nil {
 			result["runtime_users_error"] = err.Error()
 		}
 		result["message"] = message
@@ -2526,7 +2526,7 @@ func (r *Runner) applyCoreConfigUnlocked(version int64, config string, forceRest
 			result["reload_strategy"] = "runtime_authorization_sync_failed"
 			return result, fmt.Errorf("sync runtime-only authorization: %w", err)
 		}
-		if err := r.reapplyPersistedRuntimeUsers(context.Background()); err != nil {
+		if err := r.reapplyPersistedRuntimeUsers(context.Background(), []byte(config)); err != nil {
 			result["runtime_users_error"] = err.Error()
 		}
 		result["message"] = "runtime policy updated without core reload"

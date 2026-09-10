@@ -270,7 +270,7 @@ func (r *Runner) readKernelUsersStatus(ctx context.Context) (kernelUsersStatus, 
 	return status, nil
 }
 
-func (r *Runner) reapplyPersistedRuntimeUsers(ctx context.Context) error {
+func (r *Runner) reapplyPersistedRuntimeUsers(ctx context.Context, config []byte) error {
 	r.runtimeUsersMu.Lock()
 	current := r.runtimeUsersCurrent
 	r.runtimeUsersMu.Unlock()
@@ -283,8 +283,54 @@ func (r *Runner) reapplyPersistedRuntimeUsers(ctx context.Context) error {
 	if current == nil || current.UsersRevision <= 0 || !r.kernelSupportsRuntimeUsers() {
 		return nil
 	}
+	// A persisted snapshot belongs to the configuration it was installed
+	// against. Replaying it over a configuration that no longer declares those
+	// inbounds can never converge, so the stale snapshot is discarded instead
+	// of failing every later apply; Controller re-delivers the current desired
+	// state when the new configuration still has a runtime-user scope.
+	if runtimeUsersScopeStale(*current, config) {
+		return r.dropPersistedRuntimeUsers()
+	}
 	_, err := r.applyRuntimeUsers(ctx, *current)
 	return err
+}
+
+// runtimeUsersScopeStale reports whether a persisted install names an inbound
+// the configuration being applied no longer declares as runtime-user managed.
+// An unparsable configuration is never treated as evidence of staleness.
+func runtimeUsersScopeStale(req model.UsersInstallRequest, config []byte) bool {
+	var parsed struct {
+		OBoard struct {
+			RuntimeUsers struct {
+				Inbounds []string `json:"inbounds"`
+			} `json:"runtime_users"`
+		} `json:"_oboard"`
+	}
+	if len(config) == 0 || json.Unmarshal(config, &parsed) != nil {
+		return false
+	}
+	declared := map[string]struct{}{}
+	for _, tag := range parsed.OBoard.RuntimeUsers.Inbounds {
+		if tag = strings.TrimSpace(tag); tag != "" {
+			declared[tag] = struct{}{}
+		}
+	}
+	for _, tag := range req.Scope {
+		if _, ok := declared[strings.TrimSpace(tag)]; !ok {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *Runner) dropPersistedRuntimeUsers() error {
+	r.runtimeUsersMu.Lock()
+	defer r.runtimeUsersMu.Unlock()
+	r.runtimeUsersCurrent = nil
+	if err := os.Remove(r.runtimeUsersPath()); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
 func (r *Runner) wakeUsersSync() {

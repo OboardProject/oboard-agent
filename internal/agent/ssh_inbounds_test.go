@@ -537,10 +537,10 @@ func TestSSHInboundPlanValidatesDeviceCredentialMetadata(t *testing.T) {
 		return model.SSHInboundPlan{Inbounds: []model.SSHInbound{{InboundID: 1, ServerID: 1, ListenIP: "127.0.0.1", Port: 2222, Enabled: true, Users: []model.SSHInboundUser{candidate}}}}
 	}
 	for name, mutate := range map[string]func(*model.SSHInboundUser){
-		"legacy epoch":         func(user *model.SSHInboundUser) { user.CredentialEpoch = 1 },
-		"legacy rejection":     func(user *model.SSHInboundUser) { user.CredentialStatus = "reject_new" },
-		"short device hash":    func(user *model.SSHInboundUser) { user.DeviceIDHash = "short"; user.CredentialEpoch = 1 },
-		"missing device epoch": func(user *model.SSHInboundUser) { user.DeviceIDHash = "0123456789abcdef" },
+		"legacy epoch":          func(user *model.SSHInboundUser) { user.CredentialEpoch = 1 },
+		"legacy unknown status": func(user *model.SSHInboundUser) { user.CredentialStatus = "paused" },
+		"short device hash":     func(user *model.SSHInboundUser) { user.DeviceIDHash = "short"; user.CredentialEpoch = 1 },
+		"missing device epoch":  func(user *model.SSHInboundUser) { user.DeviceIDHash = "0123456789abcdef" },
 		"unknown device status": func(user *model.SSHInboundUser) {
 			user.DeviceIDHash = "0123456789abcdef"
 			user.CredentialEpoch = 1
@@ -554,6 +554,13 @@ func TestSSHInboundPlanValidatesDeviceCredentialMetadata(t *testing.T) {
 				t.Fatalf("invalid device credential metadata was accepted: %#v", candidate)
 			}
 		})
+	}
+	// An access change stages candidate credentials as reject_new for every
+	// account, so a legacy credential must carry that status too.
+	legacy := user
+	legacy.CredentialStatus = "reject_new"
+	if err := validateSSHInboundPlan(plan(legacy)); err != nil {
+		t.Fatalf("staged legacy credential was rejected: %v", err)
 	}
 	user.DeviceIDHash = "0123456789abcdef"
 	user.CredentialEpoch = 2
