@@ -158,4 +158,16 @@ func TestReapplyPersistedRuntimeUsersDropsScopeTheConfigNoLongerDeclares(t *test
 	if _, err := os.Stat(r.runtimeUsersPath()); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("stale runtime users state was not removed: %v", err)
 	}
+	req.Mode, req.BaseRevision = "delta", 4
+	previousState, err := json.Marshal(persistedRuntimeUsers{Current: &req, Commit: "current", BootID: "old-boot"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(r.runtimeUsersPath(), previousState, 0600); err != nil {
+		t.Fatal(err)
+	}
+	r.loadPersistedRuntimeUsers()
+	if r.runtimeUsersCurrent != nil || r.appliedUsers() != nil {
+		t.Fatal("old delta was treated as a complete installed snapshot")
+	}
 }

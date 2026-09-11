@@ -24,22 +24,28 @@ import (
 
 	"github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/authorization"
 	"github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/protocol/familyselector"
+	"github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/runtimeuser"
 )
 
 const rateLimitIOChunk = 64 * 1024
 
 type RateLimitTracker struct {
-	authorization         *authorization.Store
-	mu                    sync.RWMutex
-	states                map[string]*runtimeState
-	active                map[string]map[*trackedConn]struct{}
-	activePacket          map[string]map[*trackedPacketConn]struct{}
+	usersBarrier  sync.RWMutex
+	usersFailed   atomic.Bool
+	snellParents  map[*parentConn]struct{}
+	snellUsers    map[string]snellIdentity
+	snellRetired  map[string]bool
+	authorization *authorization.Store
+	mu            sync.RWMutex
+	states        map[string]*runtimeState
+	active        map[string]map[*trackedConn]struct{}
+	activePacket  map[string]map[*trackedPacketConn]struct{}
 	// byCredential indexes live connections by the authorization key they
 	// authenticated with so a revoke can close exactly that credential's
 	// sessions without scanning every inbound user.
-	byCredential       map[string]map[*trackedConn]struct{}
-	byCredentialPacket map[string]map[*trackedPacketConn]struct{}
-	authorizationWake  chan struct{}
+	byCredential          map[string]map[*trackedConn]struct{}
+	byCredentialPacket    map[string]map[*trackedPacketConn]struct{}
+	authorizationWake     chan struct{}
 	auditMu               sync.Mutex
 	auditBuckets          map[string]*ConnectionAuditBucket
 	auditActiveByIdentity map[string]int64
@@ -563,7 +569,12 @@ func (s *runtimeState) snapshot() (TrafficCounter, bool) {
 }
 
 func (t *RateLimitTracker) Enabled() bool {
-	return t != nil && len(t.states) > 0
+	if t == nil {
+		return false
+	}
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return len(t.states) > 0
 }
 
 func (t *RateLimitTracker) stateForKey(key string) *runtimeState {
@@ -658,7 +669,8 @@ func newRuntimeLimiters(limit RuntimeUserLimit) (*rate.Limiter, *rate.Limiter) {
 func AttachRuntimeTrackers(ctx context.Context, metadata RuntimeMetadata) *RateLimitTracker {
 	tracker := newRateLimitTracker(metadata, ntp.TimeFuncFromContext(ctx))
 	service.MustRegister[familyselector.SelectionObserver](ctx, tracker)
-	if !tracker.Enabled() {
+	service.MustRegister[runtimeuser.AdmissionGate](ctx, tracker)
+	if !tracker.Enabled() && (metadata.RuntimeUsers == nil || len(metadata.RuntimeUsers.Inbounds) == 0) {
 		return tracker
 	}
 	router := service.FromContext[adapter.Router](ctx)
@@ -1087,6 +1099,15 @@ func (t *RateLimitTracker) ReplaceScopedUsers(scope []string, entries []UserInst
 			continue
 		}
 		state := newRuntimeStateWithClock(key, user, "", policy, t.now)
+		if policy.UserID > 0 {
+			state.usage = &runtimeUserUsage{periods: map[string]*runtimeUsagePeriod{}}
+			for _, existing := range t.states {
+				if existing.loadedPolicy().UserID == policy.UserID && existing.usage != nil {
+					state.usage = existing.usage
+					break
+				}
+			}
+		}
 		state.authorization = t.authorization
 		t.states[key] = state
 	}
@@ -1155,6 +1176,9 @@ func (t *RateLimitTracker) UpdatePolicies(policies map[string]RuntimeUserLimit) 
 }
 
 func (t *RateLimitTracker) AcknowledgeTraffic(acknowledged map[string]TrafficCounterAcknowledgement) {
+	if t != nil {
+		defer t.pruneSnellCounters()
+	}
 	if t == nil || len(acknowledged) == 0 {
 		return
 	}
@@ -1274,6 +1298,7 @@ func (t *RateLimitTracker) unregisterPacketConn(key string, c *trackedPacketConn
 
 // closeActive closes every connection routed for one inbound user key.
 func (t *RateLimitTracker) closeActive(key string) {
+	defer t.reapSnellParents(false)
 	t.mu.RLock()
 	conns := make([]*trackedConn, 0, len(t.active[key]))
 	for conn := range t.active[key] {

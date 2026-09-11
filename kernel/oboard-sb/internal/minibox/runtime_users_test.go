@@ -1,6 +1,8 @@
 package minibox
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
@@ -57,23 +59,15 @@ func TestRuntimeUsersFullInstallRejectsBadDigestAndPersistsCommit(t *testing.T) 
 	if !errors.Is(err, ErrUserInstallDigest) {
 		t.Fatalf("wanted digest error, got %v", err)
 	}
-	// A publish requires a live instance, so the legal digest still fails
-	// here; the candidate must have been written first.
+	// A missing runtime is rejected before writing a recoverable candidate.
 	_, err = users.Install(UserInstallRequest{Scope: []string{"in-a"}, UsersRevision: 1, UsersDigest: digest, Mode: "full", Entries: []UserInstallEntry{entry}})
-	if err == nil {
-		t.Fatal("install without an instance unexpectedly succeeded")
+	if !errors.Is(err, ErrUserInstallCapability) {
+		t.Fatalf("expected capability rejection, got %v", err)
 	}
-	raw, readErr := os.ReadFile(path)
-	if readErr != nil {
-		t.Fatal(readErr)
+	if _, err = os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("invalid candidate persisted: %v", err)
 	}
-	var persisted persistedUsers
-	if err := json.Unmarshal(raw, &persisted); err != nil {
-		t.Fatal(err)
-	}
-	if persisted.Commit != "candidate" || persisted.Candidate == nil || persisted.Candidate.Revision != 1 || persisted.Candidate.Digest != digest {
-		t.Fatalf("candidate not persisted before publish: %+v", persisted)
-	}
+
 }
 
 func TestRuntimeUsersDeltaDeleteDoesNotRequireAuthorizationKey(t *testing.T) {
@@ -184,5 +178,33 @@ func TestReplaceScopedUsersKeepsRemovedUserCounters(t *testing.T) {
 	counter, ok := kept.snapshot()
 	if !ok || counter.Upload != 128 || counter.Download != 256 {
 		t.Fatalf("tail traffic lost: ok=%v %+v", ok, counter)
+	}
+}
+
+func TestRuntimeUsersChunkRecoveryRetainsPreparedParts(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "users.json")
+	users := NewRuntimeUsers(path, nil, nil, []string{"in-a"})
+	entry := testUserEntry("in-a", "alice", "key-a")
+	entries := []UserInstallEntry{entry}
+	payload, _ := json.Marshal(entries)
+	sum := sha256.Sum256(payload)
+	req := UserInstallRequest{Scope: []string{"in-a"}, UsersRevision: 1, UsersDigest: "pending-digest", Mode: "full", Entries: entries, Chunk: &UserInstallChunk{Index: 0, Total: 2, SHA256: hex.EncodeToString(sum[:])}}
+	if _, err := users.Install(req); !errors.Is(err, ErrUserInstallIncomplete) {
+		t.Fatal(err)
+	}
+	restored := NewRuntimeUsers(path, nil, nil, []string{"in-a"})
+	if err := restored.Restore(); err != nil {
+		t.Fatal(err)
+	}
+	if restored.current != nil || restored.chunks == nil || len(restored.chunks.Parts[0]) == 0 {
+		t.Fatal("prepared part was lost or activated")
+	}
+	req.Mode = "delta"
+	if _, _, err := restored.acceptChunk(req); !errors.Is(err, ErrUserInstallIllegal) {
+		t.Fatal("mixed chunk mode accepted")
+	}
+	req.Mode = "full"
+	if _, err := restored.buildSnapshot(req, []UserInstallEntry{entry, entry}); !errors.Is(err, ErrUserInstallIllegal) {
+		t.Fatal("duplicate entry accepted")
 	}
 }

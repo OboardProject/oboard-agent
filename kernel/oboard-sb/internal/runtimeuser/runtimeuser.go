@@ -2,13 +2,19 @@
 
 package runtimeuser
 
+import (
+	"context"
+	"net"
+)
+
 // Capability strings advertised by the kernel for inbound adapters that can
 // replace their user table without a process restart.
 const (
-	CapabilityVLESS           = "vless"
-	CapabilityHysteria2       = "hysteria2"
+	CapabilityVLESS            = "vless"
+	CapabilityHysteria2        = "hysteria2"
 	CapabilityShadowsocksMulti = "shadowsocks-multi"
-	CapabilitySnellMulti      = "snell-multi"
+	CapabilitySnellMulti       = "snell-multi"
+	CapabilitySnellPSK         = "snell-psk"
 )
 
 // Spec is one inbound authentication identity. Exactly one of UUID, Password,
@@ -18,6 +24,7 @@ type Spec struct {
 	UUID     string
 	Password string
 	UserKey  string
+	PSK      string
 	Flow     string
 }
 
@@ -31,4 +38,10 @@ type Inbound interface {
 // Selector is implemented by the user-selector outbound.
 type Selector interface {
 	UpdateUsers(map[string]string) error
+}
+
+type AdmissionGate interface {
+	Admit(context.Context, string, string, net.Conn) (context.Context, error)
+	WrapParent(net.Conn) net.Conn
+	ParentContext(context.Context, net.Conn) context.Context
 }

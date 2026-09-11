@@ -1,0 +1,12 @@
+Module: github.com/sagernet/sing-snell
+Commit: 20f2eaec77c328b7eb7e937fa9c894ee9c8a0057
+Version: v0.0.0-20260829071736-20f2eaec77c3
+License: GPL-3.0-or-later (see LICENSE)
+
+Selected upstream files: recursive *.go, go.mod, go.sum, LICENSE.
+Local patch: scripts/patches/sing-snell.patch, applied by scripts/sync-sing-snell.sh.
+The patch adds bounded multi-PSK recognition for v5/v6, connection-bound response
+keys, admission callbacks on native reuse, shared authentication budgets and
+replay state, bounded HTTP obfuscation parsing, and protocol verification tests.
+The original single-PSK and userkey services retain their distinct semantics.
+No sing-box replacement or standalone server is included.

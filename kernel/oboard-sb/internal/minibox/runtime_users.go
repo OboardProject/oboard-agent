@@ -1,14 +1,17 @@
 package minibox
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -61,6 +64,7 @@ type UserCredential struct {
 	UUID     string `json:"uuid,omitempty"`
 	Password string `json:"password,omitempty"`
 	UserKey  string `json:"userkey,omitempty"`
+	PSK      string `json:"psk,omitempty"`
 	Flow     string `json:"flow,omitempty"`
 }
 
@@ -81,10 +85,11 @@ type UserSnapshot struct {
 }
 
 type UsersStatus struct {
-	UsersRevision int64             `json:"users_revision"`
-	UsersDigest   string            `json:"users_digest"`
-	BootID        string            `json:"boot_id"`
-	PerInbound    map[string]string `json:"per_inbound,omitempty"`
+	Authentication map[string]map[string]uint64 `json:"authentication,omitempty"`
+	UsersRevision  int64                        `json:"users_revision"`
+	UsersDigest    string                       `json:"users_digest"`
+	BootID         string                       `json:"boot_id"`
+	PerInbound     map[string]string            `json:"per_inbound,omitempty"`
 }
 
 type persistedUsers struct {
@@ -95,13 +100,13 @@ type persistedUsers struct {
 }
 
 type chunkBuffer struct {
-	Revision int64              `json:"revision"`
-	Digest   string             `json:"digest"`
-	Mode     string             `json:"mode"`
-	Base     int64              `json:"base_revision"`
-	Scope    []string           `json:"scope"`
-	Total    int                `json:"total"`
-	Parts    []json.RawMessage  `json:"parts"`
+	Revision int64             `json:"revision"`
+	Digest   string            `json:"digest"`
+	Mode     string            `json:"mode"`
+	Base     int64             `json:"base_revision"`
+	Scope    []string          `json:"scope"`
+	Total    int               `json:"total"`
+	Parts    []json.RawMessage `json:"parts"`
 }
 
 // RuntimeUsers applies inbound user tables independently of configuration
@@ -152,17 +157,60 @@ func (r *RuntimeUsers) Restore() error {
 	if err != nil {
 		return err
 	}
-	snapshot := state.Current
-	if state.Commit == "candidate" && state.Candidate != nil {
-		snapshot = state.Candidate
+	if chunks := state.Chunks; chunks != nil && (state.Current == nil || chunks.Revision > state.Current.Revision) {
+		if chunks.Total < 1 || chunks.Total > maxUserInstallChunks || len(chunks.Parts) != chunks.Total {
+			return ErrUserInstallIllegal
+		}
+		for index, part := range chunks.Parts {
+			if len(part) == 0 {
+				continue
+			}
+			var entries []UserInstallEntry
+			if err := json.Unmarshal(part, &entries); err != nil {
+				return ErrUserInstallIllegal
+			}
+			payload, err := json.Marshal(entries)
+			if err != nil {
+				return err
+			}
+			sum := sha256.Sum256(payload)
+			req := UserInstallRequest{Scope: chunks.Scope, UsersRevision: chunks.Revision, UsersDigest: chunks.Digest, Mode: chunks.Mode, BaseRevision: chunks.Base, Entries: entries, Chunk: &UserInstallChunk{Index: index, Total: chunks.Total, SHA256: hex.EncodeToString(sum[:])}}
+			if err := validateUserInstall(req); err != nil {
+				return err
+			}
+			if _, _, err := r.acceptChunk(req); err != nil {
+				return err
+			}
+		}
 	}
+	snapshot := state.Current
+	// Prepared snapshots have never committed. Recover only the last commit.
 	if snapshot == nil {
+		if r.tracker != nil && state.Candidate != nil {
+			r.tracker.usersFailed.Store(true)
+		}
 		return nil
 	}
+	if digest, e := UserSnapshotDigest(snapshot); e != nil || digest != snapshot.Digest {
+		return ErrUserInstallDigest
+	}
+	if r.tracker != nil {
+		r.tracker.usersBarrier.Lock()
+		defer r.tracker.usersBarrier.Unlock()
+	}
+	if err := r.validateSnapshot(snapshot); err != nil {
+		return err
+	}
 	if err := r.publishLocked(snapshot); err != nil {
+		if r.tracker != nil {
+			r.tracker.usersFailed.Store(true)
+		}
 		return err
 	}
 	r.current = snapshot
+	if r.tracker != nil {
+		r.tracker.usersFailed.Store(false)
+	}
 	if state.Commit != "current" {
 		return r.persist(persistedUsers{Current: snapshot, Commit: "current"})
 	}
@@ -175,20 +223,7 @@ func (r *RuntimeUsers) Status() UsersStatus {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	out := UsersStatus{BootID: r.bootID, PerInbound: map[string]string{}}
-	if r.current != nil {
-		out.UsersRevision = r.current.Revision
-		out.UsersDigest = r.current.Digest
-		for _, tag := range r.current.Scope {
-			out.PerInbound[tag] = r.inboundCapability(tag)
-		}
-	}
-	for tag := range r.scope {
-		if _, ok := out.PerInbound[tag]; !ok {
-			out.PerInbound[tag] = r.inboundCapability(tag)
-		}
-	}
-	return out
+	return r.statusLocked()
 }
 
 func (r *RuntimeUsers) Install(req UserInstallRequest) (UsersStatus, error) {
@@ -207,6 +242,9 @@ func (r *RuntimeUsers) Install(req UserInstallRequest) (UsersStatus, error) {
 			return UsersStatus{}, err
 		}
 		if !done {
+			if err := r.persist(persistedUsers{Current: r.current, Chunks: r.chunks, Commit: "chunks"}); err != nil {
+				return UsersStatus{}, err
+			}
 			return r.statusLocked(), ErrUserInstallIncomplete
 		}
 		entries = assembled
@@ -215,29 +253,69 @@ func (r *RuntimeUsers) Install(req UserInstallRequest) (UsersStatus, error) {
 	if err != nil {
 		return UsersStatus{}, err
 	}
-	// Persist the candidate before publishing so a crash between the two
-	// cannot lose a snapshot the data plane already accepted.
+	if r.current != nil {
+		if snapshot.Revision < r.current.Revision {
+			return UsersStatus{}, ErrUserInstallBase
+		}
+		if snapshot.Revision == r.current.Revision {
+			if snapshot.Digest == r.current.Digest && (r.tracker == nil || !r.tracker.usersFailed.Load()) {
+				return r.statusLocked(), nil
+			}
+			return UsersStatus{}, ErrUserInstallDigest
+		}
+	}
+	if r.tracker != nil {
+		r.tracker.usersBarrier.Lock()
+		defer r.tracker.usersBarrier.Unlock()
+	}
+	if err := r.validateSnapshot(snapshot); err != nil {
+		return UsersStatus{}, err
+	}
 	if err := r.persist(persistedUsers{Current: r.current, Candidate: snapshot, Commit: "candidate"}); err != nil {
 		return UsersStatus{}, err
 	}
-	if err := r.publishLocked(snapshot); err != nil {
+	fail := func(err error) (UsersStatus, error) {
+		if r.tracker != nil {
+			r.tracker.usersFailed.Store(true)
+			r.tracker.reapSnellParents(true)
+		}
 		return UsersStatus{}, err
+	}
+	if err := r.publishLocked(snapshot); err != nil {
+		return fail(err)
 	}
 	if err := r.persist(persistedUsers{Current: snapshot, Commit: "current"}); err != nil {
-		return UsersStatus{}, err
+		return fail(err)
 	}
+	if r.tracker != nil {
+		r.tracker.usersFailed.Store(false)
+		r.tracker.reapSnellParents(false)
+	}
+
 	r.current = snapshot
 	r.chunks = nil
 	return r.statusLocked(), nil
 }
 
 func (r *RuntimeUsers) statusLocked() UsersStatus {
-	out := UsersStatus{BootID: r.bootID, PerInbound: map[string]string{}}
+	out := UsersStatus{BootID: r.bootID, PerInbound: map[string]string{}, Authentication: map[string]map[string]uint64{}}
 	if r.current != nil {
 		out.UsersRevision = r.current.Revision
 		out.UsersDigest = r.current.Digest
 		for _, tag := range r.current.Scope {
 			out.PerInbound[tag] = r.inboundCapability(tag)
+		}
+	}
+	for tag := range r.scope {
+		out.PerInbound[tag] = r.inboundCapability(tag)
+		if r.instance != nil {
+			if in, ok := r.instance.Inbound().Get(tag); ok {
+				if source, ok := in.(interface{ AuthenticationMetrics() map[string]uint64 }); ok {
+					if metrics := source.AuthenticationMetrics(); metrics != nil {
+						out.Authentication[tag] = metrics
+					}
+				}
+			}
 		}
 	}
 	return out
@@ -291,6 +369,28 @@ func (r *RuntimeUsers) acceptChunk(req UserInstallRequest) ([]UserInstallEntry, 
 			Parts:    make([]json.RawMessage, req.Chunk.Total),
 		}
 	}
+	if r.chunks.Mode != req.Mode || r.chunks.Base != req.BaseRevision || !slices.Equal(uniqueSorted(r.chunks.Scope), uniqueSorted(req.Scope)) {
+		return nil, false, ErrUserInstallIllegal
+	}
+	previous := r.chunks.Parts[req.Chunk.Index]
+	if len(previous) != 0 && !bytes.Equal(previous, payload) {
+		return nil, false, ErrUserInstallIllegal
+	}
+	totalBytes, totalEntries := len(payload), len(req.Entries)
+	for i, part := range r.chunks.Parts {
+		if i == req.Chunk.Index || len(part) == 0 {
+			continue
+		}
+		totalBytes += len(part)
+		var entries []json.RawMessage
+		if json.Unmarshal(part, &entries) != nil {
+			return nil, false, ErrUserInstallIllegal
+		}
+		totalEntries += len(entries)
+	}
+	if totalBytes > 32<<20 || totalEntries > maxUserInstallEntries {
+		return nil, false, ErrUserInstallIllegal
+	}
 	r.chunks.Parts[req.Chunk.Index] = append(json.RawMessage(nil), payload...)
 	for _, part := range r.chunks.Parts {
 		if len(part) == 0 {
@@ -314,17 +414,23 @@ func (r *RuntimeUsers) acceptChunk(req UserInstallRequest) ([]UserInstallEntry, 
 func (r *RuntimeUsers) buildSnapshot(req UserInstallRequest, entries []UserInstallEntry) (*UserSnapshot, error) {
 	scope := uniqueSorted(req.Scope)
 	cleaned := make([]UserInstallEntry, 0, len(entries))
+	seen := make(map[string]bool, len(entries))
 	for _, entry := range entries {
 		entry.InboundTag = strings.TrimSpace(entry.InboundTag)
 		entry.AuthUser = strings.TrimSpace(entry.AuthUser)
 		if entry.InboundTag == "" || entry.AuthUser == "" {
 			return nil, ErrUserInstallIllegal
 		}
+		key := entry.InboundTag + "\x00" + entry.AuthUser
+		if seen[key] {
+			return nil, ErrUserInstallIllegal
+		}
+		seen[key] = true
 		deleted := entry.Credential == (UserCredential{})
 		if !deleted && strings.TrimSpace(entry.AuthorizationKey) == "" {
 			return nil, ErrUserInstallIllegal
 		}
-		if deleted && req.Mode != "delta" {
+		if deleted && (req.Mode != "delta" || entry.AuthorizationKey != "" || entry.Identity != (UserIdentity{}) || entry.Policy != (RuntimeUserLimit{}) || entry.RouteOutbound != "") {
 			return nil, ErrUserInstallIllegal
 		}
 		if !containsString(scope, entry.InboundTag) {
@@ -455,6 +561,7 @@ func (r *RuntimeUsers) publishLocked(snapshot *UserSnapshot) error {
 				UUID:     entry.Credential.UUID,
 				Password: entry.Credential.Password,
 				UserKey:  entry.Credential.UserKey,
+				PSK:      entry.Credential.PSK,
 				Flow:     entry.Credential.Flow,
 			})
 			if entry.RouteOutbound != "" {
@@ -474,6 +581,7 @@ func (r *RuntimeUsers) publishLocked(snapshot *UserSnapshot) error {
 	}
 	if r.tracker != nil {
 		r.tracker.ReplaceScopedUsers(snapshot.Scope, snapshot.Entries)
+		r.tracker.publishSnellUsers(snapshot)
 	}
 	return nil
 }
@@ -497,7 +605,18 @@ func (r *RuntimeUsers) load() (persistedUsers, error) {
 	if r.path == "" {
 		return persistedUsers{}, nil
 	}
-	data, err := os.ReadFile(r.path)
+	file, err := os.Open(r.path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return persistedUsers{}, nil
+		}
+		return persistedUsers{}, err
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, 32*1024*1024+1))
+	if len(data) > 32*1024*1024 {
+		return persistedUsers{}, ErrUserInstallIllegal
+	}
 	if err != nil {
 		if os.IsNotExist(err) {
 			return persistedUsers{}, nil
@@ -519,14 +638,38 @@ func (r *RuntimeUsers) persist(state persistedUsers) error {
 	if err != nil {
 		return err
 	}
+	if len(data) > 32<<20 {
+		return ErrUserInstallIllegal
+	}
 	if err := os.MkdirAll(filepath.Dir(r.path), 0700); err != nil {
 		return err
 	}
 	tmp := r.path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0600); err != nil {
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, r.path)
+	defer os.Remove(tmp)
+	if _, err = f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	if err = f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err = f.Close(); err != nil {
+		return err
+	}
+	if err = os.Rename(tmp, r.path); err != nil {
+		return err
+	}
+	dir, err := os.Open(filepath.Dir(r.path))
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
 }
 
 func userSelectorTag(inbound string) string {
@@ -558,4 +701,68 @@ func containsString(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func (r *RuntimeUsers) validateSnapshot(snapshot *UserSnapshot) error {
+	if r.instance == nil {
+		return ErrUserInstallCapability
+	}
+	seen := map[string]bool{}
+	names := map[string]bool{}
+	keys := map[string]map[string]bool{}
+	counts := map[string]int{}
+	for _, tag := range snapshot.Scope {
+		if _, ok := r.scope[tag]; !ok {
+			return ErrUserInstallCapability
+		}
+		if r.inboundCapability(tag) == "" {
+			return ErrUserInstallCapability
+		}
+	}
+	for _, entry := range snapshot.Entries {
+		key := entry.InboundTag + "\x00" + entry.AuthUser
+		if seen[key] || !containsString(snapshot.Scope, entry.InboundTag) || entry.AuthorizationKey == "" {
+			return ErrUserInstallIllegal
+		}
+		seen[key] = true
+		if strings.TrimSpace(entry.AuthUser) != entry.AuthUser || entry.AuthUser == "" || names[entry.AuthUser] {
+			return ErrUserInstallIllegal
+		}
+		names[entry.AuthUser] = true
+		if r.tracker != nil {
+			if existing := r.tracker.stateForKey("user:" + entry.AuthUser); existing != nil {
+				p := existing.loadedPolicy()
+				if p.UserID > 0 && (p.UserID != entry.Identity.UserID || p.InboundID != entry.Identity.InboundID || p.PathID != entry.Identity.PathID) {
+					return ErrUserInstallIllegal
+				}
+			}
+		}
+		if _, ok := r.instance.Outbound().Outbound(entry.RouteOutbound); !ok {
+			return ErrUserInstallIllegal
+		}
+		if r.inboundCapability(entry.InboundTag) == runtimeuser.CapabilitySnellPSK {
+			c := entry.Credential
+			if len(c.PSK) < 8 || len(c.PSK) > 255 || c.UserKey != "" || c.Password != "" || c.UUID != "" || c.Flow != "" {
+				return ErrUserInstallIllegal
+			}
+			in, _ := r.instance.Inbound().Get(entry.InboundTag)
+			if validator, ok := in.(interface{ ValidatePSK(string) error }); ok {
+				if err := validator.ValidatePSK(c.PSK); err != nil {
+					return err
+				}
+			}
+			counts[entry.InboundTag]++
+			if counts[entry.InboundTag] > 64 {
+				return fmt.Errorf("snell_credential_limit_exceeded")
+			}
+			if keys[entry.InboundTag] == nil {
+				keys[entry.InboundTag] = map[string]bool{}
+			}
+			if keys[entry.InboundTag][c.PSK] {
+				return fmt.Errorf("snell_duplicate_psk")
+			}
+			keys[entry.InboundTag][c.PSK] = true
+		}
+	}
+	return nil
 }

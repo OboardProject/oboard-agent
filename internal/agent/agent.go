@@ -74,6 +74,7 @@ type Runner struct {
 	runtimeUsersMu              sync.Mutex
 	runtimeUsersApplyMu         sync.Mutex
 	runtimeUsersCurrent         *model.UsersInstallRequest
+	runtimeUsersApplied         *model.UsersAppliedSnapshot
 	runtimeUsersBootID          string
 	usersSyncWake               chan struct{}
 	config                      atomic.Pointer[Config]
@@ -2354,7 +2355,9 @@ func (r *Runner) applyCoreConfigTask(version int64, payload model.ApplyCoreConfi
 		if err := r.cleanupManagedAssets(payload.Assets); err != nil {
 			return map[string]any{"message": "managed asset cleanup failed", "version": version, "idempotent_replay": true, "reload_strategy": "unchanged"}, err
 		}
-		return map[string]any{"message": "config already applied", "version": version, "idempotent_replay": true, "reload_strategy": "unchanged", "managed_assets_changed": false}, nil
+		result := map[string]any{"message": "config already applied", "version": version, "idempotent_replay": true, "reload_strategy": "unchanged", "managed_assets_changed": false}
+		r.annotateActiveCoreRuntime(context.Background(), result)
+		return result, nil
 	}
 	resolvedConfig, assetsChanged, err := r.syncManagedAssets(context.Background(), payload.Assets, payload.Config)
 	if err != nil {
@@ -2927,6 +2930,9 @@ func (r *Runner) reloadCore() error {
 }
 
 func validateSingBox(binary, path string, timeout time.Duration) error {
+	if err := validateSnellCoreFile(path); err != nil {
+		return err
+	}
 	if _, err := exec.LookPath(binary); err != nil {
 		return nil
 	}
@@ -3241,7 +3247,7 @@ func buildHealthReport(binary string, timeout time.Duration, host hostStaticInfo
 		AgentVersion:       version.Version,
 		AgentBuild:         version.Build,
 		SingBoxVersion:     coreVersion,
-		KernelCapabilities: append(append([]string(nil), kernelCapabilities...), model.AgentCapabilityTrafficPolicy, model.AgentCapabilityAuthorizationControl, model.AgentCapabilityRuntimeUsers, model.AgentCapabilityHostPower),
+		KernelCapabilities: append(append([]string(nil), kernelCapabilities...), model.AgentCapabilityTrafficPolicy, model.AgentCapabilityAuthorizationControl, model.AgentCapabilityRuntimeUsers, "runtime_users_snell_psk_control_v1", model.AgentCapabilityHostPower),
 		TCPFastOpenState:   tfoState,
 		TCPFastOpenValue:   tfoValue,
 		Timestamp:          time.Now().UTC(),

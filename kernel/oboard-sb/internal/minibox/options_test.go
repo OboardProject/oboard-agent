@@ -1,6 +1,7 @@
 package minibox
 
 import (
+	"github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/protocol/snell"
 	"os"
 	"path/filepath"
 	"slices"
@@ -281,8 +282,8 @@ func TestLoadConfigAcceptsSnellOptions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	inboundOptions, ok := opts.Inbounds[0].Options.(*option.SnellInboundOptions)
-	if !ok || inboundOptions.Version != 5 || inboundOptions.PSK != "server-psk" || inboundOptions.V6Options.Mode != "" {
+	inboundOptions, ok := opts.Inbounds[0].Options.(*snell.InboundOptions)
+	if !ok || inboundOptions.Version != 5 || inboundOptions.PSK != "server-psk" || inboundOptions.Mode != "" {
 		t.Fatalf("snell inbound options not decoded: %#v", opts.Inbounds[0].Options)
 	}
 	outboundOptions, ok := opts.Outbounds[0].Options.(*option.SnellOutboundOptions)
@@ -333,7 +334,7 @@ func TestLoadConfigKeepsGeneratedSnellListenersSingleUser(t *testing.T) {
 		version int
 		port    uint16
 	}{{"in-2-u1", 5, 40017}, {"in-2-u2", 6, 40023}} {
-		listener, ok := opts.Inbounds[index].Options.(*option.SnellInboundOptions)
+		listener, ok := opts.Inbounds[index].Options.(*snell.InboundOptions)
 		if !ok {
 			t.Fatalf("snell listener %d not decoded: %#v", index, opts.Inbounds[index].Options)
 		}
@@ -377,8 +378,8 @@ func TestLoadConfigAcceptsSnellV6Options(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	inboundOptions, ok := opts.Inbounds[0].Options.(*option.SnellInboundOptions)
-	if !ok || inboundOptions.Version != 6 || inboundOptions.V6Options.Mode != "unshaped" {
+	inboundOptions, ok := opts.Inbounds[0].Options.(*snell.InboundOptions)
+	if !ok || inboundOptions.Version != 6 || inboundOptions.Mode != "unshaped" {
 		t.Fatalf("snell v6 inbound options not decoded: %#v", opts.Inbounds[0].Options)
 	}
 	outboundOptions, ok := opts.Outbounds[0].Options.(*option.SnellOutboundOptions)

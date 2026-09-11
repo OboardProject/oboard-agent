@@ -125,14 +125,7 @@ func prepareRuntimeUserInbounds(opts *option.Options, metadata RuntimeMetadata) 
 				ss.Users = nil
 				ss.Managed = true
 			}
-		case "snell":
-			snell, ok := opts.Inbounds[i].Options.(*option.SnellInboundOptions)
-			if !ok || snell == nil {
-				continue
-			}
-			if snell.Users == nil {
-				snell.Users = []option.SnellUser{}
-			}
+
 		}
 	}
 }

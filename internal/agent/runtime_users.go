@@ -47,10 +47,11 @@ func (r *Runner) runtimeUsersPath() string {
 func (r *Runner) appliedUsers() *model.UsersAppliedSnapshot {
 	r.runtimeUsersMu.Lock()
 	defer r.runtimeUsersMu.Unlock()
-	if r.runtimeUsersCurrent == nil || r.runtimeUsersCurrent.UsersRevision <= 0 {
+	if r.runtimeUsersApplied == nil {
 		return nil
 	}
-	return &model.UsersAppliedSnapshot{Revision: r.runtimeUsersCurrent.UsersRevision, Digest: r.runtimeUsersCurrent.UsersDigest, BootID: r.runtimeUsersBootID}
+	copy := *r.runtimeUsersApplied
+	return &copy
 }
 
 func (r *Runner) loadPersistedRuntimeUsers() {
@@ -61,7 +62,7 @@ func (r *Runner) loadPersistedRuntimeUsers() {
 		return
 	}
 	var state persistedRuntimeUsers
-	if json.Unmarshal(raw, &state) != nil || state.Current == nil {
+	if json.Unmarshal(raw, &state) != nil || state.Current == nil || state.Current.Mode != "full" || state.Current.Chunk != nil {
 		return
 	}
 	r.runtimeUsersCurrent = state.Current
@@ -78,10 +79,31 @@ func (r *Runner) persistRuntimeUsersLocked() error {
 		return err
 	}
 	tmp := r.runtimeUsersPath() + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+	file, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, r.runtimeUsersPath())
+	defer os.Remove(tmp)
+	if _, err = file.Write(data); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err = file.Sync(); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err = file.Close(); err != nil {
+		return err
+	}
+	if err = os.Rename(tmp, r.runtimeUsersPath()); err != nil {
+		return err
+	}
+	dir, err := os.Open(r.stateDir())
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
 }
 
 var errUsersEnvelopeRejected = errors.New("users envelope rejected")
@@ -104,6 +126,9 @@ func (r *Runner) verifyUsersEnvelope(envelope model.UsersEnvelope) (model.UsersI
 	}
 	if req.UsersRevision <= 0 || strings.TrimSpace(req.UsersDigest) == "" || (req.Mode != "full" && req.Mode != "delta") {
 		return req, fmt.Errorf("%w: illegal users install", errUsersEnvelopeRejected)
+	}
+	if err := validatePSKInstall(req); err != nil {
+		return req, fmt.Errorf("%w: %v", errUsersEnvelopeRejected, err)
 	}
 	return req, nil
 }
@@ -167,14 +192,13 @@ func (r *Runner) applyRuntimeUsers(ctx context.Context, req model.UsersInstallRe
 	}()
 	r.runtimeUsersApplyMu.Lock()
 	defer r.runtimeUsersApplyMu.Unlock()
-	if req.Chunk == nil {
-		r.runtimeUsersMu.Lock()
-		r.runtimeUsersCurrent = &req
-		if err := r.persistRuntimeUsersLocked(); err != nil {
-			r.runtimeUsersMu.Unlock()
-			return outcome, err
+	if err := validatePSKInstall(req); err != nil {
+		return outcome, err
+	}
+	for _, entry := range req.Entries {
+		if entry.Credential.PSK != "" && !r.kernelSupportsUsersCapability("runtime_users_snell_psk_v1") {
+			return outcome, fmt.Errorf("snell_multi_psk_unsupported")
 		}
-		r.runtimeUsersMu.Unlock()
 	}
 	outcome.runtimes = map[string]string{}
 	if !r.kernelSupportsRuntimeUsers() {
@@ -197,7 +221,7 @@ func (r *Runner) applyRuntimeUsers(ctx context.Context, req model.UsersInstallRe
 		outcome.runtimes["kernel"] = "unreachable"
 		return outcome, fmt.Errorf("apply kernel users: %w", err)
 	}
-	payload, _ := io.ReadAll(io.LimitReader(res.Body, 64<<10))
+	payload, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
 	res.Body.Close()
 	if res.StatusCode == http.StatusAccepted {
 		outcome.runtimes["kernel"] = "incomplete"
@@ -215,18 +239,26 @@ func (r *Runner) applyRuntimeUsers(ctx context.Context, req model.UsersInstallRe
 		outcome.runtimes["kernel"] = "readback_failed"
 		return outcome, err
 	}
-	if status.UsersRevision != req.UsersRevision || (status.UsersDigest != "" && status.UsersDigest != req.UsersDigest) {
+	if status.UsersRevision != req.UsersRevision || status.UsersDigest != req.UsersDigest || status.BootID == "" {
 		outcome.runtimes["kernel"] = "mismatch"
 		return outcome, fmt.Errorf("kernel reports users revision=%d digest=%s, expected revision=%d digest=%s", status.UsersRevision, status.UsersDigest, req.UsersRevision, req.UsersDigest)
 	}
 	r.runtimeUsersMu.Lock()
-	if req.Chunk == nil {
+	previous, previousBoot := r.runtimeUsersCurrent, r.runtimeUsersBootID
+	if req.Chunk == nil && req.Mode == "full" {
 		r.runtimeUsersCurrent = &req
+	} else {
+		r.runtimeUsersCurrent = nil
 	}
 	r.runtimeUsersBootID = status.BootID
-	_ = r.persistRuntimeUsersLocked()
+	if err := r.persistRuntimeUsersLocked(); err != nil {
+		r.runtimeUsersCurrent, r.runtimeUsersBootID = previous, previousBoot
+		r.runtimeUsersMu.Unlock()
+		return outcome, err
+	}
+	r.runtimeUsersApplied = &model.UsersAppliedSnapshot{Revision: status.UsersRevision, Digest: status.UsersDigest, BootID: status.BootID}
 	r.runtimeUsersMu.Unlock()
-	if req.Chunk != nil {
+	if req.Chunk != nil || req.Mode == "delta" {
 		r.wakeUsersSync()
 	}
 	outcome.revision, outcome.digest, outcome.bootID = status.UsersRevision, status.UsersDigest, status.BootID
@@ -236,6 +268,9 @@ func (r *Runner) applyRuntimeUsers(ctx context.Context, req model.UsersInstallRe
 }
 
 func (r *Runner) kernelSupportsRuntimeUsers() bool {
+	return r.kernelSupportsUsersCapability(kernelCapabilityRuntimeUsers)
+}
+func (r *Runner) kernelSupportsUsersCapability(want string) bool {
 	r.mu.Lock()
 	capabilities := append([]string(nil), r.lastKernelCapabilities...)
 	r.mu.Unlock()
@@ -243,7 +278,7 @@ func (r *Runner) kernelSupportsRuntimeUsers() bool {
 		_, capabilities = r.coreIdentity()
 	}
 	for _, capability := range capabilities {
-		if capability == kernelCapabilityRuntimeUsers {
+		if capability == want {
 			return true
 		}
 	}
@@ -264,7 +299,7 @@ func (r *Runner) readKernelUsersStatus(ctx context.Context) (kernelUsersStatus, 
 	if res.StatusCode != http.StatusOK {
 		return status, fmt.Errorf("kernel users status %d", res.StatusCode)
 	}
-	if err := json.NewDecoder(io.LimitReader(res.Body, 64<<10)).Decode(&status); err != nil {
+	if err := json.NewDecoder(io.LimitReader(res.Body, 1<<20)).Decode(&status); err != nil {
 		return status, err
 	}
 	return status, nil
@@ -327,6 +362,7 @@ func (r *Runner) dropPersistedRuntimeUsers() error {
 	r.runtimeUsersMu.Lock()
 	defer r.runtimeUsersMu.Unlock()
 	r.runtimeUsersCurrent = nil
+	r.runtimeUsersApplied = nil
 	if err := os.Remove(r.runtimeUsersPath()); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}

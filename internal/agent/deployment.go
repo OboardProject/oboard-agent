@@ -413,7 +413,9 @@ func (r *Runner) deploymentReplayResponse(payload model.DeploymentTaskPayload) (
 		steps = append(steps, deploymentStepResult{Key: "config", Label: "应用核心配置", Status: "failed", Error: err.Error()})
 		return deploymentTaskResponse(payload.Version, steps, 1, 0)
 	}
-	steps = append(steps, deploymentStepResult{Key: "config", Label: "应用核心配置", Status: "skipped", Message: "部署版本已应用", Result: map[string]any{"idempotent_replay": true, "effective_config_sha256": digest}})
+	configResult := map[string]any{"idempotent_replay": true, "effective_config_sha256": digest}
+	r.annotateActiveCoreRuntime(context.Background(), configResult)
+	steps = append(steps, deploymentStepResult{Key: "config", Label: "应用核心配置", Status: "skipped", Message: "部署版本已应用", Result: configResult})
 	sshResult, err := r.applySSHInbounds(payload.SSHInbounds)
 	if err != nil {
 		steps = append(steps, deploymentStepResult{Key: "ssh_inbounds", Label: "应用 SSH 入站", Status: "failed", Error: err.Error()})

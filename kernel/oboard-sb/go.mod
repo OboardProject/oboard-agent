@@ -88,3 +88,5 @@ require (
 )
 
 replace github.com/enfein/mieru/v3 => ./third_party/mieru
+
+replace github.com/sagernet/sing-snell => ./third_party/sing-snell

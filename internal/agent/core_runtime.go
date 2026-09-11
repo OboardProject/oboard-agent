@@ -891,3 +891,11 @@ func coreRuntimeMetadataOnlyChange(previous, next []byte) (bool, error) {
 	}
 	return !bytes.Equal(bytes.TrimSpace(previous), bytes.TrimSpace(next)), nil
 }
+
+func (r *Runner) annotateActiveCoreRuntime(ctx context.Context, result map[string]any) {
+	desired, err := os.ReadFile(filepath.Join(r.stateDir(), "sing-box.json"))
+	if err != nil {
+		return
+	}
+	r.checkCoreRuntimeConfig(ctx, desired).annotate(result)
+}

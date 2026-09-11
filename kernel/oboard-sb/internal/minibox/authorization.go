@@ -122,6 +122,7 @@ func (t *RateLimitTracker) AuthorizationStatus() authorization.Status {
 // revoked. Quota reject_new never closes an admitted connection here; only
 // the authorization verdict does.
 func (t *RateLimitTracker) ReapAuthorization() int {
+	defer t.reapSnellParents(false)
 	conns, packets := t.revokedConnections()
 	for _, conn := range conns {
 		_ = conn.Close()
