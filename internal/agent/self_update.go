@@ -256,6 +256,9 @@ func preflightStagedCore(stagedCore, configPath string, timeout time.Duration) (
 	if err := os.Chmod(stagedCore, 0o700); err != nil {
 		return corePreflightSkipped, "staged kernel is not executable: " + err.Error(), nil
 	}
+	if note, ok := corePreflightMemoryShortfall(); !ok {
+		return corePreflightSkipped, note, nil
+	}
 	runErr := runCommand(timeout, stagedCore, "-check", "-config", configPath)
 	if runErr == nil {
 		return corePreflightValidated, "", nil
@@ -265,6 +268,41 @@ func preflightStagedCore(stagedCore, configPath string, timeout time.Duration) (
 		return corePreflightSkipped, "", fmt.Errorf("downloaded kernel rejected the active configuration; update aborted before any file was replaced: %w", runErr)
 	}
 	return corePreflightSkipped, "staged kernel could not be validated: " + runErr.Error(), nil
+}
+
+// corePreflightMinHeadroomBytes is the cgroup headroom the preflight needs.
+// The check starts a second kernel process beside the one already serving
+// traffic, and that peer parses the whole active configuration before it exits.
+// On a memory-capped node the pair can cross the limit, and the cgroup OOM
+// killer then picks a victim by RSS — routinely the Agent itself, which dies
+// without writing anything and, on a service manager with no supervisor, never
+// comes back. Losing the preflight costs one verdict; losing the Agent costs
+// the whole node.
+const corePreflightMinHeadroomBytes = 96 << 20
+
+// corePreflightMemoryShortfall reports whether the cgroup has room to run the
+// staged kernel beside the live one. An unknown limit is not a shortfall: a
+// node without a cgroup memory cap is bounded by host memory, where this
+// failure mode does not apply, and refusing to preflight there would weaken
+// every ordinary update for nothing.
+func corePreflightMemoryShortfall() (string, bool) {
+	return corePreflightMemoryVerdict(detectedCgroupMemoryLimit(), detectedCgroupMemoryUsage())
+}
+
+// corePreflightMemoryVerdict is the decision itself, separated from reading the
+// cgroup so it can be exercised without one.
+func corePreflightMemoryVerdict(limit int64, usage uint64) (string, bool) {
+	if limit <= 0 {
+		return "", true
+	}
+	if usage == 0 || uint64(limit) <= usage {
+		return fmt.Sprintf("skipped the staged-kernel preflight: cgroup memory usage could not be trusted (limit=%d current=%d)", limit, usage), false
+	}
+	headroom := uint64(limit) - usage
+	if headroom < corePreflightMinHeadroomBytes {
+		return fmt.Sprintf("skipped the staged-kernel preflight: only %d bytes of cgroup memory headroom, below the %d required to run a second kernel beside the live one", headroom, uint64(corePreflightMinHeadroomBytes)), false
+	}
+	return "", true
 }
 
 func checkUpdateDiskBudget(targets signedReleaseTargets, sizes ...int64) error {

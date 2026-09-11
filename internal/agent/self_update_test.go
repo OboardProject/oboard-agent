@@ -715,3 +715,42 @@ func TestGitHubUpdateUsesControllerPinnedManifest(t *testing.T) {
 	}
 	assertFileContent(t, agentPath, []byte("old-agent"))
 }
+
+// The staged-kernel preflight starts a second kernel beside the live one. On a
+// memory-capped node that pair can cross the cgroup limit, and the OOM killer
+// then picks a victim by RSS - routinely the Agent, which dies silently and,
+// under a service manager with no supervisor, never returns. The preflight is
+// one verdict; the Agent is the whole node, so a node without headroom skips
+// the check instead of risking itself.
+func TestCorePreflightMemoryVerdict(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		limit int64
+		usage uint64
+		want  bool
+	}{
+		{"no cgroup limit runs the preflight", 0, 0, true},
+		{"unlimited cgroup runs the preflight", 0, 64 << 20, true},
+		{"ample headroom runs the preflight", 2 << 30, 512 << 20, true},
+		{"headroom exactly at the floor runs the preflight", 256 << 20, 160 << 20, true},
+		// The node this guard exists for: a 128 MiB container already holding a
+		// live kernel at 78 MiB, which is where the Agent was OOM-killed.
+		{"starved container skips the preflight", 128 << 20, 78 << 20, false},
+		{"headroom just under the floor skips the preflight", 256 << 20, (160 << 20) + 1, false},
+		{"usage above the limit skips the preflight", 128 << 20, 256 << 20, false},
+		{"unreadable usage skips the preflight", 128 << 20, 0, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			note, ok := corePreflightMemoryVerdict(tc.limit, tc.usage)
+			if ok != tc.want {
+				t.Fatalf("verdict = %v, want %v (limit=%d usage=%d)", ok, tc.want, tc.limit, tc.usage)
+			}
+			if ok && note != "" {
+				t.Fatalf("a preflight that runs must not carry a skip note: %q", note)
+			}
+			if !ok && note == "" {
+				t.Fatal("a skipped preflight must explain itself in the task result")
+			}
+		})
+	}
+}
