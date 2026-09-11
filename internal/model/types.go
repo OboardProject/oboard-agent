@@ -1004,17 +1004,18 @@ type ExternalEgressProbePlan struct {
 }
 
 type LatencyProbeTarget struct {
-	Mode     LatencyProbeMode `json:"mode,omitempty"`
-	URL      string           `json:"url,omitempty"`
-	ProbeID  string           `json:"probe_id"`
-	Kind     string           `json:"kind"`
-	TaskID   int64            `json:"task_id,omitempty"`
-	TaskName string           `json:"task_name,omitempty"`
-	Province string           `json:"province,omitempty"`
-	Carrier  string           `json:"carrier,omitempty"`
-	Host     string           `json:"host"`
-	IP       string           `json:"ip,omitempty"`
-	Port     int              `json:"port"`
+	MeasurementRevision string           `json:"measurement_revision,omitempty"`
+	Mode                LatencyProbeMode `json:"mode,omitempty"`
+	URL                 string           `json:"url,omitempty"`
+	ProbeID             string           `json:"probe_id"`
+	Kind                string           `json:"kind"`
+	TaskID              int64            `json:"task_id,omitempty"`
+	TaskName            string           `json:"task_name,omitempty"`
+	Province            string           `json:"province,omitempty"`
+	Carrier             string           `json:"carrier,omitempty"`
+	Host                string           `json:"host"`
+	IP                  string           `json:"ip,omitempty"`
+	Port                int              `json:"port"`
 	// IntervalSeconds is the autonomous cadence for this single target. Zero means the plan cadence.
 	IntervalSeconds int `json:"interval_seconds,omitempty"`
 }
@@ -1045,25 +1046,26 @@ type LatencyProbeTargetsPlan struct {
 }
 
 type LatencyProbeResult struct {
-	ProbeID      string    `json:"probe_id"`
-	Kind         string    `json:"kind"`
-	TaskID       int64     `json:"task_id,omitempty"`
-	TaskName     string    `json:"task_name,omitempty"`
-	Mode         string    `json:"mode"`
-	Province     string    `json:"province"`
-	Carrier      string    `json:"carrier"`
-	Host         string    `json:"host"`
-	IP           string    `json:"ip"`
-	Port         int       `json:"port"`
-	Available    bool      `json:"available"`
-	LatencyMS    int64     `json:"latency_ms"`
-	MinLatencyMS int64     `json:"min_latency_ms"`
-	P95LatencyMS int64     `json:"p95_latency_ms"`
-	JitterMS     int64     `json:"jitter_ms"`
-	SampleCount  int       `json:"sample_count"`
-	SuccessCount int       `json:"success_count"`
-	Error        string    `json:"error,omitempty"`
-	CheckedAt    time.Time `json:"checked_at"`
+	MeasurementRevision string    `json:"measurement_revision,omitempty"`
+	ProbeID             string    `json:"probe_id"`
+	Kind                string    `json:"kind"`
+	TaskID              int64     `json:"task_id,omitempty"`
+	TaskName            string    `json:"task_name,omitempty"`
+	Mode                string    `json:"mode"`
+	Province            string    `json:"province"`
+	Carrier             string    `json:"carrier"`
+	Host                string    `json:"host"`
+	IP                  string    `json:"ip"`
+	Port                int       `json:"port"`
+	Available           bool      `json:"available"`
+	LatencyMS           int64     `json:"latency_ms"`
+	MinLatencyMS        int64     `json:"min_latency_ms"`
+	P95LatencyMS        int64     `json:"p95_latency_ms"`
+	JitterMS            int64     `json:"jitter_ms"`
+	SampleCount         int       `json:"sample_count"`
+	SuccessCount        int       `json:"success_count"`
+	Error               string    `json:"error,omitempty"`
+	CheckedAt           time.Time `json:"checked_at"`
 }
 
 type LatencyProbeResultReport struct {

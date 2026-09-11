@@ -151,3 +151,21 @@ func TestQueueLatencyProbeReportRollsBackWhenPersistenceFails(t *testing.T) {
 		t.Fatalf("failed persistence changed pending state: %#v", runner.latencyProbeState.Pending)
 	}
 }
+
+func TestLatencyMeasurementRevisionSurvivesSuccessAndFailure(t *testing.T) {
+	for _, revision := range []string{"", "revision-v1"} {
+		plan := model.LatencyProbeTargetsPlan{ResourceVersion: "v1", Mode: model.LatencyProbeModeTCP, SampleCount: 1, Targets: []model.LatencyProbeTarget{{ProbeID: "target", Kind: "public", Host: "example.net", Port: 443, MeasurementRevision: revision}}}
+		report, _ := (&Runner{}).runLatencyProbeTaskWithProbe(context.Background(), plan, func(context.Context, string, int, int, time.Duration, time.Duration) ([]int64, []string) {
+			return nil, []string{"timeout"}
+		})
+		if len(report.Items) != 1 || report.Items[0].MeasurementRevision != revision {
+			t.Fatal("revision lost on failed report")
+		}
+		report, _ = (&Runner{}).runLatencyProbeTaskWithProbe(context.Background(), plan, func(context.Context, string, int, int, time.Duration, time.Duration) ([]int64, []string) {
+			return []int64{10}, nil
+		})
+		if report.Items[0].MeasurementRevision != revision {
+			t.Fatal("revision lost on successful report")
+		}
+	}
+}

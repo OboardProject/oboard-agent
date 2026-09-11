@@ -89,7 +89,7 @@ func (r *Runner) runLatencyProbeTaskWithProbe(ctx context.Context, plan model.La
 		if mode == model.LatencyProbeModeICMP {
 			port = 0
 		}
-		items[i] = model.LatencyProbeResult{ProbeID: target.ProbeID, Kind: target.Kind, TaskID: target.TaskID, TaskName: target.TaskName, Mode: string(mode), Province: target.Province, Carrier: target.Carrier, Host: target.Host, IP: target.IP, Port: port, SampleCount: samples, CheckedAt: now()}
+		items[i] = model.LatencyProbeResult{MeasurementRevision: target.MeasurementRevision, ProbeID: target.ProbeID, Kind: target.Kind, TaskID: target.TaskID, TaskName: target.TaskName, Mode: string(mode), Province: target.Province, Carrier: target.Carrier, Host: target.Host, IP: target.IP, Port: port, SampleCount: samples, CheckedAt: now()}
 		if err := validateLatencyProbeTarget(target, latencyTargetMode(target, plan.Mode)); err != nil {
 			items[i].Error = err.Error()
 			continue
