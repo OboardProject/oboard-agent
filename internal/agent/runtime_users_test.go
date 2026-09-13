@@ -171,3 +171,59 @@ func TestReapplyPersistedRuntimeUsersDropsScopeTheConfigNoLongerDeclares(t *test
 		t.Fatal("old delta was treated as a complete installed snapshot")
 	}
 }
+
+// TestSupersededUsersInstallCannotRestoreRevokedCredentials is the replay case:
+// a revoke lands, then an older install for the same node arrives again
+// (redelivery, reconnect, a Controller retrying an earlier revision). Applying
+// it would put the revoked credential back on the node.
+func TestSupersededUsersInstallCannotRestoreRevokedCredentials(t *testing.T) {
+	dir := t.TempDir()
+	core := writeFakeCoreBinaryWithCapabilities(t, dir, "build-users", []string{kernelCapabilityRuntimeUsers, coreRuntimeDigestCapability})
+	writeCoreConfig(t, dir, `{"log":{"level":"warn"},"inbounds":[{"tag":"in-a","type":"vless"}],"outbounds":[{"tag":"direct","type":"direct"}]}`)
+	kernel := newFakeCoreKernel(t, filepath.Join(dir, "sing-box.json"), true)
+	kernel.runtimeUsers = true
+	r := newRuntimeTestRunnerWithCore(t, dir, kernel, core)
+	cfg := r.Config()
+	cfg.AgentToken, cfg.AgentID, cfg.ServerID = "users-token", "users-agent", 8
+	r.storeConfig(cfg)
+
+	grant := model.UsersInstallRequest{
+		Scope: []string{"in-a"}, UsersRevision: 4, UsersDigest: "digest-4", Mode: "full",
+		Entries: []model.UsersInstallEntry{{InboundTag: "in-a", AuthUser: "alice", AuthorizationKey: "k-alice", Credential: model.UsersCredential{UUID: "11111111-1111-1111-1111-111111111111"}, RouteOutbound: "direct"}},
+	}
+	if ack := r.applyUsersEnvelope(context.Background(), signedTestUsersEnvelope(t, "users-token", 8, "g1", grant)); !ack.Confirmed {
+		t.Fatalf("grant not applied: %+v", ack)
+	}
+	revoke := model.UsersInstallRequest{Scope: []string{"in-a"}, UsersRevision: 5, UsersDigest: "digest-5", Mode: "full", Entries: []model.UsersInstallEntry{}}
+	if ack := r.applyUsersEnvelope(context.Background(), signedTestUsersEnvelope(t, "users-token", 8, "r1", revoke)); !ack.Confirmed {
+		t.Fatalf("revoke not applied: %+v", ack)
+	}
+
+	// The older grant is redelivered, correctly signed.
+	ack := r.applyUsersEnvelope(context.Background(), signedTestUsersEnvelope(t, "users-token", 8, "g2", grant))
+	if !ack.Confirmed {
+		t.Fatalf("superseded install should settle, not fail: %+v", ack)
+	}
+	if ack.Revision != 5 || ack.Runtimes["kernel"] != "superseded" {
+		t.Fatalf("superseded install reported %+v, want the installed revision", ack)
+	}
+	if applied := r.appliedUsers(); applied == nil || applied.Revision != 5 {
+		t.Fatalf("replayed install moved the node backwards: %+v", applied)
+	}
+	if revision := kernel.installedUsersRevision(); revision != 5 {
+		t.Fatalf("the replayed install reached the kernel: installed revision %d", revision)
+	}
+
+	// The same revision with different content is a conflict, not an update.
+	conflicting := model.UsersInstallRequest{Scope: []string{"in-a"}, UsersRevision: 5, UsersDigest: "digest-other", Mode: "full", Entries: grant.Entries}
+	if ack := r.applyUsersEnvelope(context.Background(), signedTestUsersEnvelope(t, "users-token", 8, "c1", conflicting)); ack.Confirmed || ack.Error == "" {
+		t.Fatalf("conflicting install accepted: %+v", ack)
+	}
+
+	// A restart still knows which revision the node is on.
+	restarted := newRuntimeTestRunnerWithCore(t, dir, kernel, core)
+	restarted.loadPersistedRuntimeUsers()
+	if applied := restarted.appliedUsers(); applied == nil || applied.Revision != 5 {
+		t.Fatalf("restart forgot the applied users revision: %+v", applied)
+	}
+}

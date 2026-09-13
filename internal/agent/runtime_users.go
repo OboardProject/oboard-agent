@@ -31,6 +31,11 @@ type persistedRuntimeUsers struct {
 	Current *model.UsersInstallRequest `json:"current,omitempty"`
 	Commit  string                     `json:"commit,omitempty"`
 	BootID  string                     `json:"boot_id,omitempty"`
+	// Applied is what this node actually has installed. It is persisted so a
+	// restart still knows which revision it is on: without it the Agent
+	// reported nothing after a restart, and an envelope older than the
+	// installed one had nothing to be compared against.
+	Applied *model.UsersAppliedSnapshot `json:"applied,omitempty"`
 }
 
 type kernelUsersStatus struct {
@@ -67,10 +72,14 @@ func (r *Runner) loadPersistedRuntimeUsers() {
 	}
 	r.runtimeUsersCurrent = state.Current
 	r.runtimeUsersBootID = state.BootID
+	if state.Applied != nil && state.Applied.Revision > 0 {
+		applied := *state.Applied
+		r.runtimeUsersApplied = &applied
+	}
 }
 
 func (r *Runner) persistRuntimeUsersLocked() error {
-	state := persistedRuntimeUsers{Current: r.runtimeUsersCurrent, Commit: "current", BootID: r.runtimeUsersBootID}
+	state := persistedRuntimeUsers{Current: r.runtimeUsersCurrent, Commit: "current", BootID: r.runtimeUsersBootID, Applied: r.runtimeUsersApplied}
 	data, err := json.Marshal(state)
 	if err != nil {
 		return err
@@ -195,6 +204,21 @@ func (r *Runner) applyRuntimeUsers(ctx context.Context, req model.UsersInstallRe
 	if err := validatePSKInstall(req); err != nil {
 		return outcome, err
 	}
+	// A users install is desired state, not an event: replaying one that is
+	// older than what this node already runs would reinstate credentials a
+	// later revision revoked. The same revision with different content is a
+	// conflict rather than an update, matching the task version gate.
+	if applied := r.appliedUsers(); applied != nil && applied.Revision > 0 {
+		switch {
+		case req.UsersRevision < applied.Revision:
+			outcome.runtimes = map[string]string{"kernel": "superseded"}
+			outcome.revision, outcome.digest, outcome.bootID = applied.Revision, applied.Digest, applied.BootID
+			outcome.verified = true
+			return outcome, nil
+		case req.UsersRevision == applied.Revision && req.Mode == "full" && req.Chunk == nil && req.UsersDigest != applied.Digest:
+			return outcome, fmt.Errorf("users revision %d already applied with a different digest", req.UsersRevision)
+		}
+	}
 	for _, entry := range req.Entries {
 		if entry.Credential.PSK != "" && !r.kernelSupportsUsersCapability("runtime_users_snell_psk_v1") {
 			return outcome, fmt.Errorf("snell_multi_psk_unsupported")
@@ -244,19 +268,21 @@ func (r *Runner) applyRuntimeUsers(ctx context.Context, req model.UsersInstallRe
 		return outcome, fmt.Errorf("kernel reports users revision=%d digest=%s, expected revision=%d digest=%s", status.UsersRevision, status.UsersDigest, req.UsersRevision, req.UsersDigest)
 	}
 	r.runtimeUsersMu.Lock()
-	previous, previousBoot := r.runtimeUsersCurrent, r.runtimeUsersBootID
+	previous, previousBoot, previousApplied := r.runtimeUsersCurrent, r.runtimeUsersBootID, r.runtimeUsersApplied
 	if req.Chunk == nil && req.Mode == "full" {
 		r.runtimeUsersCurrent = &req
 	} else {
 		r.runtimeUsersCurrent = nil
 	}
 	r.runtimeUsersBootID = status.BootID
+	// The applied snapshot is set before the persist so what lands on disk is
+	// the state this node is actually in, not the previous one.
+	r.runtimeUsersApplied = &model.UsersAppliedSnapshot{Revision: status.UsersRevision, Digest: status.UsersDigest, BootID: status.BootID}
 	if err := r.persistRuntimeUsersLocked(); err != nil {
-		r.runtimeUsersCurrent, r.runtimeUsersBootID = previous, previousBoot
+		r.runtimeUsersCurrent, r.runtimeUsersBootID, r.runtimeUsersApplied = previous, previousBoot, previousApplied
 		r.runtimeUsersMu.Unlock()
 		return outcome, err
 	}
-	r.runtimeUsersApplied = &model.UsersAppliedSnapshot{Revision: status.UsersRevision, Digest: status.UsersDigest, BootID: status.BootID}
 	r.runtimeUsersMu.Unlock()
 	if req.Chunk != nil || req.Mode == "delta" {
 		r.wakeUsersSync()

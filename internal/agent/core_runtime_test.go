@@ -65,6 +65,14 @@ func (k *fakeCoreKernel) deniedKeys() []string {
 	return append([]string(nil), k.authorizationDenied...)
 }
 
+// installedUsersRevision is what the kernel currently has, which is how a test
+// can tell an install that never reached it from one that did.
+func (k *fakeCoreKernel) installedUsersRevision() int64 {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return k.usersRevision
+}
+
 func (k *fakeCoreKernel) pushedAuthorizationRevisions() []int64 {
 	k.mu.Lock()
 	defer k.mu.Unlock()
