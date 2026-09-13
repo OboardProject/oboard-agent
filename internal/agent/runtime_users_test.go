@@ -227,3 +227,37 @@ func TestSupersededUsersInstallCannotRestoreRevokedCredentials(t *testing.T) {
 		t.Fatalf("restart forgot the applied users revision: %+v", applied)
 	}
 }
+
+// TestUsersInstallOnAKernelWithoutTheCapabilityIsNotConfirmed is the
+// mixed-version case: a new Controller pushes the fast lane to a node whose
+// kernel predates it. The install must not be reported as applied, so
+// Controller falls back to a full core configuration instead of believing the
+// users are in place.
+func TestUsersInstallOnAKernelWithoutTheCapabilityIsNotConfirmed(t *testing.T) {
+	dir := t.TempDir()
+	core := writeFakeCoreBinaryWithCapabilities(t, dir, "build-old", []string{coreRuntimeDigestCapability})
+	writeCoreConfig(t, dir, `{"log":{"level":"warn"},"inbounds":[{"tag":"in-a","type":"vless"}],"outbounds":[{"tag":"direct","type":"direct"}]}`)
+	kernel := newFakeCoreKernel(t, filepath.Join(dir, "sing-box.json"), true)
+	r := newRuntimeTestRunnerWithCore(t, dir, kernel, core)
+	cfg := r.Config()
+	cfg.AgentToken, cfg.AgentID, cfg.ServerID = "users-token", "users-agent", 8
+	r.storeConfig(cfg)
+
+	req := model.UsersInstallRequest{
+		Scope: []string{"in-a"}, UsersRevision: 2, UsersDigest: "digest-2", Mode: "full",
+		Entries: []model.UsersInstallEntry{{InboundTag: "in-a", AuthUser: "alice", AuthorizationKey: "k-alice", Credential: model.UsersCredential{UUID: "11111111-1111-1111-1111-111111111111"}, RouteOutbound: "direct"}},
+	}
+	ack := r.applyUsersEnvelope(context.Background(), signedTestUsersEnvelope(t, "users-token", 8, "m1", req))
+	if ack.Confirmed {
+		t.Fatalf("install confirmed on a kernel without the capability: %+v", ack)
+	}
+	if ack.Runtimes["kernel"] != "unsupported" || ack.Error == "" {
+		t.Fatalf("capability gap not reported: %+v", ack)
+	}
+	if applied := r.appliedUsers(); applied != nil {
+		t.Fatalf("nothing was installed but the node reports %+v", applied)
+	}
+	if revision := kernel.installedUsersRevision(); revision != 0 {
+		t.Fatalf("install reached a kernel that does not support it: %d", revision)
+	}
+}
