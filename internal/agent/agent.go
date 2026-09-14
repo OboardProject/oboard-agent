@@ -2313,7 +2313,7 @@ func (r *Runner) collectLogs(payloadJSON string) map[string]any {
 func (r *Runner) collectServiceLog(service string, lines int) map[string]any {
 	logPath := r.serviceLogPath(service)
 	backups := r.Config().CoreLogBackups
-	if service == "oboard-agent" {
+	if service == r.agentService() {
 		backups = r.Config().LogBackups
 	}
 	logFile := readManagedLogTail(logPath, backups, lines)
@@ -3044,6 +3044,11 @@ func (r *Runner) managedRestartEnabled() bool {
 // keep the reload path. This must stay false for oboard-sb until the kernel
 // advertises a real runtime-reload capability.
 func (r *Runner) coreHotReloadSupported() bool {
+	// In stealth mode the core is always the OBoard kernel under a generated
+	// name, so the reload path must stay closed exactly as for oboard-sb.
+	if r.stealthOn() {
+		return false
+	}
 	binary := strings.ToLower(filepath.Base(strings.TrimSpace(r.coreBinary())))
 	service := strings.ToLower(strings.TrimSpace(r.coreService()))
 	return binary != "oboard-sb" && service != "oboard-sb"
