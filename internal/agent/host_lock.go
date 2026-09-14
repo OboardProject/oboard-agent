@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -28,6 +29,23 @@ var hostCoreLockWait = 90 * time.Second
 // real task failure: something else is changing the kernel right now, and
 // applying on top of it would race the file it is installing.
 var errHostCoreLockBusy = errors.New("另一个 OBoard 更新或内核操作正在进行，请稍后重试")
+
+// hostCoreLockBusy names the process that recorded itself in the lock file. A
+// lock held by a shell installer that already exited is not a concurrent
+// operation but a leaked descriptor, and the holder line is what tells the two
+// apart without logging into the host.
+func hostCoreLockBusy(path string) error {
+	// #nosec G304 -- a fixed file name below the Agent's configured state directory.
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return errHostCoreLockBusy
+	}
+	holder := strings.TrimSpace(string(raw))
+	if holder == "" || len(holder) > 64 || strings.ContainsAny(holder, "\n\r") {
+		return errHostCoreLockBusy
+	}
+	return fmt.Errorf("%w（锁记录的持有者：%s）", errHostCoreLockBusy, holder)
+}
 
 func (r *Runner) hostCoreLockPath() string {
 	return r.statePath(hostCoreLockName)
@@ -80,7 +98,7 @@ func (r *Runner) acquireHostCoreLock(timeout time.Duration) (*hostCoreLock, erro
 		}
 		if time.Now().After(deadline) {
 			_ = file.Close()
-			return nil, errHostCoreLockBusy
+			return nil, hostCoreLockBusy(path)
 		}
 		time.Sleep(250 * time.Millisecond)
 	}
@@ -112,7 +130,7 @@ func (r *Runner) acquireStrictHostLock(timeout time.Duration) (*hostCoreLock, er
 		}
 		if time.Now().After(deadline) {
 			_ = file.Close()
-			return nil, errHostCoreLockBusy
+			return nil, hostCoreLockBusy(path)
 		}
 		time.Sleep(250 * time.Millisecond)
 	}

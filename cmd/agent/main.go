@@ -194,7 +194,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if enrollToken != "" {
-		if cfg.ControllerURL == "" {
+		if cfg.ControllerURL == "" && (cfg.Stealth == nil || cfg.Stealth.ControllerAddr == "") {
 			log.Fatal("-controller is required when OBOARD_ENROLL_TOKEN is set")
 		}
 		if err := runner.Enroll(ctx, enrollToken); err != nil {
@@ -315,18 +315,22 @@ func runStealthBootstrap(args []string) int {
 	updateRepo := fs.String("update-repo", "OboardProject/oboard-agent", "GitHub repository used for release updates")
 	configParent := fs.String("config-parent", "/etc", "parent directory for the generated config directory")
 	stateParent := fs.String("state-parent", "/var/lib", "parent directory for the generated state directory")
+	controllerAddr := fs.String("controller-addr", "", "dedicated stealth transport listener (host:port)")
+	controllerPin := fs.String("controller-pin", "", "SHA-256 pin of the stealth transport certificate")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	layout, err := agent.RunStealthBootstrap(agent.StealthBootstrapOptions{
-		InstallDir:       *installDir,
-		Manager:          *manager,
-		ControllerURL:    *controllerURL,
-		UpdateSource:     *updateSource,
-		AllowPanelUpdate: *allowPanelUpdate,
-		UpdateRepo:       *updateRepo,
-		ConfigParent:     *configParent,
-		StateParent:      *stateParent,
+		InstallDir:          *installDir,
+		Manager:             *manager,
+		ControllerURL:       *controllerURL,
+		UpdateSource:        *updateSource,
+		AllowPanelUpdate:    *allowPanelUpdate,
+		UpdateRepo:          *updateRepo,
+		ConfigParent:        *configParent,
+		StateParent:         *stateParent,
+		ControllerAddr:      *controllerAddr,
+		ControllerCertSHA256: *controllerPin,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "stealth bootstrap failed: %v\n", err)

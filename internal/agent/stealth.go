@@ -34,17 +34,23 @@ import (
 // directories are parameters so tests can relocate the whole layout; the
 // installer passes the production defaults.
 type stealthBootstrapOptions struct {
-	InstallDir     string
-	Manager        string // systemd | openrc
-	ControllerURL  string
-	UpdateSource   string
+	InstallDir       string
+	Manager          string // systemd | openrc
+	ControllerURL    string
+	UpdateSource     string
 	AllowPanelUpdate bool
-	UpdateRepo     string
-	ConfigParent   string
-	StateParent    string
-	UnitDir        string
-	LogDir         string
-	RunDir         string
+	UpdateRepo       string
+	ConfigParent     string
+	StateParent      string
+	UnitDir          string
+	LogDir           string
+	RunDir           string
+	// ControllerAddr is the dedicated binary-transport listener (host:port).
+	// When set, the generated config routes the control channel and every
+	// callback through it instead of the panel's HTTP surface.
+	ControllerAddr string
+	// ControllerCertSHA256 pins the transport certificate.
+	ControllerCertSHA256 string
 }
 
 func (o stealthBootstrapOptions) withDefaults() stealthBootstrapOptions {
@@ -140,7 +146,12 @@ func RunStealthBootstrap(opts stealthBootstrapOptions) (stealth.Layout, error) {
 		CoreService:      layout.CoreService,
 		AgentService:     layout.AgentService,
 		CoreSocket:       layout.CoreSocket,
-		Stealth:          &stealth.Settings{Identity: identity, KeyPath: layout.KeyPath},
+		Stealth: &stealth.Settings{
+			Identity:           identity,
+			KeyPath:            layout.KeyPath,
+			ControllerAddr:     strings.TrimSpace(opts.ControllerAddr),
+			ControllerCertSHA256: strings.TrimSpace(opts.ControllerCertSHA256),
+		},
 		UpdateSource:     strings.TrimSpace(opts.UpdateSource),
 		AllowPanelUpdate: opts.AllowPanelUpdate,
 		UpdateRepo:       strings.TrimSpace(opts.UpdateRepo),

@@ -234,9 +234,14 @@ func ResolveLayout(identity Identity, installDir, configParent, stateParent stri
 // service names, socket) stays in the top-level config fields so existing
 // validation and update paths keep working.
 type Settings struct {
-	Identity Identity        `json:"identity"`
-	KeyPath  string          `json:"key_path"`
-	Previous *PreviousLayout `json:"previous,omitempty"`
+	Identity Identity `json:"identity"`
+	KeyPath  string   `json:"key_path"`
+	// ControllerAddr is the dedicated binary-transport listener
+	// (host:port). Empty means the standard WebSocket channel.
+	ControllerAddr string `json:"controller_addr,omitempty"`
+	// ControllerCertSHA256 pins the listener certificate.
+	ControllerCertSHA256 string          `json:"controller_cert_sha256,omitempty"`
+	Previous             *PreviousLayout `json:"previous,omitempty"`
 	// Origin records the standard layout this installation switched away
 	// from. It survives the post-switch cleanup so a later disable can
 	// restore the exact original paths (a custom install root must not be

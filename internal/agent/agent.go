@@ -28,6 +28,7 @@ import (
 	"github.com/OboardProject/oboard-agent/internal/core"
 	"github.com/OboardProject/oboard-agent/internal/logging"
 	"github.com/OboardProject/oboard-agent/internal/model"
+	"github.com/OboardProject/oboard-agent/internal/agentlink"
 	"github.com/OboardProject/oboard-agent/internal/security"
 	"github.com/OboardProject/oboard-agent/internal/stealth"
 	"github.com/OboardProject/oboard-agent/internal/version"
@@ -178,6 +179,8 @@ type Runner struct {
 	coreServiceActiveCheck func() error
 	controllerLinkMu       sync.Mutex
 	controllerLink         controllerLinkDiagnostics
+	controlSessionMu       sync.Mutex
+	controlSessionLink     *agentlink.Session
 	stealthSwitchMu        sync.Mutex
 	stealthSwitchPending   *stealthSwitchFinalizer
 }
@@ -856,6 +859,9 @@ func lowOverheadTransportWithClock(now func() time.Time) *http.Transport {
 
 func (r *Runner) Enroll(ctx context.Context, enrollmentToken string) error {
 	bootstrap := r.Config()
+	if bootstrap.Stealth != nil && strings.TrimSpace(bootstrap.Stealth.ControllerAddr) != "" {
+		return r.enrollStealth(ctx, bootstrap.Stealth.ControllerAddr, bootstrap.Stealth.ControllerCertSHA256, enrollmentToken)
+	}
 	if strings.TrimSpace(bootstrap.ConfigPath) != "" {
 		if err := r.saveAgentConfig(bootstrap); err != nil {
 			return fmt.Errorf("save enrollment bootstrap config: %w", err)
@@ -982,18 +988,71 @@ func (r *Runner) logStartupSummary(cfg Config) {
 	logging.Infof("agent starting version=%s server_id=%d controller=%s state_dir=%s core_binary=%s core_service=%s update_source=%s update_repo=%s monitoring=%s", version.String(), cfg.ServerID, displayControllerURL(cfg.ControllerURL), cfg.StateDir, coreBinary, coreService, cfg.UpdateSource, cfg.UpdateRepo, r.monitoringMode)
 }
 
+// controlConn is the transport-neutral control channel the agent session
+// loop runs over: the standard WebSocket or the stealth binary protocol.
+type controlConn interface {
+	Close() error
+	RemoteAddr() string
+	// WriteJSON sends one message envelope.
+	WriteJSON(payload any) error
+	// ReadMessage returns the next raw message envelope bytes.
+	ReadMessage() ([]byte, error)
+	// SetReadDeadline extends the read deadline after any traffic.
+	SetReadDeadline(t time.Time) error
+}
+
+// wsControlConn adapts the gorilla connection.
+type wsControlConn struct {
+	conn *websocket.Conn
+}
+
+func (c wsControlConn) Close() error       { return c.conn.Close() }
+func (c wsControlConn) RemoteAddr() string { return c.conn.RemoteAddr().String() }
+func (c wsControlConn) WriteJSON(payload any) error {
+	if err := c.conn.SetWriteDeadline(time.Now().Add(controllerSocketWriteTimeout)); err != nil {
+		return err
+	}
+	return c.conn.WriteJSON(payload)
+}
+func (c wsControlConn) ReadMessage() ([]byte, error) {
+	_, data, err := c.conn.ReadMessage()
+	return data, err
+}
+func (c wsControlConn) SetReadDeadline(t time.Time) error { return c.conn.SetReadDeadline(t) }
+
 func (r *Runner) connect(ctx context.Context) error {
+	if cfg := r.Config(); cfg.Stealth != nil && strings.TrimSpace(cfg.Stealth.ControllerAddr) != "" {
+		return r.connectStealth(ctx)
+	}
+	wsConn, err := r.dialControl(ctx)
+	if err != nil {
+		return err
+	}
+	conn := wsControlConn{conn: wsConn}
+	wsConn.SetReadLimit(controllerSocketReadLimit)
+	configureControllerSocket(wsConn, controllerSocketReadTimeout)
+	return r.runControlSession(ctx, conn)
+}
+
+// dialControl establishes the standard WebSocket channel.
+func (r *Runner) dialControl(ctx context.Context) (*websocket.Conn, error) {
 	cfg := r.Config()
 	url, err := security.ControllerWebSocketURL(cfg.ControllerURL, version.IsDev(), cfg.AllowInsecureController)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	header := http.Header{"Authorization": []string{"Bearer " + cfg.AgentToken}, "X-Agent-ID": []string{cfg.AgentID}}
 	dialer := websocket.Dialer{ReadBufferSize: 1024, WriteBufferSize: 1024, EnableCompression: false, HandshakeTimeout: 10 * time.Second, TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, Time: time.Now}}
 	conn, handshakeResponse, err := dialer.DialContext(ctx, url, header)
 	if err != nil {
-		return newControllerHandshakeError(err, handshakeResponse)
+		return nil, newControllerHandshakeError(err, handshakeResponse)
 	}
+	return conn, nil
+}
+
+// runControlSession drives the shared session loop over one transport.
+func (r *Runner) runControlSession(ctx context.Context, conn controlConn) error {
+	cfg := r.Config()
 	r.recordControllerLinkConnected(time.Now().UTC())
 	logging.Debugf("controller connection peer: server_id=%d remote=%s", cfg.ServerID, conn.RemoteAddr())
 	defer conn.Close()
@@ -1008,8 +1067,6 @@ func (r *Runner) connect(ctx context.Context) error {
 		case <-done:
 		}
 	}()
-	conn.SetReadLimit(controllerSocketReadLimit)
-	configureControllerSocket(conn, controllerSocketReadTimeout)
 	defer r.closeAllTerminalSessions("controller_disconnect")
 	type websocketWriteRequest struct {
 		payload any
@@ -1024,10 +1081,7 @@ func (r *Runner) connect(ctx context.Context) error {
 		write := func(request websocketWriteRequest) bool {
 			// A Controller that stopped reading would otherwise park this
 			// writer forever, filling the queue and stalling every task ack.
-			err := conn.SetWriteDeadline(time.Now().Add(controllerSocketWriteTimeout))
-			if err == nil {
-				err = conn.WriteJSON(request.payload)
-			}
+			err := conn.WriteJSON(request.payload)
 			if request.done != nil {
 				request.done <- err
 			}
@@ -1318,7 +1372,7 @@ func (r *Runner) connect(ctx context.Context) error {
 		}
 	}()
 	for {
-		_, data, err := conn.ReadMessage()
+		data, err := conn.ReadMessage()
 		if err != nil {
 			return err
 		}
@@ -1810,14 +1864,26 @@ func (r *Runner) updateAgentBinary(payloadJSON string) (map[string]any, error) {
 	if err != nil {
 		return map[string]any{"message": "agent update failed", "source": source}, err
 	}
+	if r.stealthTransportActive() {
+		// Stealth agents never touch the panel's HTTP download surface; the
+		// same signed release travels over the binary transport.
+		outcome, err := r.downloadAndInstallSignedReleaseOverTransport(context.Background(), repo, payload.ExpectedBuild, targets, r.updateStagingPrefix())
+		return r.updateAgentResult(err, outcome, source, controllerURL, payload, targets, beforeAgent, beforeCore)
+	}
 	outcome, err := r.downloadAndInstallSignedRelease(context.Background(), r.client, releaseBaseURL, repo, payload.ExpectedBuild, targets, r.updateStagingPrefix())
+	return r.updateAgentResult(err, outcome, source, controllerURL, payload, targets, beforeAgent, beforeCore)
+}
+
+// updateAgentResult assembles the update task result and runs kernel
+// activation after a successful install. Both download paths share it.
+func (r *Runner) updateAgentResult(err error, outcome releaseInstallOutcome, source, controllerURL string, payload model.UpdateAgentTaskPayload, targets signedReleaseTargets, beforeAgent, beforeCore string) (map[string]any, error) {
 	manifest := outcome.Manifest
 	result := map[string]any{
 		"message":        "agent update completed",
 		"controller_url": controllerURL,
 		"expected_build": payload.ExpectedBuild,
 		"source":         source,
-		"github_repo":    repo,
+		"github_repo":    "",
 		"before_agent":   beforeAgent,
 		"before_core":    beforeCore,
 		"installed":      false,
@@ -3319,8 +3385,13 @@ func (r *Runner) postControllerJSON(ctx context.Context, path string, body any, 
 }
 
 // controllerJSON performs one authenticated Controller callback. A nil body
-// sends no request body (GET); extra headers are added verbatim.
+// sends no request body (GET); extra headers are added verbatim. In stealth
+// mode the callback travels as an RPC frame over the binary transport
+// instead of HTTP: the agent never touches the panel's HTTP surface.
 func (r *Runner) controllerJSON(ctx context.Context, method, path string, headers http.Header, body any, out any, auth bool) error {
+	if r.stealthTransportActive() {
+		return r.controllerJSONOverTransport(ctx, method, path, body, out, auth)
+	}
 	var reader io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
