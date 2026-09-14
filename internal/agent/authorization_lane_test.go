@@ -170,3 +170,27 @@ func TestAuthorizationRevokeBypassesBusyTaskLocksAndRollbackCannotResurrect(t *t
 		t.Fatalf("rollback changed the confirmed revision: %+v", applied)
 	}
 }
+
+func TestAuthorizationRenewalReachesRuntimeOnlyUsers(t *testing.T) {
+	dir := t.TempDir()
+	core := writeFakeCoreBinaryWithCapabilities(t, dir, "build-auth", []string{"authorization_lease_v1", kernelCapabilityAuthorizationControl, coreRuntimeDigestCapability})
+	config := `{"inbounds":[{"tag":"in-b","type":"vless","listen":"127.0.0.1","listen_port":22222}],"_oboard":{"runtime_users":{"inbounds":["in-b"]}}}`
+	writeCoreConfig(t, dir, config)
+	kernel := newFakeCoreKernel(t, filepath.Join(dir, "sing-box.json"), true)
+	kernel.authorizationControl = true
+	r := newRuntimeTestRunnerWithCore(t, dir, kernel, core)
+	issued := time.Now().UTC()
+	for sequence := int64(1); sequence <= 2; sequence++ {
+		at := issued.Add(time.Duration(sequence-1) * time.Second)
+		expires := at.Add(4 * time.Minute).Format(time.RFC3339Nano)
+		lease := model.AuthorizationLease{Revision: 11, Sequence: sequence, Digest: "runtime-users", IssuedAt: at.Format(time.RFC3339Nano), ExpiresAt: expires, Grants: map[string]string{"runtime-key": expires}}
+		outcome, err := r.applyAuthorization(t.Context(), &lease)
+		if err != nil || !outcome.RuntimeVerified || outcome.Runtimes["kernel"] != "verified" {
+			t.Fatalf("renewal skipped kernel: %#v, %v", outcome, err)
+		}
+		status, err := r.readKernelAuthorizationStatus(t.Context())
+		if err != nil || status.Sequence != sequence {
+			t.Fatalf("kernel did not receive renewal: %#v, %v", status, err)
+		}
+	}
+}
