@@ -92,6 +92,9 @@ func configHasAuthorizationUsers(raw []byte) (bool, error) {
 	}
 	var config struct {
 		Metadata struct {
+			RuntimeUsers struct {
+				Inbounds []string `json:"inbounds"`
+			} `json:"runtime_users"`
 			Limits struct {
 				Users    map[string]identity `json:"users"`
 				Inbounds map[string]identity `json:"inbounds"`
@@ -100,6 +103,11 @@ func configHasAuthorizationUsers(raw []byte) (bool, error) {
 	}
 	if err := json.Unmarshal(raw, &config); err != nil {
 		return false, err
+	}
+	for _, tag := range config.Metadata.RuntimeUsers.Inbounds {
+		if strings.TrimSpace(tag) != "" {
+			return true, nil
+		}
 	}
 	for _, entries := range []map[string]identity{config.Metadata.Limits.Users, config.Metadata.Limits.Inbounds} {
 		for _, entry := range entries {
