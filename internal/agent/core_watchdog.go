@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/OboardProject/oboard-agent/internal/logging"
@@ -78,7 +76,7 @@ func coreWatchdogBackoff(consecutive int) time.Duration {
 func (r *Runner) startCoreWatchdog(ctx context.Context) {
 	ticker := time.NewTicker(coreWatchdogInterval)
 	defer ticker.Stop()
-	status := coreWatchdogStatus{Service: r.coreService(), ConfigPath: filepath.Join(r.stateDir(), "sing-box.json")}
+	status := coreWatchdogStatus{Service: r.coreService(), ConfigPath: r.statePath(singBoxConfigFile)}
 	r.runCoreWatchdogCheck(ctx, &status, time.Now().UTC())
 	for {
 		select {
@@ -100,8 +98,7 @@ func (r *Runner) runCoreWatchdogCheck(ctx context.Context, status *coreWatchdogS
 	}
 	status.Service = r.coreService()
 	status.LastCheckedAt = now
-	// #nosec G304 -- ConfigPath is a fixed file below the Agent's configured state directory.
-	desired, readErr := os.ReadFile(status.ConfigPath)
+	desired, readErr := r.stateReadPath(status.ConfigPath)
 	if readErr != nil || len(desired) == 0 {
 		status.State = coreWatchdogStateWaitingForConfig
 		status.LastError = ""
@@ -182,7 +179,7 @@ func (r *Runner) runCoreWatchdogCheck(ctx context.Context, status *coreWatchdogS
 	}
 
 	status.Consecutive++
-	if err := validateSingBox(r.coreBinary(), status.ConfigPath, r.commandTimeout()); err != nil {
+	if err := r.validateSingBox(r.coreBinary(), status.ConfigPath, r.commandTimeout()); err != nil {
 		status.State = "invalid_config"
 		status.LastError = err.Error()
 		status.NextAttemptAt = now.Add(2 * time.Minute)
@@ -204,7 +201,7 @@ func (r *Runner) recoverCoreRuntimeDrift(ctx context.Context, status *coreWatchd
 	status.State = coreWatchdogStateRuntimeDrift
 	status.StableSince = time.Time{}
 	status.Consecutive++
-	if err := validateSingBox(r.coreBinary(), status.ConfigPath, r.commandTimeout()); err != nil {
+	if err := r.validateSingBox(r.coreBinary(), status.ConfigPath, r.commandTimeout()); err != nil {
 		status.State = "invalid_config"
 		status.LastError = err.Error()
 		status.NextAttemptAt = now.Add(2 * time.Minute)
@@ -242,7 +239,7 @@ func (r *Runner) recoverCoreBinaryDrift(ctx context.Context, status *coreWatchdo
 	status.State = coreWatchdogStateBinaryDrift
 	status.StableSince = time.Time{}
 	status.Consecutive++
-	if err := validateSingBox(r.coreBinary(), status.ConfigPath, r.commandTimeout()); err != nil {
+	if err := r.validateSingBox(r.coreBinary(), status.ConfigPath, r.commandTimeout()); err != nil {
 		// The installed kernel cannot run what is deployed. Restarting would
 		// turn a stale-but-serving node into an outage.
 		status.State = "invalid_config"
@@ -318,5 +315,5 @@ func (r *Runner) writeCoreWatchdogStatus(status coreWatchdogStatus) {
 	if err != nil {
 		return
 	}
-	_ = atomicWriteFile(filepath.Join(r.stateDir(), "core-watchdog.json"), data, 0o600)
+	_ = r.stateWrite("core-watchdog.json", data, 0o600)
 }

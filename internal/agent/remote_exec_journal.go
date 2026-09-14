@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/OboardProject/oboard-agent/internal/stealth"
 )
 
 const (
@@ -35,10 +37,13 @@ type remoteExecJournalRecord struct {
 type remoteExecJournal struct {
 	mu  sync.Mutex
 	dir string
+	// key encrypts journal records at rest in stealth mode. Records carry
+	// operator command output, which is as sensitive as the commands.
+	key []byte
 }
 
-func newRemoteExecJournal(dir string) *remoteExecJournal {
-	return &remoteExecJournal{dir: dir}
+func newRemoteExecJournal(dir string, key []byte) *remoteExecJournal {
+	return &remoteExecJournal{dir: dir, key: append([]byte(nil), key...)}
 }
 
 func (j *remoteExecJournal) Begin(requestID, digest string) (*remoteExecJournalRecord, error) {
@@ -79,9 +84,15 @@ func (j *remoteExecJournal) Complete(requestID, digest string, result []byte) er
 }
 
 func (j *remoteExecJournal) readLocked(requestID string) (*remoteExecJournalRecord, error) {
+	// #nosec G304 -- requestID is sanitized inside j.path.
 	raw, err := os.ReadFile(j.path(requestID))
 	if err != nil {
 		return nil, err
+	}
+	if len(j.key) > 0 && stealth.IsEncrypted(raw) {
+		if raw, err = stealth.Decrypt(j.key, raw); err != nil {
+			return nil, err
+		}
 	}
 	var record remoteExecJournalRecord
 	if err := json.Unmarshal(raw, &record); err != nil {
@@ -94,6 +105,13 @@ func (j *remoteExecJournal) writeLocked(record *remoteExecJournalRecord) error {
 	raw, err := json.Marshal(record)
 	if err != nil {
 		return err
+	}
+	if len(j.key) > 0 {
+		if encrypted, err := stealth.Encrypt(j.key, raw); err != nil {
+			return err
+		} else {
+			raw = encrypted
+		}
 	}
 	tmp := j.path(record.RequestID) + ".tmp"
 	if err := os.WriteFile(tmp, raw, 0o600); err != nil {

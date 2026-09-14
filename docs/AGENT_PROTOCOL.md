@@ -1247,6 +1247,55 @@ with `purge=true` also removes the config directory and state directory.
 Controller deletes the server record only after the succeeded task callback;
 failed or offline uninstall tasks leave the server in place.
 
+### `apply_stealth`
+
+Payload:
+
+```json
+{
+  "enable": true
+}
+```
+
+Controller queues this admin-only task when the per-server security-process
+switch changes on an enrolled, online server whose Agent advertises the
+`stealth_v1` capability. `enable=true` switches the installation into the
+hidden layout: the Agent generates a random identity (binary, service, config,
+state, log, and socket names), copies the binaries under their new names,
+migrates every state file into AES-256-GCM envelopes under HMAC-derived
+physical names, writes an encrypted config plus key file, installs the two
+renamed service units, restarts the kernel onto its new unit, and disables the
+old units. `enable=false` reverses the switch and restores the original
+standard layout recorded at enable time.
+
+The switch never destroys the old layout before the new one runs: files are
+copied, the new config is verified by loading it back, and the old units are
+only disabled. The Agent reports the result first; after `task_ack` it stops
+the old unit and starts the new one through a transient one-shot unit. The
+process that starts after the switch removes the leftover layout once and
+drops the record from its config. The task requires root and a managed service
+restart (`restart_command` must not be `none`).
+
+While stealth is active the Agent reports `stealth_active_v1` in
+`kernel_capabilities`; `stealth_v1` is advertised whenever the binary supports
+the task. In stealth mode `update_agent_config` rejects changes to
+`state_dir`, `core_binary`, and `core_service`, and always rejects
+`agent_service`, `core_socket`, and `stealth` fields: the layout is managed
+exclusively by `apply_stealth`. Shell-driven updates and uninstalls are not
+supported on a stealth installation; use the panel (`update_agent` /
+`uninstall_agent`), which preserves the generated names across every update.
+
+Result fields:
+
+```json
+{
+  "stealth_enabled": true,
+  "agent_service": "xk29dm3qpa",
+  "core_service": "p7b2nfw9rk",
+  "restart": "after_result_acknowledged"
+}
+```
+
 ### `update_agent_config`
 
 Payload is a partial Agent config patch:

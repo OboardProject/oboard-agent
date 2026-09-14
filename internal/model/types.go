@@ -765,9 +765,20 @@ const (
 	AgentTaskTypeRemoteExec            = "remote_exec"
 	AgentTaskTypeRemoteOperation       = "remote_operation"
 	AgentTaskTypeHostPowerAction       = "host_power_action"
+	AgentTaskTypeApplyStealth          = "apply_stealth"
 )
 
 const AgentCapabilityHostPower = "host_power_v1"
+
+// AgentCapabilityStealth is advertised by Agents that can switch the local
+// installation into (and out of) the security-process layout via the
+// apply_stealth task.
+const AgentCapabilityStealth = "stealth_v1"
+
+// AgentCapabilityStealthActive is reported while the Agent actually runs in
+// the security-process layout, so the panel can show desired versus actual
+// state for the per-server switch.
+const AgentCapabilityStealthActive = "stealth_active_v1"
 
 const AgentCapabilityTrafficPolicy = "traffic_policy_v1"
 
@@ -1147,6 +1158,15 @@ type UpdateAgentTaskPayload struct {
 
 type UninstallAgentTaskPayload struct {
 	Purge   bool  `json:"purge"`
+	ActorID int64 `json:"actor_id,omitempty"`
+}
+
+// ApplyStealthTaskPayload is the apply_stealth task body: enable switches the
+// local installation into the security-process layout (random process,
+// service, and file names with encrypted state), disable restores the
+// standard layout.
+type ApplyStealthTaskPayload struct {
+	Enable  bool  `json:"enable"`
 	ActorID int64 `json:"actor_id,omitempty"`
 }
 

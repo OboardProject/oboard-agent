@@ -238,9 +238,10 @@ func (r *Runner) enforceEmergencyDiskCleanup() {
 	}
 	// Clean stale update artifacts
 	if targets, err := r.signedReleaseTargets(); err == nil {
-		removeStaleReleaseSidecars(filepath.Dir(targets.Agent))
+		prefix := r.updateStagingPrefix()
+		r.removeStaleReleaseSidecars(filepath.Dir(targets.Agent), prefix)
 		if filepath.Dir(targets.Core) != filepath.Dir(targets.Agent) {
-			removeStaleReleaseSidecars(filepath.Dir(targets.Core))
+			r.removeStaleReleaseSidecars(filepath.Dir(targets.Core), prefix)
 		}
 		// Clean private temp staging dirs older than 24h
 		cleanStalePrivateUpdateTemps()

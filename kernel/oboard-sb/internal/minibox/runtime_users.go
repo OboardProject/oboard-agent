@@ -17,6 +17,7 @@ import (
 	"sync"
 
 	"github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/runtimeuser"
+	"github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/stealth"
 	box "github.com/sagernet/sing-box"
 )
 
@@ -114,6 +115,7 @@ type chunkBuffer struct {
 type RuntimeUsers struct {
 	mu       sync.Mutex
 	path     string
+	key      []byte
 	bootID   string
 	scope    map[string]struct{}
 	instance *box.Box
@@ -122,7 +124,7 @@ type RuntimeUsers struct {
 	chunks   *chunkBuffer
 }
 
-func NewRuntimeUsers(path string, instance *box.Box, tracker *RateLimitTracker, declared []string) *RuntimeUsers {
+func NewRuntimeUsers(path string, key []byte, instance *box.Box, tracker *RateLimitTracker, declared []string) *RuntimeUsers {
 	scope := map[string]struct{}{}
 	for _, tag := range declared {
 		tag = strings.TrimSpace(tag)
@@ -132,6 +134,7 @@ func NewRuntimeUsers(path string, instance *box.Box, tracker *RateLimitTracker, 
 	}
 	return &RuntimeUsers{
 		path:     path,
+		key:      append([]byte(nil), key...),
 		bootID:   newUsersBootID(),
 		scope:    scope,
 		instance: instance,
@@ -605,6 +608,7 @@ func (r *RuntimeUsers) load() (persistedUsers, error) {
 	if r.path == "" {
 		return persistedUsers{}, nil
 	}
+	// #nosec G304 -- path is a fixed file beside the kernel configuration.
 	file, err := os.Open(r.path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -623,6 +627,11 @@ func (r *RuntimeUsers) load() (persistedUsers, error) {
 		}
 		return persistedUsers{}, err
 	}
+	if len(r.key) > 0 && stealth.IsEncrypted(data) {
+		if data, err = stealth.Decrypt(r.key, data); err != nil {
+			return persistedUsers{}, fmt.Errorf("kernel users state is unreadable")
+		}
+	}
 	var state persistedUsers
 	if err := json.Unmarshal(data, &state); err != nil {
 		return persistedUsers{}, fmt.Errorf("kernel-users.json is unreadable")
@@ -640,6 +649,13 @@ func (r *RuntimeUsers) persist(state persistedUsers) error {
 	}
 	if len(data) > 32<<20 {
 		return ErrUserInstallIllegal
+	}
+	if len(r.key) > 0 {
+		if encrypted, err := stealth.Encrypt(r.key, data); err != nil {
+			return err
+		} else {
+			data = encrypted
+		}
 	}
 	if err := os.MkdirAll(filepath.Dir(r.path), 0700); err != nil {
 		return err

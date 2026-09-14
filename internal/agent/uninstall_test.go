@@ -68,14 +68,20 @@ func TestUninstallFinalizerCommandCoversPurgeAndServices(t *testing.T) {
 		CorePath:       "/opt/oboard/oboard-sb",
 		InstallDir:     "/opt/oboard",
 		ConfigPath:     "/etc/oboard-agent/config.json",
+		ConfigDir:      "/etc/oboard-agent",
 		StateDir:       "/var/lib/oboard-agent",
 		ProfilePath:    "/etc/profile.d/oboard-agent.sh",
+		CoreService:    "oboard-sb",
+		AgentService:   "oboard-agent",
+		AgentLog:       "/var/log/oboard-agent.log",
+		CoreLog:        "/var/log/oboard-sb.log",
+		CoreSocket:     "/run/oboard-sb.sock",
 		ServiceManager: "systemd",
 	}
 	command := uninstallFinalizerCommand(paths)
 	for _, want := range []string{
-		"systemctl stop oboard-agent oboard-sb",
-		"systemctl disable oboard-agent oboard-sb",
+		"systemctl stop 'oboard-agent' 'oboard-sb'",
+		"systemctl disable 'oboard-agent' 'oboard-sb'",
 		"/etc/systemd/system/oboard-agent.service",
 		"/opt/oboard/oboard-agent",
 		"/etc/oboard-agent",

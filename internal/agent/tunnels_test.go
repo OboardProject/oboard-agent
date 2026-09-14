@@ -153,7 +153,7 @@ func TestSetManagedSSHPasswordHashUsesNonLockedInvalidHash(t *testing.T) {
 	}
 	t.Setenv("CAPTURE", capture)
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	if err := setManagedSSHPasswordHash(); err != nil {
+	if err := setManagedSSHPasswordHash(managedSSHUser); err != nil {
 		t.Fatal(err)
 	}
 	b, err := os.ReadFile(capture)
@@ -244,7 +244,7 @@ func TestManagedSSHExecPathRunsThroughOboardSSHSymlink(t *testing.T) {
 	binDir := installFakeSSHDBinary(t, "#!/bin/sh\nexit 0\n")
 	sshdPath := filepath.Join(binDir, "sshd")
 	dir := t.TempDir()
-	linkPath, err := managedSSHExecPath(dir)
+	linkPath, err := managedSSHExecPath(dir, managedSSHProcessName)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -255,7 +255,7 @@ func TestManagedSSHExecPathRunsThroughOboardSSHSymlink(t *testing.T) {
 		t.Fatalf("symlink = %q (%v), want %q", resolved, err, sshdPath)
 	}
 	// A second call with the same host binary is idempotent.
-	if again, err := managedSSHExecPath(dir); err != nil || again != linkPath {
+	if again, err := managedSSHExecPath(dir, managedSSHProcessName); err != nil || again != linkPath {
 		t.Fatalf("idempotent exec path = %q (%v)", again, err)
 	}
 }
@@ -268,7 +268,7 @@ func TestManagedSSHExecPathFollowsHostSSHDMove(t *testing.T) {
 	}
 	t.Setenv("PATH", firstDir+string(os.PathListSeparator)+t.TempDir())
 	dir := t.TempDir()
-	if _, err := managedSSHExecPath(dir); err != nil {
+	if _, err := managedSSHExecPath(dir, managedSSHProcessName); err != nil {
 		t.Fatal(err)
 	}
 	secondDir := t.TempDir()
@@ -277,7 +277,7 @@ func TestManagedSSHExecPathFollowsHostSSHDMove(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", secondDir+string(os.PathListSeparator)+t.TempDir())
-	linkPath, err := managedSSHExecPath(dir)
+	linkPath, err := managedSSHExecPath(dir, managedSSHProcessName)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -293,7 +293,7 @@ func TestManagedSSHExecPathRefusesUnexpectedRegularFile(t *testing.T) {
 	if err := os.WriteFile(linkPath, []byte("#!/bin/sh\nexit 42\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	got, err := managedSSHExecPath(dir)
+	got, err := managedSSHExecPath(dir, managedSSHProcessName)
 	if err != nil {
 		t.Fatalf("regular file must be replaced by the symlink: %v", err)
 	}
@@ -308,7 +308,7 @@ func TestManagedSSHExecPathRequiresHostBinary(t *testing.T) {
 	}
 	emptyDir := t.TempDir()
 	t.Setenv("PATH", emptyDir)
-	if _, err := managedSSHExecPath(t.TempDir()); err == nil || !strings.Contains(err.Error(), "sshd is unavailable") {
+	if _, err := managedSSHExecPath(t.TempDir(), managedSSHProcessName); err == nil || !strings.Contains(err.Error(), "sshd is unavailable") {
 		t.Fatalf("error = %v, want sshd unavailable", err)
 	}
 }
@@ -359,7 +359,8 @@ func TestManagedSSHServerConfigUsesOboardProcessIdentity(t *testing.T) {
 	}
 	sshdScript := "#!/bin/sh\nif [ \"$1\" = \"-T\" ]; then echo 'port 22\nsshdsessionpath " + helperPath + "'; exit 0; fi\nexit 0\n"
 	installFakeSSHDBinary(t, sshdScript)
-	config, err := managedSSHServerConfig(dir, 2222, filepath.Join(dir, "sshd-host-ed25519"))
+	runner := New(Config{})
+	config, err := runner.managedSSHServerConfig(dir, 2222, filepath.Join(dir, "sshd-host-ed25519"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -392,7 +393,8 @@ func TestManagedSSHServerConfigUsesOboardProcessIdentity(t *testing.T) {
 func TestManagedSSHServerConfigOmitsDirectivesOnLegacySSHD(t *testing.T) {
 	installFakeSSHDBinary(t, "#!/bin/sh\nif [ \"$1\" = \"-T\" ]; then echo 'port 22'; exit 0; fi\nexit 0\n")
 	dir := t.TempDir()
-	config, err := managedSSHServerConfig(dir, 2222, filepath.Join(dir, "sshd-host-ed25519"))
+	runner := New(Config{})
+	config, err := runner.managedSSHServerConfig(dir, 2222, filepath.Join(dir, "sshd-host-ed25519"))
 	if err != nil {
 		t.Fatal(err)
 	}

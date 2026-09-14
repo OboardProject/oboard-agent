@@ -81,7 +81,7 @@ func TestSnellSharedBranchDNSAndRuntimeLifecycle(t *testing.T) {
 			if e = os.WriteFile(f.configPath, raw, 0600); e != nil {
 				t.Fatal(e)
 			}
-			opts, _, e := LoadConfig(f.configPath, HY2Tuning{})
+			opts, _, e := LoadConfig(f.configPath, nil, HY2Tuning{})
 			if e != nil {
 				t.Fatal(e)
 			}
@@ -92,7 +92,7 @@ func TestSnellSharedBranchDNSAndRuntimeLifecycle(t *testing.T) {
 			}
 			t.Cleanup(func() { b.Close() })
 			tracker := AttachRuntimeTrackers(ctx, RuntimeMetadata{RuntimeUsers: &RuntimeUsersMeta{Inbounds: []string{"in-1"}}})
-			users := NewRuntimeUsers(filepath.Join(t.TempDir(), "kernel-users.json"), b, tracker, []string{"in-1"})
+			users := NewRuntimeUsers(filepath.Join(t.TempDir(), "kernel-users.json"), nil, b, tracker, []string{"in-1"})
 			if e = b.Start(); e != nil {
 				t.Fatal(e)
 			}

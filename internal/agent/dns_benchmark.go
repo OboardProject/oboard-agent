@@ -14,7 +14,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -613,7 +612,7 @@ func newDNSBenchmarkReportID() string {
 
 func (r *Runner) loadDNSBenchmarkState() (dnsBenchmarkLocalState, error) {
 	state := dnsBenchmarkLocalState{LastRun: map[string]time.Time{}, Best: map[string]model.DNSBenchmarkGroup{}}
-	data, err := os.ReadFile(r.dnsBenchmarkStatePath())
+	data, err := r.stateReadPath(r.dnsBenchmarkStatePath())
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return state, nil
@@ -640,9 +639,9 @@ func (r *Runner) saveDNSBenchmarkState(state dnsBenchmarkLocalState) error {
 	if err != nil {
 		return err
 	}
-	return atomicWriteFile(r.dnsBenchmarkStatePath(), data, 0o600)
+	return r.stateWritePath(r.dnsBenchmarkStatePath(), data, 0o600)
 }
 
 func (r *Runner) dnsBenchmarkStatePath() string {
-	return filepath.Join(r.stateDir(), "dns-benchmark.json")
+	return r.statePath("dns-benchmark.json")
 }

@@ -87,7 +87,7 @@ func (r *Runner) validateRouteRelayCapability(ctx context.Context) error {
 func (r *Runner) validateKernelCapability(ctx context.Context, required string) error {
 	client := r.coreClient
 	if client == nil {
-		client = unixHTTPClient(coreAPISocket)
+		client = unixHTTPClient(r.coreAPISocketPath())
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://oboard-sb/version", nil)
 	if err != nil {

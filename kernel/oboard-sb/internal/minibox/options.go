@@ -3,14 +3,33 @@ package minibox
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"strings"
 
 	"github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/authorization"
+	"github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/stealth"
 
 	"github.com/sagernet/sing-box/option"
 	badjson "github.com/sagernet/sing/common/json"
 )
+
+// readConfigFile reads a configuration file, decrypting a stealth envelope
+// when a key is provided. A nil key keeps plaintext reading.
+func readConfigFile(path string, key []byte) ([]byte, error) {
+	// #nosec G304 -- path is an explicit local CLI flag supplied by the Agent service.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if len(key) > 0 {
+		if !stealth.IsEncrypted(data) {
+			return nil, errors.New("configuration file is not encrypted but a stealth key was provided")
+		}
+		return stealth.Decrypt(key, data)
+	}
+	return data, nil
+}
 
 type HY2Tuning struct {
 	Enabled               bool
@@ -66,9 +85,8 @@ type RuntimeUserLimit struct {
 	QuotaState        string `json:"quota_state,omitempty"`
 }
 
-func LoadConfig(path string, tuning HY2Tuning) (option.Options, RuntimeMetadata, error) {
-	// #nosec G304 -- path is an explicit local CLI flag supplied by the Agent service.
-	data, err := os.ReadFile(path)
+func LoadConfig(path string, key []byte, tuning HY2Tuning) (option.Options, RuntimeMetadata, error) {
+	data, err := readConfigFile(path, key)
 	if err != nil {
 		return option.Options{}, RuntimeMetadata{}, err
 	}

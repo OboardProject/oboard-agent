@@ -12,6 +12,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/stealth"
 )
 
 const MaxLifetime = 5 * time.Minute
@@ -141,6 +143,8 @@ type Status struct {
 type Store struct {
 	mu     sync.Mutex
 	path   string
+	// key encrypts the lease and deny files at rest when set (stealth mode).
+	key    []byte
 	loaded bool
 	err    error
 	lease  *Lease
@@ -151,8 +155,11 @@ type Store struct {
 	onChange func()
 }
 
-func NewStore(path string) *Store {
-	return &Store{path: path, denied: map[string]deniedEntry{}, bootID: newBootID(), now: time.Now}
+// NewStore creates a lease store at path. A non-empty key stores the lease
+// and deny watermark as encrypted envelopes (stealth mode); an empty key
+// keeps plaintext JSON.
+func NewStore(path string, key []byte) *Store {
+	return &Store{path: path, key: append([]byte(nil), key...), denied: map[string]deniedEntry{}, bootID: newBootID(), now: time.Now}
 }
 
 // SetChangeHook registers a callback that runs after the installed lease or
@@ -211,7 +218,7 @@ func (s *Store) load() {
 	if s.path == "" {
 		return
 	}
-	data, err := os.ReadFile(s.path)
+	data, err := s.readState(s.path)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
 	case err != nil:
@@ -229,7 +236,7 @@ func (s *Store) load() {
 		}
 		s.lease = clone(&l)
 	}
-	deniedData, err := os.ReadFile(s.deniedPath())
+	deniedData, err := s.readState(s.deniedPath())
 	if errors.Is(err, os.ErrNotExist) {
 		return
 	}
@@ -410,7 +417,7 @@ func (s *Store) updateLocked(incoming *Lease) (UpdateResult, func(), error) {
 		if err != nil {
 			return UpdateResult{}, nil, err
 		}
-		if err := writeAtomic(s.path, data); err != nil {
+		if err := s.writeState(s.path, data); err != nil {
 			s.err = err
 			return UpdateResult{}, nil, err
 		}
@@ -418,7 +425,7 @@ func (s *Store) updateLocked(incoming *Lease) (UpdateResult, func(), error) {
 		if err != nil {
 			return UpdateResult{}, nil, err
 		}
-		if err := writeAtomic(s.deniedPath(), deniedData); err != nil {
+		if err := s.writeState(s.deniedPath(), deniedData); err != nil {
 			s.err = err
 			return UpdateResult{}, nil, err
 		}
@@ -465,7 +472,7 @@ func (s *Store) Deny(keys []string, revision int64) error {
 				s.mu.Unlock()
 				return err
 			}
-			if err := writeAtomic(s.deniedPath(), data); err != nil {
+			if err := s.writeState(s.deniedPath(), data); err != nil {
 				s.err = err
 				s.mu.Unlock()
 				return err
@@ -531,6 +538,33 @@ func (s *Store) compare(candidate *Lease) leaseOrder {
 	default:
 		return orderEqual
 	}
+}
+
+// readState reads a store file, decrypting it when the store holds a key.
+// A plaintext file is returned as-is so a crash mid-migration cannot wedge
+// the store.
+func (s *Store) readState(path string) ([]byte, error) {
+	// #nosec G304 -- path is the store path derived from the config directory.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if len(s.key) > 0 && stealth.IsEncrypted(data) {
+		return stealth.Decrypt(s.key, data)
+	}
+	return data, nil
+}
+
+// writeState writes a store file, encrypting it when the store holds a key.
+func (s *Store) writeState(path string, data []byte) error {
+	if len(s.key) > 0 {
+		encrypted, err := stealth.Encrypt(s.key, data)
+		if err != nil {
+			return err
+		}
+		data = encrypted
+	}
+	return writeAtomic(path, data)
 }
 
 func writeAtomic(path string, data []byte) error {

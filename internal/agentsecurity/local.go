@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"github.com/OboardProject/oboard-agent/internal/model"
+	"github.com/OboardProject/oboard-agent/internal/stealth"
 )
 
 const (
@@ -63,13 +64,16 @@ func (p Policy) Allows(feature string) bool {
 type Store struct {
 	mu   sync.Mutex
 	path string
+	// key encrypts the policy file at rest in stealth mode. An empty key
+	// keeps the plaintext JSON file.
+	key []byte
 }
 
-func NewStore(path string) *Store {
+func NewStore(path string, key []byte) *Store {
 	if strings.TrimSpace(path) == "" {
 		path = DefaultPath
 	}
-	return &Store{path: path}
+	return &Store{path: path, key: append([]byte(nil), key...)}
 }
 
 func PathForConfig(configPath string) string {
@@ -89,12 +93,18 @@ func (s *Store) Load() (Policy, error) {
 }
 
 func (s *Store) loadLocked() (Policy, error) {
+	// #nosec G304 -- s.path is derived from the agent config directory.
 	raw, err := os.ReadFile(s.path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return DefaultPolicy(), nil
 		}
 		return Policy{}, err
+	}
+	if len(s.key) > 0 && stealth.IsEncrypted(raw) {
+		if raw, err = stealth.Decrypt(s.key, raw); err != nil {
+			return Policy{}, err
+		}
 	}
 	var policy Policy
 	if err := json.Unmarshal(raw, &policy); err != nil {
@@ -114,8 +124,17 @@ func (s *Store) Save(policy Policy) error {
 	if err != nil {
 		return err
 	}
+	if len(s.key) > 0 {
+		if sealed, err := stealth.Encrypt(s.key, append(raw, '\n')); err != nil {
+			return err
+		} else {
+			raw = sealed
+		}
+	} else {
+		raw = append(raw, '\n')
+	}
 	tmp := s.path + ".tmp"
-	if err := os.WriteFile(tmp, append(raw, '\n'), FileMode); err != nil {
+	if err := os.WriteFile(tmp, raw, FileMode); err != nil {
 		return err
 	}
 	if err := os.Chmod(tmp, FileMode); err != nil {

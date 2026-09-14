@@ -355,7 +355,7 @@ func (r *Runner) coreAPIClient() *http.Client {
 	if r.coreClient != nil {
 		return r.coreClient
 	}
-	return unixHTTPClient(coreAPISocket)
+	return unixHTTPClient(r.coreAPISocketPath())
 }
 
 func (r *Runner) coreKernelCapabilities(ctx context.Context) ([]string, error) {
@@ -631,9 +631,8 @@ func (r *Runner) restartCoreForRuntimeDrift(ctx context.Context, desired []byte)
 // and treating it as an update success is what let a failed restart print
 // "update completed".
 func (r *Runner) VerifyCoreRuntime(ctx context.Context) (string, error) {
-	configPath := filepath.Join(r.stateDir(), "sing-box.json")
-	// #nosec G304 -- a fixed file below the Agent's configured state directory.
-	desired, err := os.ReadFile(configPath)
+	configPath := r.statePath(singBoxConfigFile)
+	desired, err := r.stateReadPath(configPath)
 	if err != nil || len(bytes.TrimSpace(desired)) == 0 {
 		return "core runtime verification skipped: no kernel configuration is deployed", nil
 	}
@@ -713,8 +712,7 @@ func (r *Runner) restoreCoreRuntime(ctx context.Context, previousConfig []byte, 
 // treated as drifted, so this only ever forces the work that the non-replay
 // path would have done anyway.
 func (r *Runner) coreRuntimeConverged(ctx context.Context) bool {
-	// #nosec G304 -- a fixed file below the Agent's configured state directory.
-	desired, err := os.ReadFile(filepath.Join(r.stateDir(), "sing-box.json"))
+	desired, err := r.stateRead(singBoxConfigFile)
 	if err != nil || len(bytes.TrimSpace(desired)) == 0 {
 		return false
 	}
@@ -750,9 +748,8 @@ func (r *Runner) activateInstalledCoreLocked(ctx context.Context, binaryReplaced
 		result["core_activation_note"] = "restart_command is \"none\"; restart the kernel out of band to activate the installed build"
 		return result, nil
 	}
-	configPath := filepath.Join(r.stateDir(), "sing-box.json")
-	// #nosec G304 -- configPath is a fixed file below the Agent's configured state directory.
-	desired, readErr := os.ReadFile(configPath)
+	configPath := r.statePath(singBoxConfigFile)
+	desired, readErr := r.stateReadPath(configPath)
 	if readErr != nil || len(bytes.TrimSpace(desired)) == 0 {
 		// Nothing is deployed yet, so the next apply will start the new build.
 		result["core_activation"] = "waiting_for_config"
@@ -777,7 +774,7 @@ func (r *Runner) activateInstalledCoreLocked(ctx context.Context, binaryReplaced
 		result["core_activation"] = "not_required"
 		return result, nil
 	}
-	if err := validateSingBox(r.coreBinary(), configPath, r.commandTimeout()); err != nil {
+	if err := r.validateSingBox(r.coreBinary(), configPath, r.commandTimeout()); err != nil {
 		// Restarting onto a kernel that rejects the live configuration would
 		// turn a stale-but-serving node into an outage.
 		result["core_activation"] = "invalid_config"
@@ -849,7 +846,11 @@ func (r *Runner) kernelDigestVerdict(ctx context.Context, configPath, loadedDige
 	}
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, binary, "-operational-digest", "-config", configPath)
+	args := []string{"-operational-digest", "-config", configPath}
+	if keyPath := r.stealthKeyPath(); keyPath != "" {
+		args = append(args, "-key", keyPath)
+	}
+	cmd := exec.CommandContext(ctx, binary, args...)
 	cmd.Env = []string{}
 	output, err := cmd.Output()
 	if err != nil {
@@ -893,7 +894,7 @@ func coreRuntimeMetadataOnlyChange(previous, next []byte) (bool, error) {
 }
 
 func (r *Runner) annotateActiveCoreRuntime(ctx context.Context, result map[string]any) {
-	desired, err := os.ReadFile(filepath.Join(r.stateDir(), "sing-box.json"))
+	desired, err := r.stateRead(singBoxConfigFile)
 	if err != nil {
 		return
 	}

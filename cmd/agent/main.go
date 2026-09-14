@@ -22,28 +22,38 @@ func main() {
 	if len(args) >= 1 && strings.EqualFold(args[0], "maintenance") {
 		// Lightweight offline maintenance: no controller connection, no state sync.
 		configPath := defaultConfig()
-		if len(args) >= 3 && args[1] == "-config" {
-			configPath = args[2]
-		} else {
-			for i, a := range args {
-				if a == "-config" && i+1 < len(args) {
-					configPath = args[i+1]
-					break
-				}
-				if strings.HasPrefix(a, "-config=") {
-					configPath = strings.TrimPrefix(a, "-config=")
-					break
-				}
+		keyPath := ""
+		for i, a := range args {
+			if a == "-config" && i+1 < len(args) {
+				configPath = args[i+1]
 			}
-		}
-		// Also respect flag parsing for --config style
-		for _, a := range args {
+			if a == "-key" && i+1 < len(args) {
+				keyPath = args[i+1]
+			}
+			if strings.HasPrefix(a, "-config=") {
+				configPath = strings.TrimPrefix(a, "-config=")
+			}
 			if strings.HasPrefix(a, "--config=") {
 				configPath = strings.TrimPrefix(a, "--config=")
 			}
+			if strings.HasPrefix(a, "-key=") {
+				keyPath = strings.TrimPrefix(a, "-key=")
+			}
+			if strings.HasPrefix(a, "--key=") {
+				keyPath = strings.TrimPrefix(a, "--key=")
+			}
 		}
 		if len(args) >= 2 && args[1] == "storage" {
-			cfg, err := agent.LoadConfig(configPath)
+			var cfg agent.Config
+			var err error
+			if keyPath != "" {
+				var key []byte
+				if key, err = agent.LoadStealthKeyFile(keyPath); err == nil {
+					cfg, err = agent.LoadConfigWithKey(configPath, key)
+				}
+			} else {
+				cfg, err = agent.LoadConfig(configPath)
+			}
 			if err != nil && !os.IsNotExist(err) {
 				fmt.Fprintf(os.Stderr, "load config %s: %v\n", configPath, err)
 				os.Exit(1)
@@ -60,11 +70,15 @@ func main() {
 		fmt.Fprintf(os.Stderr, "usage: %s maintenance storage [-config path]\n", os.Args[0])
 		os.Exit(2)
 	}
+	if len(args) >= 1 && args[0] == "-stealth-bootstrap" {
+		os.Exit(runStealthBootstrap(args[1:]))
+	}
 	if filepath.Base(os.Args[0]) == "obag" || isManagementCommand(args) {
 		os.Exit(agent.RunManagementConsole(defaultConfig(), args, os.Stdin, os.Stdout, os.Stderr))
 	}
 	showVersion := flag.Bool("version", false, "print version and exit")
 	configPath := flag.String("config", defaultConfig(), "agent config path")
+	keyPath := flag.String("key", "", "stealth key file; decrypts the encrypted agent config and state")
 	controllerURL := flag.String("controller", "", "controller URL")
 	enrollOnly := flag.Bool("enroll-only", false, "enroll, save config, and exit")
 	stateDir := flag.String("state-dir", "/var/lib/oboard-agent", "agent state directory")
@@ -105,7 +119,24 @@ func main() {
 		fmt.Println("release verification ok")
 		return
 	}
-	cfg, _ := agent.LoadConfig(*configPath)
+	var stealthKey []byte
+	if strings.TrimSpace(*keyPath) != "" {
+		loaded, keyErr := agent.LoadStealthKeyFile(*keyPath)
+		if keyErr != nil {
+			log.Fatalf("load stealth key: %v", keyErr)
+		}
+		stealthKey = loaded
+	}
+	var cfg agent.Config
+	if len(stealthKey) > 0 {
+		loaded, cfgErr := agent.LoadConfigWithKey(*configPath, stealthKey)
+		if cfgErr != nil {
+			log.Fatalf("load encrypted config: %v", cfgErr)
+		}
+		cfg = loaded
+	} else {
+		cfg, _ = agent.LoadConfig(*configPath)
+	}
 	cfg.ConfigPath = *configPath
 	if *controllerURL != "" {
 		cfg.ControllerURL = *controllerURL
@@ -181,10 +212,18 @@ func main() {
 
 func fillLocalCoreDefaults(cfg agent.Config, executablePath string) agent.Config {
 	if strings.TrimSpace(cfg.CoreBinary) == "" && strings.TrimSpace(executablePath) != "" {
-		cfg.CoreBinary = agent.InstalledCoreBinary(executablePath)
+		if cfg.Stealth != nil && cfg.Stealth.Identity.CoreName != "" {
+			cfg.CoreBinary = filepath.Join(filepath.Dir(executablePath), cfg.Stealth.Identity.CoreName)
+		} else {
+			cfg.CoreBinary = agent.InstalledCoreBinary(executablePath)
+		}
 	}
 	if strings.TrimSpace(cfg.CoreService) == "" {
-		cfg.CoreService = "oboard-sb"
+		if cfg.Stealth != nil && cfg.Stealth.Identity.CoreName != "" {
+			cfg.CoreService = cfg.Stealth.Identity.CoreName
+		} else {
+			cfg.CoreService = "oboard-sb"
+		}
 	}
 	return cfg
 }
@@ -259,4 +298,47 @@ LimitNOFILE=1048576
 [Install]
 WantedBy=multi-user.target
 `, configPath)
+}
+
+// runStealthBootstrap implements the -stealth-bootstrap installer verb: it
+// converts the freshly downloaded standard install into the hidden layout
+// and prints shell-sourceable variables describing it. The installer script
+// consumes the printed lines to enroll and start the service.
+func runStealthBootstrap(args []string) int {
+	fs := flag.NewFlagSet("stealth-bootstrap", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	installDir := fs.String("install-dir", "/usr/local/bin", "directory holding the downloaded oboard-agent, oboard-sb, and oboard-realm binaries")
+	manager := fs.String("manager", "", "service manager: systemd or openrc")
+	controllerURL := fs.String("controller-url", "", "Controller base URL recorded in the encrypted config")
+	updateSource := fs.String("update-source", "panel", "agent update source: panel or github")
+	allowPanelUpdate := fs.Bool("allow-panel-update", true, "allow future Agent updates from the controller panel")
+	updateRepo := fs.String("update-repo", "OboardProject/oboard-agent", "GitHub repository used for release updates")
+	configParent := fs.String("config-parent", "/etc", "parent directory for the generated config directory")
+	stateParent := fs.String("state-parent", "/var/lib", "parent directory for the generated state directory")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	layout, err := agent.RunStealthBootstrap(agent.StealthBootstrapOptions{
+		InstallDir:       *installDir,
+		Manager:          *manager,
+		ControllerURL:    *controllerURL,
+		UpdateSource:     *updateSource,
+		AllowPanelUpdate: *allowPanelUpdate,
+		UpdateRepo:       *updateRepo,
+		ConfigParent:     *configParent,
+		StateParent:      *stateParent,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "stealth bootstrap failed: %v\n", err)
+		return 1
+	}
+	// Shell-sourceable output for the installer script. Paths are validated
+	// generated names without quotes or expansions.
+	fmt.Printf("STEALTH_AGENT_BIN=%s\n", layout.AgentBinary)
+	fmt.Printf("STEALTH_CORE_BIN=%s\n", layout.CoreBinary)
+	fmt.Printf("STEALTH_CONFIG_PATH=%s\n", layout.ConfigPath)
+	fmt.Printf("STEALTH_KEY_PATH=%s\n", layout.KeyPath)
+	fmt.Printf("STEALTH_AGENT_SERVICE=%s\n", layout.AgentService)
+	fmt.Printf("STEALTH_CORE_SERVICE=%s\n", layout.CoreService)
+	return 0
 }

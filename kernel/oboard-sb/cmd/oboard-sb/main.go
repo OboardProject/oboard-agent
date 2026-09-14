@@ -18,6 +18,7 @@ import (
 
 	"github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/authorization"
 	"github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/minibox"
+	"github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/stealth"
 	"github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/version"
 	box "github.com/sagernet/sing-box"
 	C "github.com/sagernet/sing-box/constant"
@@ -36,6 +37,7 @@ type runtimeConfigState struct {
 
 func main() {
 	config := flag.String("config", "config.json", "sing-box config path")
+	keyPath := flag.String("key", "", "optional stealth key file; decrypts the configuration and sibling state files")
 	check := flag.Bool("check", false, "validate config and exit")
 	operationalDigest := flag.Bool("operational-digest", false, "print the operational configuration digest for the config file and exit")
 	api := flag.String("api", "", "optional local health API listen address; supports unix:/path.sock")
@@ -53,8 +55,12 @@ func main() {
 		printVersion()
 		return
 	}
+	stealthKey, keyErr := loadStealthKey(*keyPath)
+	if keyErr != nil {
+		log.Fatal(keyErr)
+	}
 	if *operationalDigest {
-		digest, err := minibox.OperationalConfigDigestFile(*config)
+		digest, err := minibox.OperationalConfigDigestFile(*config, stealthKey)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -74,7 +80,7 @@ func main() {
 		IgnoreClientBandwidth: *hy2IgnoreClientBandwidth,
 		BrutalDebug:           *hy2BrutalDebug,
 	}
-	opts, runtimeMetadata, err := minibox.LoadConfig(*config, tuning)
+	opts, runtimeMetadata, err := minibox.LoadConfig(*config, stealthKey, tuning)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -91,7 +97,7 @@ func main() {
 		return
 	}
 
-	loadedOperationalDigest, err := minibox.OperationalConfigDigestFile(*config)
+	loadedOperationalDigest, err := minibox.OperationalConfigDigestFile(*config, stealthKey)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -107,10 +113,10 @@ func main() {
 		log.Fatal(err)
 	}
 	tracker := minibox.AttachRuntimeTrackers(boxCtx, runtimeMetadata)
-	if err := tracker.InitializeAuthorization(filepath.Join(filepath.Dir(*config), "kernel-authorization.json"), runtimeMetadata.Authorization); err != nil {
+	if err := tracker.InitializeAuthorization(kernelStatePath(*config, stealthKey, "kernel-authorization.json"), stealthKey, runtimeMetadata.Authorization); err != nil {
 		log.Fatal(err)
 	}
-	agentLease, err := authorization.NewStore(filepath.Join(filepath.Dir(*config), "authorization.json")).Snapshot()
+	agentLease, err := authorization.NewStore(kernelStatePath(*config, stealthKey, "authorization.json"), stealthKey).Snapshot()
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -121,7 +127,7 @@ func main() {
 	if runtimeMetadata.RuntimeUsers != nil {
 		declaredUsers = runtimeMetadata.RuntimeUsers.Inbounds
 	}
-	runtimeUsers := minibox.NewRuntimeUsers(filepath.Join(filepath.Dir(*config), "kernel-users.json"), b, tracker, declaredUsers)
+	runtimeUsers := minibox.NewRuntimeUsers(kernelStatePath(*config, stealthKey, "kernel-users.json"), stealthKey, b, tracker, declaredUsers)
 	go tracker.RunAuthorizationReaper(ctx)
 	socketGovernor := minibox.StartAdaptiveSocketGovernor(ctx, runtimeTuning)
 	tracker.SetSocketGovernor(socketGovernor)
@@ -142,6 +148,27 @@ func main() {
 	if err := b.Close(); err != nil {
 		log.Println(err)
 	}
+}
+
+// loadStealthKey reads the optional key file. An empty path means plaintext
+// mode and returns a nil key.
+func loadStealthKey(path string) ([]byte, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil, nil
+	}
+	return stealth.LoadKey(path)
+}
+
+// kernelStatePath resolves a sibling state file of the configuration. In
+// stealth mode the Agent stores every state file under a key-derived physical
+// name, so the kernel must derive the same name; in plaintext mode the
+// logical name is the file name.
+func kernelStatePath(configPath string, key []byte, logical string) string {
+	if len(key) > 0 {
+		return filepath.Join(filepath.Dir(configPath), stealth.PhysicalName(key, logical))
+	}
+	return filepath.Join(filepath.Dir(configPath), logical)
 }
 
 func printVersion() {

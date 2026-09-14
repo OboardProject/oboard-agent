@@ -17,9 +17,17 @@ type uninstallPaths struct {
 	RealmPath      string
 	InstallDir     string
 	ConfigPath     string
+	ConfigDir      string
+	KeyPath        string
 	StateDir       string
 	ProfilePath    string
 	CoreService    string
+	AgentService   string
+	AgentLog       string
+	CoreLog        string
+	CoreSocket     string
+	RuntimeDir     string
+	Stealth        bool
 	ServiceManager string
 }
 
@@ -70,17 +78,30 @@ func (r *Runner) uninstallPaths() (uninstallPaths, error) {
 	if manager != "systemd" && manager != "openrc" {
 		return uninstallPaths{}, fmt.Errorf("supported service manager is unavailable")
 	}
-	return uninstallPaths{
+	paths := uninstallPaths{
 		AgentPath:      agentPath,
 		CorePath:       corePath,
 		RealmPath:      realmPath,
 		InstallDir:     installDir,
 		ConfigPath:     filepath.Clean(configPath),
+		ConfigDir:      filepath.Dir(filepath.Clean(configPath)),
 		StateDir:       r.stateDir(),
 		ProfilePath:    filepath.Join(profileDir, "oboard-agent.sh"),
 		CoreService:    r.coreService(),
+		AgentService:   r.agentService(),
+		AgentLog:       r.agentLogPath(),
+		CoreLog:        r.coreLogPath(),
+		CoreSocket:     r.coreAPISocketPath(),
 		ServiceManager: manager,
-	}, nil
+	}
+	if r.stealthOn() && r.Config().Stealth != nil {
+		paths.Stealth = true
+		paths.KeyPath = r.Config().Stealth.KeyPath
+		if runtimeDir, ok := r.tunnelRuntimeDir(); ok {
+			paths.RuntimeDir = runtimeDir
+		}
+	}
+	return paths, nil
 }
 
 func prepareAgentUninstall(paths uninstallPaths) error {
@@ -96,7 +117,7 @@ func prepareAgentUninstall(paths uninstallPaths) error {
 	}
 	_ = os.Remove(filepath.Join(paths.InstallDir, "obag"))
 	removeProfileIfManaged(paths.InstallDir, paths.ProfilePath)
-	removeManagedServiceFile("oboard-sb")
+	removeManagedServiceFile(paths.CoreService)
 	return nil
 }
 
@@ -112,7 +133,7 @@ func scheduleAgentUninstallFinalizer(paths uninstallPaths) error {
 	command := uninstallFinalizerCommand(paths)
 	switch paths.ServiceManager {
 	case "systemd":
-		unit := fmt.Sprintf("oboard-agent-uninstall-%d", os.Getpid())
+		unit := fmt.Sprintf("%s-uninstall-%d", paths.AgentService, os.Getpid())
 		return runCommand(10*time.Second, "systemd-run", "--quiet", "--collect", "--on-active=5s", "--unit", unit, "/bin/sh", "-c", command)
 	case "openrc":
 		wrapped := "sleep 5; " + command
@@ -127,18 +148,18 @@ func uninstallFinalizerCommand(paths uninstallPaths) string {
 	var parts []string
 	if manager == "systemd" {
 		parts = append(parts,
-			"systemctl stop oboard-agent oboard-sb 2>/dev/null || true",
-			"systemctl disable oboard-agent oboard-sb 2>/dev/null || true",
-			"rm -f /etc/systemd/system/oboard-agent.service /etc/systemd/system/oboard-sb.service",
+			"systemctl stop "+shellQuoteValue(paths.AgentService)+" "+shellQuoteValue(paths.CoreService)+" 2>/dev/null || true",
+			"systemctl disable "+shellQuoteValue(paths.AgentService)+" "+shellQuoteValue(paths.CoreService)+" 2>/dev/null || true",
+			"rm -f "+shellQuoteValue(serviceUnitPath("systemd", paths.AgentService))+" "+shellQuoteValue(serviceUnitPath("systemd", paths.CoreService)),
 			"systemctl daemon-reload 2>/dev/null || true",
 		)
 	} else {
 		parts = append(parts,
-			"rc-service oboard-agent stop 2>/dev/null || true",
-			"rc-service oboard-sb stop 2>/dev/null || true",
-			"rc-update del oboard-agent default 2>/dev/null || true",
-			"rc-update del oboard-sb default 2>/dev/null || true",
-			"rm -f /etc/init.d/oboard-agent /etc/init.d/oboard-sb",
+			"rc-service "+shellQuoteValue(paths.AgentService)+" stop 2>/dev/null || true",
+			"rc-service "+shellQuoteValue(paths.CoreService)+" stop 2>/dev/null || true",
+			"rc-update del "+shellQuoteValue(paths.AgentService)+" default 2>/dev/null || true",
+			"rc-update del "+shellQuoteValue(paths.CoreService)+" default 2>/dev/null || true",
+			"rm -f "+shellQuoteValue(serviceUnitPath("openrc", paths.AgentService))+" "+shellQuoteValue(serviceUnitPath("openrc", paths.CoreService)),
 		)
 	}
 	parts = append(parts,
@@ -153,9 +174,13 @@ func uninstallFinalizerCommand(paths uninstallPaths) string {
 		parts = append(parts, "rm -f "+shellQuoteValue(paths.ProfilePath))
 	}
 	parts = append(parts,
-		"rm -rf "+shellQuoteValue(filepath.Dir(paths.ConfigPath)),
+		"rm -rf "+shellQuoteValue(paths.ConfigDir),
 		"rm -rf "+shellQuoteValue(paths.StateDir),
+		"rm -f "+shellQuoteValue(paths.AgentLog)+" "+shellQuoteValue(paths.CoreLog)+" "+shellQuoteValue(paths.CoreSocket),
 	)
+	if paths.Stealth && paths.RuntimeDir != "" {
+		parts = append(parts, "rm -rf "+shellQuoteValue(paths.RuntimeDir))
+	}
 	if manager == "systemd" {
 		parts = append(parts, "systemctl daemon-reload 2>/dev/null || true")
 	}

@@ -533,8 +533,8 @@ func (r *Runner) remoteExecJournal() *remoteExecJournal {
 	r.remoteExecMu.Lock()
 	defer r.remoteExecMu.Unlock()
 	if r.remoteExecLog == nil {
-		dir := filepath.Join(r.Config().StateDir, "remote-exec")
-		r.remoteExecLog = newRemoteExecJournal(dir)
+		dir := r.stateDirPath("remote-exec")
+		r.remoteExecLog = newRemoteExecJournal(dir, r.Config().StealthKey)
 	}
 	return r.remoteExecLog
 }

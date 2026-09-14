@@ -229,7 +229,7 @@ func TestPersistBeforeReloadWritesPendingRange(t *testing.T) {
 	if err := runner.persistTrafficCheckpointBeforeRuntimeTransition(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	loaded, err := readTrafficStateFile(runner.trafficStatePath())
+	loaded, err := runner.readTrafficStateFile(runner.trafficStatePath())
 	if err != nil {
 		t.Fatal(err)
 	}

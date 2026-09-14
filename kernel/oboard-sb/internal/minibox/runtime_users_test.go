@@ -49,7 +49,7 @@ func TestUsersDigestIsStableAcrossEntryOrder(t *testing.T) {
 func TestRuntimeUsersFullInstallRejectsBadDigestAndPersistsCommit(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "kernel-users.json")
-	users := NewRuntimeUsers(path, nil, nil, []string{"in-a"})
+	users := NewRuntimeUsers(path, nil, nil, nil, []string{"in-a"})
 	entry := testUserEntry("in-a", "alice", "k-a")
 	digest, err := UsersDigest(1, []string{"in-a"}, []UserInstallEntry{entry})
 	if err != nil {
@@ -71,7 +71,7 @@ func TestRuntimeUsersFullInstallRejectsBadDigestAndPersistsCommit(t *testing.T) 
 }
 
 func TestRuntimeUsersDeltaDeleteDoesNotRequireAuthorizationKey(t *testing.T) {
-	users := NewRuntimeUsers("", nil, nil, []string{"in-a"})
+	users := NewRuntimeUsers("", nil, nil, nil, []string{"in-a"})
 	entry := testUserEntry("in-a", "alice", "k-a")
 	digest, err := UsersDigest(1, []string{"in-a"}, []UserInstallEntry{entry})
 	if err != nil {
@@ -93,7 +93,7 @@ func TestRuntimeUsersDeltaDeleteDoesNotRequireAuthorizationKey(t *testing.T) {
 }
 
 func TestRuntimeUsersIllegalInstallRejected(t *testing.T) {
-	users := NewRuntimeUsers("", nil, nil, []string{"in-a"})
+	users := NewRuntimeUsers("", nil, nil, nil, []string{"in-a"})
 	if _, err := users.Install(UserInstallRequest{}); !errors.Is(err, ErrUserInstallIllegal) {
 		t.Fatalf("empty request: %v", err)
 	}
@@ -183,7 +183,7 @@ func TestReplaceScopedUsersKeepsRemovedUserCounters(t *testing.T) {
 
 func TestRuntimeUsersChunkRecoveryRetainsPreparedParts(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "users.json")
-	users := NewRuntimeUsers(path, nil, nil, []string{"in-a"})
+	users := NewRuntimeUsers(path, nil, nil, nil, []string{"in-a"})
 	entry := testUserEntry("in-a", "alice", "key-a")
 	entries := []UserInstallEntry{entry}
 	payload, _ := json.Marshal(entries)
@@ -192,7 +192,7 @@ func TestRuntimeUsersChunkRecoveryRetainsPreparedParts(t *testing.T) {
 	if _, err := users.Install(req); !errors.Is(err, ErrUserInstallIncomplete) {
 		t.Fatal(err)
 	}
-	restored := NewRuntimeUsers(path, nil, nil, []string{"in-a"})
+	restored := NewRuntimeUsers(path, nil, nil, nil, []string{"in-a"})
 	if err := restored.Restore(); err != nil {
 		t.Fatal(err)
 	}

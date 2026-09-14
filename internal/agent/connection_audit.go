@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/netip"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -507,7 +506,7 @@ func (r *Runner) configureCoreConnectionAudit(ctx context.Context, enabled bool)
 	r.connectionAuditCoreKnown = false
 	client := r.coreClient
 	if client == nil {
-		client = unixHTTPClient(coreAPISocket)
+		client = unixHTTPClient(r.coreAPISocketPath())
 	}
 	body, err := json.Marshal(map[string]bool{"enabled": enabled})
 	if err != nil {
@@ -568,7 +567,7 @@ func (r *Runner) setConnectionAuditPolicy(enabled bool) {
 func (r *Runner) coreConnectionAuditSnapshot(ctx context.Context) ([]connectionAuditSnapshotItem, error) {
 	client := r.coreClient
 	if client == nil {
-		client = unixHTTPClient(coreAPISocket)
+		client = unixHTTPClient(r.coreAPISocketPath())
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://oboard-sb/connections/drain", nil)
 	if err != nil {
@@ -644,12 +643,12 @@ func (r *Runner) connectionAuditStateLocked() *connectionAuditLocalState {
 }
 
 func (r *Runner) connectionAuditStatePath() string {
-	return filepath.Join(r.stateDir(), "connection-audit-state.json")
+	return r.statePath("connection-audit-state.json")
 }
 
 func (r *Runner) loadConnectionAuditState() connectionAuditLocalState {
 	var state connectionAuditLocalState
-	b, err := os.ReadFile(r.connectionAuditStatePath())
+	b, err := r.stateReadPath(r.connectionAuditStatePath())
 	if err == nil {
 		_ = json.Unmarshal(b, &state)
 	}
@@ -665,7 +664,7 @@ func (r *Runner) saveConnectionAuditState(state connectionAuditLocalState) error
 	if err != nil {
 		return err
 	}
-	return atomicWriteFile(r.connectionAuditStatePath(), b, 0o600)
+	return r.stateWritePath(r.connectionAuditStatePath(), b, 0o600)
 }
 
 func sourceIPFromNetAddr(address net.Addr) string {

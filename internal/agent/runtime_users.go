@@ -11,7 +11,6 @@ import (
 	"math/big"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -46,7 +45,7 @@ type kernelUsersStatus struct {
 }
 
 func (r *Runner) runtimeUsersPath() string {
-	return filepath.Join(r.stateDir(), "runtime-users.json")
+	return r.statePath("runtime-users.json")
 }
 
 func (r *Runner) appliedUsers() *model.UsersAppliedSnapshot {
@@ -62,7 +61,7 @@ func (r *Runner) appliedUsers() *model.UsersAppliedSnapshot {
 func (r *Runner) loadPersistedRuntimeUsers() {
 	r.runtimeUsersMu.Lock()
 	defer r.runtimeUsersMu.Unlock()
-	raw, err := os.ReadFile(r.runtimeUsersPath())
+	raw, err := r.stateReadPath(r.runtimeUsersPath())
 	if err != nil {
 		return
 	}
@@ -87,32 +86,7 @@ func (r *Runner) persistRuntimeUsersLocked() error {
 	if err := os.MkdirAll(r.stateDir(), 0o700); err != nil {
 		return err
 	}
-	tmp := r.runtimeUsersPath() + ".tmp"
-	file, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmp)
-	if _, err = file.Write(data); err != nil {
-		_ = file.Close()
-		return err
-	}
-	if err = file.Sync(); err != nil {
-		_ = file.Close()
-		return err
-	}
-	if err = file.Close(); err != nil {
-		return err
-	}
-	if err = os.Rename(tmp, r.runtimeUsersPath()); err != nil {
-		return err
-	}
-	dir, err := os.Open(r.stateDir())
-	if err != nil {
-		return err
-	}
-	defer dir.Close()
-	return dir.Sync()
+	return r.stateWritePath(r.runtimeUsersPath(), data, 0o600)
 }
 
 var errUsersEnvelopeRejected = errors.New("users envelope rejected")

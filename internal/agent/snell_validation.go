@@ -3,17 +3,15 @@ package agent
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/OboardProject/oboard-agent/internal/model"
 )
 
-func validateSnellCoreFile(path string) error {
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return err
-	}
+// validateSnellCoreConfig validates the Snell constraints against raw config
+// bytes. The caller reads (and in stealth mode decrypts) the file, so this
+// works for both plaintext and encrypted storage.
+func validateSnellCoreConfig(raw []byte) error {
 	var config struct {
 		Inbounds []struct {
 			Type     string `json:"type"`
@@ -28,7 +26,7 @@ func validateSnellCoreFile(path string) error {
 			} `json:"users"`
 		} `json:"inbounds"`
 	}
-	if err = json.Unmarshal(raw, &config); err != nil {
+	if err := json.Unmarshal(raw, &config); err != nil {
 		return err
 	}
 	for _, in := range config.Inbounds {

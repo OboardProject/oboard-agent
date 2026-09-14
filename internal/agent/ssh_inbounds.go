@@ -15,7 +15,6 @@ import (
 	"net"
 	"net/netip"
 	"os"
-	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -426,7 +425,7 @@ func (r *Runner) sshDiagnostics(plan model.SSHInboundPlan) sshDiagnostics {
 }
 
 func (r *Runner) currentSSHDiagnostics() sshDiagnostics {
-	b, err := os.ReadFile(filepath.Join(r.stateDir(), sshInboundsCurrent))
+	b, err := r.stateRead(sshInboundsCurrent)
 	if err != nil {
 		return sshDiagnostics{Inbounds: []sshInboundDiagnostics{}}
 	}
@@ -442,7 +441,7 @@ func (r *Runner) applySSHInbounds(plan model.SSHInboundPlan) (result sshInboundA
 	defer r.sshInboundLifecycleMu.Unlock()
 
 	result = sshInboundApplyResult{SSHAuthenticationVerification: model.SSHAuthenticationVerification{Version: plan.Version}}
-	previous, readErr := os.ReadFile(filepath.Join(r.stateDir(), sshInboundsCurrent))
+	previous, readErr := r.stateRead(sshInboundsCurrent)
 	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
 		return result, readErr
 	}
@@ -457,7 +456,7 @@ func (r *Runner) applySSHInbounds(plan model.SSHInboundPlan) (result sshInboundA
 			return
 		}
 		result.Unchanged = false
-		fileErr := restoreSSHInboundPlanFile(filepath.Join(r.stateDir(), sshInboundsCurrent), previous)
+		fileErr := r.restoreSSHInboundPlanFile(r.statePath(sshInboundsCurrent), previous)
 		runtimeErr := r.restoreSSHInboundPlanLocked(previous)
 		var previousPlan model.SSHInboundPlan
 		var policyErr error
@@ -502,10 +501,10 @@ func (r *Runner) applySSHInbounds(plan model.SSHInboundPlan) (result sshInboundA
 					return result, fmt.Errorf("reconcile shared core/SSH quota lease: %w", err)
 				}
 				// Ensure persisted file matches desired
-				currentPath := filepath.Join(r.stateDir(), sshInboundsCurrent)
-				if b, err := os.ReadFile(currentPath); err != nil || string(b) == "" {
+				currentPath := r.statePath(sshInboundsCurrent)
+				if b, err := r.stateReadPath(currentPath); err != nil || string(b) == "" {
 					if encoded, merr := json.MarshalIndent(plan, "", "  "); merr == nil {
-						_ = atomicWriteFile(currentPath, encoded, 0o600)
+						_ = r.stateWritePath(currentPath, encoded, 0o600)
 					}
 				}
 				result.RuntimeReconciled = true
@@ -548,12 +547,12 @@ func (r *Runner) applySSHInbounds(plan model.SSHInboundPlan) (result sshInboundA
 	if err := r.validateSSHInboundServerIDs(plan); err != nil {
 		return result, err
 	}
-	current := filepath.Join(r.stateDir(), sshInboundsCurrent)
-	backup := filepath.Join(r.stateDir(), sshInboundsLastGood)
+	current := r.statePath(sshInboundsCurrent)
+	backup := r.statePath(sshInboundsLastGood)
 	var previousPlan []byte
-	if b, err := os.ReadFile(current); err == nil { // #nosec G304 -- current is a fixed filename under the locally configured Agent state directory.
+	if b, err := r.stateReadPath(current); err == nil {
 		previousPlan = b
-		if err := atomicWriteFile(backup, b, 0o600); err != nil {
+		if err := r.stateWritePath(backup, b, 0o600); err != nil {
 			return result, err
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -623,7 +622,7 @@ func (r *Runner) applySSHInbounds(plan model.SSHInboundPlan) (result sshInboundA
 		_ = r.restoreLastGoodSSHInboundsLocked()
 		return result, err
 	}
-	if err := atomicWriteFile(current, b, 0o600); err != nil {
+	if err := r.stateWritePath(current, b, 0o600); err != nil {
 		manager.close()
 		if rollbackErr := r.restoreLastGoodSSHInboundsLocked(); rollbackErr != nil {
 			result.Warnings = append(result.Warnings, fmt.Sprintf("restore last-good SSH inbounds: %v", rollbackErr))
@@ -632,7 +631,7 @@ func (r *Runner) applySSHInbounds(plan model.SSHInboundPlan) (result sshInboundA
 	}
 	r.sshInboundDesiredState = desiredState
 	if err := r.reconcileSSHAndCoreTrafficPolicies(context.Background(), plan); err != nil {
-		rollbackErr := restoreSSHInboundPlanFile(current, previousPlan)
+		rollbackErr := r.restoreSSHInboundPlanFile(current, previousPlan)
 		if managerErr := r.restoreSSHInboundPlanLocked(previousPlan); managerErr != nil {
 			if rollbackErr == nil {
 				rollbackErr = managerErr
@@ -663,7 +662,7 @@ func (r *Runner) applySSHInbounds(plan model.SSHInboundPlan) (result sshInboundA
 func (r *Runner) restoreManagedSSHInboundsOnStartup() error {
 	r.sshInboundLifecycleMu.Lock()
 	defer r.sshInboundLifecycleMu.Unlock()
-	b, err := os.ReadFile(filepath.Join(r.stateDir(), sshInboundsCurrent))
+	b, err := r.stateRead(sshInboundsCurrent)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
@@ -776,8 +775,8 @@ func (r *Runner) validateSSHInboundServerIDs(plan model.SSHInboundPlan) error {
 }
 
 func (r *Runner) restoreLastGoodSSHInboundsLocked() error {
-	path := filepath.Join(r.stateDir(), sshInboundsLastGood)
-	b, err := os.ReadFile(path) // #nosec G304 -- path is a fixed filename under the locally configured Agent state directory.
+	path := r.statePath(sshInboundsLastGood)
+	b, err := r.stateReadPath(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return r.restoreSSHInboundPlanLocked(nil)
 	}
@@ -827,9 +826,9 @@ func (r *Runner) restoreSSHInboundPlanLocked(b []byte) error {
 	return nil
 }
 
-func restoreSSHInboundPlanFile(path string, plan []byte) error {
+func (r *Runner) restoreSSHInboundPlanFile(path string, plan []byte) error {
 	if len(plan) > 0 {
-		return atomicWriteFile(path, plan, 0o600)
+		return r.stateWritePath(path, plan, 0o600)
 	}
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
@@ -1029,8 +1028,8 @@ func (r *Runner) partitionSSHInboundPlanPolicies(plan model.SSHInboundPlan) (mod
 }
 
 func (r *Runner) loadSSHInboundHostSigner() (ssh.Signer, error) {
-	path := filepath.Join(r.stateDir(), sshInboundHostKey)
-	if b, err := os.ReadFile(path); err == nil { // #nosec G304 -- path is the fixed managed SSH host key under Agent state.
+	path := r.statePath(sshInboundHostKey)
+	if b, err := r.stateReadPath(path); err == nil {
 		return ssh.ParsePrivateKey(b)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, err
@@ -1044,7 +1043,7 @@ func (r *Runner) loadSSHInboundHostSigner() (ssh.Signer, error) {
 		return nil, err
 	}
 	pemBytes := pem.EncodeToMemory(pemBlock)
-	if err := atomicWriteFile(path, pemBytes, 0o600); err != nil {
+	if err := r.stateWritePath(path, pemBytes, 0o600); err != nil {
 		return nil, err
 	}
 	return ssh.ParsePrivateKey(pemBytes)

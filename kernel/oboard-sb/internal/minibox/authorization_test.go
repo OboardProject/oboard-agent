@@ -182,7 +182,7 @@ func TestRollbackConfigLeaseCannotResurrectConfirmedRevocation(t *testing.T) {
 		"bob":   {UserID: 8, AuthorizationKey: "cred-b", CredentialEpoch: 1, Billable: true},
 	}
 	first := newRateLimitTracker(RuntimeMetadata{Authorization: old, RateLimits: RuntimeRateLimits{Users: users}}, func() time.Time { return now })
-	if err := first.InitializeAuthorization(path, old); err != nil {
+	if err := first.InitializeAuthorization(path, nil, old); err != nil {
 		t.Fatal(err)
 	}
 	now = now.Add(time.Second)
@@ -200,7 +200,7 @@ func TestRollbackConfigLeaseCannotResurrectConfirmedRevocation(t *testing.T) {
 	// embeds revision 2 with cred-a granted.
 	now = now.Add(time.Second)
 	rolledBack := newRateLimitTracker(RuntimeMetadata{Authorization: old, RateLimits: RuntimeRateLimits{Users: users}}, func() time.Time { return now })
-	if err := rolledBack.InitializeAuthorization(path, old); err != nil {
+	if err := rolledBack.InitializeAuthorization(path, nil, old); err != nil {
 		t.Fatal(err)
 	}
 	status := rolledBack.AuthorizationStatus()
@@ -227,11 +227,11 @@ func TestPersistedLeaseDoesNotPermitConfigToOmitAuthorization(t *testing.T) {
 	now := time.Now().UTC()
 	lease := &authorization.Lease{Revision: 1, IssuedAt: now.Format(time.RFC3339Nano), Grants: map[string]string{"installed": now.Add(time.Minute).Format(time.RFC3339Nano)}}
 	path := filepath.Join(t.TempDir(), "kernel-authorization.json")
-	if err := authorization.NewStore(path).Update(lease); err != nil {
+	if err := authorization.NewStore(path, nil).Update(lease); err != nil {
 		t.Fatal(err)
 	}
 	tracker := NewRateLimitTracker(RuntimeMetadata{RateLimits: RuntimeRateLimits{Users: map[string]RuntimeUserLimit{"opaque": {UserID: 7, AuthorizationKey: "installed"}}}})
-	if err := tracker.InitializeAuthorization(path, nil); err == nil {
+	if err := tracker.InitializeAuthorization(path, nil, nil); err == nil {
 		t.Fatal("config without authorization reused persisted grants")
 	}
 }

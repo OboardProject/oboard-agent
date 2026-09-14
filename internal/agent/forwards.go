@@ -88,11 +88,10 @@ func (r *Runner) applyPortForwards(plan model.PortForwardPlan) (forwardApplyResu
 		result.Backends[fmt.Sprint(rule.ID)] = string(rule.ResolvedBackend)
 	}
 
-	current := filepath.Join(stateDir, portForwardsCurrent)
-	backup := filepath.Join(stateDir, portForwardsLastGood)
-	// #nosec G304 -- current is a fixed file below the Agent's configured state directory.
-	if b, err := os.ReadFile(current); err == nil {
-		if err := atomicWriteFile(backup, b, 0o600); err != nil {
+	current := r.statePath(portForwardsCurrent)
+	backup := r.statePath(portForwardsLastGood)
+	if b, err := r.stateReadPath(current); err == nil {
+		if err := r.stateWritePath(backup, b, 0o600); err != nil {
 			return result, err
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -111,7 +110,7 @@ func (r *Runner) applyPortForwards(plan model.PortForwardPlan) (forwardApplyResu
 		}
 		return result, err
 	}
-	if err := atomicWriteFile(current, data, 0o600); err != nil {
+	if err := r.stateWritePath(current, data, 0o600); err != nil {
 		if rollbackErr := r.restoreLastGoodForwards(backup); rollbackErr != nil {
 			result.Warnings = append(result.Warnings, fmt.Sprintf("restore last-good forwards: %v", rollbackErr))
 		}
@@ -122,7 +121,7 @@ func (r *Runner) applyPortForwards(plan model.PortForwardPlan) (forwardApplyResu
 }
 
 func (r *Runner) restoreManagedPortForwardsOnStartup() error {
-	b, err := os.ReadFile(filepath.Join(r.stateDir(), portForwardsCurrent))
+	b, err := r.stateRead(portForwardsCurrent)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
@@ -142,9 +141,8 @@ func (r *Runner) suspendConflictingForwards(candidateConfig []byte) (*forwardHan
 	if len(endpoints) == 0 {
 		return nil, nil
 	}
-	currentPath := filepath.Join(r.stateDir(), portForwardsCurrent)
-	// #nosec G304 -- currentPath is a fixed file below the Agent's configured state directory.
-	b, err := os.ReadFile(currentPath)
+	currentPath := r.statePath(portForwardsCurrent)
+	b, err := r.stateReadPath(currentPath)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
@@ -349,8 +347,7 @@ func normalizeForwardListenAddress(address string) string {
 }
 
 func (r *Runner) restoreLastGoodForwards(path string) error {
-	// #nosec G304 -- path is the fixed last-good file assembled below the Agent state directory.
-	b, err := os.ReadFile(path)
+	b, err := r.stateReadPath(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return r.applyResolvedForwards(nil, &forwardApplyResult{})
 	}
@@ -610,8 +607,7 @@ func runningAsRoot() bool {
 }
 
 func (r *Runner) applyRealmForwards(rules []forwardRule) error {
-	stateDir := r.stateDir()
-	pidPath := filepath.Join(stateDir, realmPIDFile)
+	pidPath := r.statePath(realmPIDFile)
 	if len(rules) == 0 {
 		return stopManagedProcess(pidPath)
 	}
@@ -623,13 +619,28 @@ func (r *Runner) applyRealmForwards(rules []forwardRule) error {
 	if err != nil {
 		return err
 	}
-	configPath := filepath.Join(stateDir, realmConfigFile)
-	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
-		return err
+	// The forwarding configuration carries customer endpoints. In stealth
+	// mode it is stored encrypted at rest and materialized as a plaintext
+	// tmpfs artifact for the realm process; standard mode keeps the plaintext
+	// file in the private state directory exactly as before.
+	runtimeDir, _ := r.tunnelRuntimeDir()
+	configPath := r.statePath(realmConfigFile)
+	if runtimeDir != "" {
+		if err := r.stateWrite(realmConfigFile, []byte(config), 0o600); err != nil {
+			return err
+		}
+		// #nosec G301 -- 0700 is intended for the private runtime artifact directory.
+		if err := os.MkdirAll(runtimeDir, 0o700); err != nil {
+			return err
+		}
+		configPath = filepath.Join(runtimeDir, "forward.conf")
+		if err := atomicWriteFile(configPath, []byte(config), 0o600); err != nil {
+			return err
+		}
 	}
 	_ = stopManagedProcess(pidPath)
-	logPath := filepath.Join(stateDir, realmLogFile)
-	// #nosec G304 -- logPath is a fixed file below the private Agent state directory.
+	logPath := r.statePath(realmLogFile)
+	// #nosec G304 -- logPath is a derived file below the private Agent state directory.
 	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return err
@@ -643,7 +654,11 @@ func (r *Runner) applyRealmForwards(rules []forwardRule) error {
 		return err
 	}
 	_ = logFile.Close()
-	return writeManagedPIDFile(pidPath, cmd.Process.Pid, realmProcessName)
+	processName := realmProcessName
+	if r.stealthOn() {
+		processName = r.Config().Stealth.Identity.RealmName
+	}
+	return writeManagedPIDFile(pidPath, cmd.Process.Pid, processName)
 }
 
 func stopManagedProcess(pidPath string) error {

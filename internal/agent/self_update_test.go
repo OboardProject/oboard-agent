@@ -86,7 +86,7 @@ func TestDownloadAndInstallSignedRelease(t *testing.T) {
 	if err := os.WriteFile(targets.Core, []byte("old-core"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	got, err := downloadAndInstallSignedRelease(context.Background(), server.Client(), server.URL+"/hidden/downloads/github", manifest.Repo, manifest.Build, targets)
+	got, err := (&Runner{}).downloadAndInstallSignedRelease(context.Background(), server.Client(), server.URL+"/hidden/downloads/github", manifest.Repo, manifest.Build, targets, ".oboard-update")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -304,7 +304,7 @@ func TestSignedReleaseRejectsTamperedBinaryBeforeInstall(t *testing.T) {
 	_ = os.WriteFile(targets.Agent, []byte("old-agent"), 0o755)
 	_ = os.WriteFile(targets.Core, []byte("old-core"), 0o755)
 	_ = os.WriteFile(targets.Realm, []byte("old-realm"), 0o755)
-	_, err = downloadAndInstallSignedRelease(context.Background(), server.Client(), server.URL, manifest.Repo, manifest.Build, targets)
+	_, err = (&Runner{}).downloadAndInstallSignedRelease(context.Background(), server.Client(), server.URL, manifest.Repo, manifest.Build, targets, ".oboard-update")
 	if err == nil || !strings.Contains(err.Error(), "failed after 3 attempts") {
 		t.Fatalf("unexpected tampered release error: %v", err)
 	}
@@ -356,7 +356,7 @@ func TestSignedReleaseRejectsMissingRealmAsset(t *testing.T) {
 	targets := signedReleaseTargets{Agent: filepath.Join(dir, "oboard-agent"), Core: filepath.Join(dir, "oboard-sb"), Realm: filepath.Join(dir, "oboard-realm")}
 	_ = os.WriteFile(targets.Agent, []byte("old-agent"), 0o755)
 	_ = os.WriteFile(targets.Core, []byte("old-core"), 0o755)
-	_, err = downloadAndInstallSignedRelease(context.Background(), server.Client(), server.URL, manifest.Repo, manifest.Build, targets)
+	_, err = (&Runner{}).downloadAndInstallSignedRelease(context.Background(), server.Client(), server.URL, manifest.Repo, manifest.Build, targets, ".oboard-update")
 	if err == nil || !strings.Contains(err.Error(), "oboard-realm-") {
 		t.Fatalf("unexpected missing realm error: %v", err)
 	}
@@ -414,7 +414,7 @@ func TestPreserveExistingReleaseFileDoesNotClone(t *testing.T) {
 		t.Fatal(err)
 	}
 	item := stagedReleaseFile{target: target}
-	if err := preserveExistingReleaseFile(&item); err != nil {
+	if err := preserveExistingReleaseFile(&item, ".oboard-update"); err != nil {
 		t.Fatal(err)
 	}
 	if !item.hadOld || item.backup == "" {
@@ -475,7 +475,7 @@ func TestInstallVerifiedReleaseFilesRemovesStaleSidecars(t *testing.T) {
 	if err := os.WriteFile(realmSrc, []byte("new-realm"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := installVerifiedReleaseFiles([]stagedReleaseFile{
+	if err := (&Runner{}).installVerifiedReleaseFiles(".oboard-update", []stagedReleaseFile{
 		{source: agentSrc, target: agent},
 		{source: coreSrc, target: core},
 		{source: realmSrc, target: realm},
@@ -506,10 +506,10 @@ func TestCommitStagedReleaseFilesRestoresFirstBinaryIfSecondFails(t *testing.T) 
 	}
 	agentItem := stagedReleaseFile{target: agent}
 	coreItem := stagedReleaseFile{target: core}
-	if err := preserveExistingReleaseFile(&agentItem); err != nil {
+	if err := preserveExistingReleaseFile(&agentItem, ".oboard-update"); err != nil {
 		t.Fatal(err)
 	}
-	if err := preserveExistingReleaseFile(&coreItem); err != nil {
+	if err := preserveExistingReleaseFile(&coreItem, ".oboard-update"); err != nil {
 		t.Fatal(err)
 	}
 	agentStage := filepath.Join(dir, ".oboard-update-new.agent")
@@ -563,7 +563,7 @@ func TestPreflightStagedCoreRejectsIncompatibleKernel(t *testing.T) {
 	if err := os.WriteFile(config, []byte(`{"log":{"level":"warn"}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	state, _, err := preflightStagedCore(staged, config, 10*time.Second)
+	state, _, err := (&Runner{}).preflightStagedCore(staged, config, 10*time.Second)
 	if err == nil {
 		t.Fatal("an incompatible kernel must abort the update")
 	}
@@ -582,7 +582,7 @@ func TestPreflightStagedCoreAcceptsCompatibleKernel(t *testing.T) {
 	if err := os.WriteFile(config, []byte(`{"log":{"level":"warn"}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	state, _, err := preflightStagedCore(staged, config, 10*time.Second)
+	state, _, err := (&Runner{}).preflightStagedCore(staged, config, 10*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -596,14 +596,14 @@ func TestPreflightStagedCoreAcceptsCompatibleKernel(t *testing.T) {
 func TestPreflightStagedCoreSkipsWithoutDeployedConfig(t *testing.T) {
 	dir := t.TempDir()
 	staged := writeStagedCoreStub(t, dir, "oboard-sb-staged", 1)
-	state, _, err := preflightStagedCore(staged, filepath.Join(dir, "sing-box.json"), 10*time.Second)
+	state, _, err := (&Runner{}).preflightStagedCore(staged, filepath.Join(dir, "sing-box.json"), 10*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if state != corePreflightNotDeployed {
 		t.Fatalf("preflight state = %q, want not_deployed", state)
 	}
-	state, _, err = preflightStagedCore(staged, "", 10*time.Second)
+	state, _, err = (&Runner{}).preflightStagedCore(staged, "", 10*time.Second)
 	if err != nil || state != corePreflightNotDeployed {
 		t.Fatalf("empty config path: state=%q err=%v", state, err)
 	}
@@ -618,7 +618,7 @@ func TestPreflightStagedCoreSkipsWhenBinaryCannotRun(t *testing.T) {
 	if err := os.WriteFile(config, []byte(`{"log":{"level":"warn"}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	state, note, err := preflightStagedCore(filepath.Join(dir, "does-not-exist"), config, 10*time.Second)
+	state, note, err := (&Runner{}).preflightStagedCore(filepath.Join(dir, "does-not-exist"), config, 10*time.Second)
 	if err != nil {
 		t.Fatalf("a missing staged binary must not fail the update: %v", err)
 	}

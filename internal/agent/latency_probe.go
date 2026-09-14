@@ -13,7 +13,6 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -388,7 +387,7 @@ func newLatencyProbeReportID(agentID string, checkedAt time.Time) string {
 }
 
 func (r *Runner) latencyProbeStatePath() string {
-	return filepath.Join(r.stateDir(), latencyProbeStateFile)
+	return r.statePath(latencyProbeStateFile)
 }
 
 func (r *Runner) loadLatencyProbeStateLocked() {
@@ -396,7 +395,7 @@ func (r *Runner) loadLatencyProbeStateLocked() {
 		return
 	}
 	r.latencyProbeStateLoaded = true
-	data, err := os.ReadFile(r.latencyProbeStatePath())
+	data, err := r.stateReadPath(r.latencyProbeStatePath())
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
 			logging.Errorf("读取延迟测试本地状态失败: %v", err)
@@ -420,7 +419,7 @@ func (r *Runner) persistLatencyProbeStateLocked() error {
 	if err != nil {
 		return err
 	}
-	return atomicWriteFile(r.latencyProbeStatePath(), data, 0o600)
+	return r.stateWritePath(r.latencyProbeStatePath(), data, 0o600)
 }
 
 func (r *Runner) pruneLatencyProbeStateLocked(now time.Time) {

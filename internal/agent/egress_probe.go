@@ -125,7 +125,7 @@ func (r *Runner) probeCoreOutboundEgressIP(ctx context.Context, outboundTag stri
 	req.Header.Set("Content-Type", "application/json")
 	client := r.coreClient
 	if client == nil {
-		client = unixHTTPClient(coreAPISocket)
+		client = unixHTTPClient(r.coreAPISocketPath())
 	}
 	res, err := client.Do(req)
 	if err != nil {

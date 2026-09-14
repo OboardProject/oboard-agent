@@ -90,14 +90,14 @@ func TestRevocationHoldsUnderRandomDeliveryOrder(t *testing.T) {
 			}
 
 			path := filepath.Join(t.TempDir(), "kernel-authorization.json")
-			store := NewStore(path)
+			store := NewStore(path, nil)
 			store.SetClock(clock)
 			revoked := false
 			for step, op := range ops {
 				now = now.Add(200 * time.Millisecond)
 				switch op.kind {
 				case "restart":
-					store = NewStore(path)
+					store = NewStore(path, nil)
 					store.SetClock(clock)
 				case "deny":
 					if err := store.Deny(op.deny, op.denyR); err != nil {
@@ -137,7 +137,7 @@ func TestRevocationHoldsUnderRandomDeliveryOrder(t *testing.T) {
 				t.Fatal("generated history never applied the revocation")
 			}
 			// A final restart must reproduce the same verdicts from disk.
-			store = NewStore(path)
+			store = NewStore(path, nil)
 			store.SetClock(clock)
 			if store.Allows(target, now) {
 				t.Fatal("revocation lost across the final restart")

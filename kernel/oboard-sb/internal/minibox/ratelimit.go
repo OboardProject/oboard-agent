@@ -155,7 +155,7 @@ func newRateLimitTracker(metadata RuntimeMetadata, now func() time.Time) *RateLi
 		now = time.Now
 	}
 	tracker := &RateLimitTracker{states: map[string]*runtimeState{}, active: map[string]map[*trackedConn]struct{}{}, activePacket: map[string]map[*trackedPacketConn]struct{}{}, now: now}
-	tracker.installAuthorizationStore(authorization.NewStore(""))
+	tracker.installAuthorizationStore(authorization.NewStore("", nil))
 	tracker.authorization.SetClock(tracker.timeNow)
 	_ = tracker.authorization.Update(metadata.Authorization)
 	auditEnabled := metadata.ConnectionAudit != nil && metadata.ConnectionAudit.Enabled

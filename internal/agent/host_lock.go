@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"syscall"
 	"time"
 )
@@ -31,7 +30,7 @@ var hostCoreLockWait = 90 * time.Second
 var errHostCoreLockBusy = errors.New("另一个 OBoard 更新或内核操作正在进行，请稍后重试")
 
 func (r *Runner) hostCoreLockPath() string {
-	return filepath.Join(r.stateDir(), hostCoreLockName)
+	return r.statePath(hostCoreLockName)
 }
 
 type hostCoreLock struct {

@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"time"
 )
 
@@ -43,7 +42,7 @@ func appliedPayloadID(kind string, payload []byte) string {
 }
 
 func (r *Runner) loadAppliedVersion() (appliedVersionState, error) {
-	b, err := os.ReadFile(filepath.Join(r.stateDir(), appliedVersionStateFile))
+	b, err := r.stateRead(appliedVersionStateFile)
 	if errors.Is(err, os.ErrNotExist) {
 		return appliedVersionState{}, nil
 	}
@@ -112,5 +111,5 @@ func (r *Runner) persistAppliedVersion(kind string, version int64, payload []byt
 	if err != nil {
 		return err
 	}
-	return atomicWriteFile(filepath.Join(r.stateDir(), appliedVersionStateFile), b, 0o600)
+	return r.stateWrite(appliedVersionStateFile, b, 0o600)
 }

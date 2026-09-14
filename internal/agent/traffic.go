@@ -738,7 +738,7 @@ func (r *Runner) currentCoreTrafficPolicyUsers() (map[int64]bool, error) {
 }
 
 func (r *Runner) currentCoreTrafficPolicies() (map[string]model.TrafficRuntimePolicy, error) {
-	b, err := os.ReadFile(filepath.Join(r.stateDir(), "sing-box.json"))
+	b, err := r.stateRead(singBoxConfigFile)
 	if errors.Is(err, os.ErrNotExist) {
 		return map[string]model.TrafficRuntimePolicy{}, nil
 	}
@@ -1112,7 +1112,7 @@ func (r *Runner) finishLegacyTrafficBridgeLocked(state *trafficLocalState) {
 func (r *Runner) coreTrafficSnapshot(ctx context.Context) ([]trafficSnapshotItem, error) {
 	client := r.coreClient
 	if client == nil {
-		client = unixHTTPClient(coreAPISocket)
+		client = unixHTTPClient(r.coreAPISocketPath())
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://oboard-sb/traffic/snapshot", nil)
 	if err != nil {
@@ -1138,7 +1138,7 @@ func (r *Runner) coreTrafficSnapshot(ctx context.Context) ([]trafficSnapshotItem
 func (r *Runner) coreResourceSnapshot(ctx context.Context) map[string]any {
 	client := r.coreClient
 	if client == nil {
-		client = unixHTTPClient(coreAPISocket)
+		client = unixHTTPClient(r.coreAPISocketPath())
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://oboard-sb/resources", nil)
 	if err != nil {
@@ -1187,7 +1187,7 @@ func (r *Runner) pushCoreTrafficPolicy(ctx context.Context, policies map[string]
 	}
 	client := r.coreClient
 	if client == nil {
-		client = unixHTTPClient(coreAPISocket)
+		client = unixHTTPClient(r.coreAPISocketPath())
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://oboard-sb/traffic/policy", bytes.NewReader(body))
 	if err != nil {
@@ -1243,7 +1243,7 @@ func (r *Runner) trafficStateLocked() *trafficLocalState {
 }
 
 func (r *Runner) trafficStatePath() string {
-	return filepath.Join(r.stateDir(), "traffic-state.json")
+	return r.statePath("traffic-state.json")
 }
 
 func (r *Runner) trafficStateBackupPath() string {
@@ -1251,12 +1251,12 @@ func (r *Runner) trafficStateBackupPath() string {
 }
 
 func (r *Runner) loadTrafficState() trafficLocalState {
-	state, err := readTrafficStateFile(r.trafficStatePath())
+	state, err := r.readTrafficStateFile(r.trafficStatePath())
 	if err == nil {
 		return migrateLoadedTrafficState(state, false)
 	}
 	if !errors.Is(err, os.ErrNotExist) {
-		if backup, backupErr := readTrafficStateFile(r.trafficStateBackupPath()); backupErr == nil {
+		if backup, backupErr := r.readTrafficStateFile(r.trafficStateBackupPath()); backupErr == nil {
 			migrated := migrateLoadedTrafficState(backup, false)
 			migrated.Sync.Status = trafficStatusRecovering
 			migrated.Sync.LastError = "primary traffic-state.json was unreadable"
@@ -1265,7 +1265,7 @@ func (r *Runner) loadTrafficState() trafficLocalState {
 		}
 		return corruptTrafficState("traffic-state.json is corrupt")
 	}
-	if backup, backupErr := readTrafficStateFile(r.trafficStateBackupPath()); backupErr == nil {
+	if backup, backupErr := r.readTrafficStateFile(r.trafficStateBackupPath()); backupErr == nil {
 		migrated := migrateLoadedTrafficState(backup, false)
 		migrated.RecoveryRequired = true
 		migrated.Sync.Status = trafficStatusRecovering
@@ -1277,8 +1277,8 @@ func (r *Runner) loadTrafficState() trafficLocalState {
 	return empty
 }
 
-func readTrafficStateFile(path string) (trafficLocalState, error) {
-	b, err := os.ReadFile(path)
+func (r *Runner) readTrafficStateFile(path string) (trafficLocalState, error) {
+	b, err := r.stateReadPath(path)
 	if err != nil {
 		return trafficLocalState{}, err
 	}
@@ -1376,12 +1376,12 @@ func (r *Runner) saveTrafficState(state trafficLocalState) error {
 		return err
 	}
 	path := r.trafficStatePath()
-	if current, err := os.ReadFile(path); err == nil && len(current) > 0 {
-		if err := atomicWriteFileWithSync(r.trafficStateBackupPath(), current, 0o600); err != nil {
+	if current, err := r.stateReadPath(path); err == nil && len(current) > 0 {
+		if err := r.stateWritePathSynced(r.trafficStateBackupPath(), current, 0o600); err != nil {
 			return err
 		}
 	}
-	return atomicWriteFileWithSync(path, b, 0o600)
+	return r.stateWritePathSynced(path, b, 0o600)
 }
 
 func atomicWriteFileWithSync(path string, data []byte, perm os.FileMode) error {

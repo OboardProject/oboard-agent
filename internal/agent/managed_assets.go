@@ -87,7 +87,7 @@ func managedAssetKey(reference model.ManagedAssetReference) string {
 }
 
 func (r *Runner) managedAssetsRoot() string {
-	return filepath.Join(r.stateDir(), "managed-assets")
+	return r.stateDirPath("managed-assets")
 }
 
 func (r *Runner) managedAssetDir(reference model.ManagedAssetReference) string {
@@ -113,7 +113,7 @@ func (r *Runner) loadManagedAssetState() (managedAssetState, error) {
 	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return state, err
 	}
-	data, err := os.ReadFile(r.managedAssetStatePath()) // #nosec G304 -- fixed path below configured state_dir.
+	data, err := r.stateReadPath(r.managedAssetStatePath())
 	if errors.Is(err, os.ErrNotExist) {
 		return state, nil
 	}
@@ -138,7 +138,7 @@ func (r *Runner) saveManagedAssetState(state managedAssetState) error {
 	if err != nil {
 		return err
 	}
-	return atomicWriteFile(r.managedAssetStatePath(), data, 0o600)
+	return r.stateWritePath(r.managedAssetStatePath(), data, 0o600)
 }
 
 func managedAssetStateMatches(state managedAssetState, desired map[string]model.ManagedAssetReference) bool {
