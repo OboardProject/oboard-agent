@@ -261,3 +261,99 @@ func TestUsersInstallOnAKernelWithoutTheCapabilityIsNotConfirmed(t *testing.T) {
 		t.Fatalf("install reached a kernel that does not support it: %d", revision)
 	}
 }
+
+// The Controller re-delivers one revision whenever the lease counters it carries
+// move, which happens on every accepted traffic report. Refusing that refresh
+// stopped the lane for good: the revision only advances when the content
+// changes, so nothing could move the node off the revision it was refusing, and
+// the credentials it kept running stopped having their authorization renewed.
+func TestSameRevisionIsRefreshedWhenTheContentIdentityMatches(t *testing.T) {
+	dir := t.TempDir()
+	core := writeFakeCoreBinaryWithCapabilities(t, dir, "build-users", []string{kernelCapabilityRuntimeUsers, coreRuntimeDigestCapability})
+	writeCoreConfig(t, dir, `{"log":{"level":"warn"},"inbounds":[{"tag":"in-a","type":"vless"}],"outbounds":[{"tag":"direct","type":"direct"}]}`)
+	kernel := newFakeCoreKernel(t, filepath.Join(dir, "sing-box.json"), true)
+	kernel.runtimeUsers = true
+	r := newRuntimeTestRunnerWithCore(t, dir, kernel, core)
+	cfg := r.Config()
+	cfg.AgentToken, cfg.AgentID, cfg.ServerID = "users-token", "users-agent", 8
+	r.storeConfig(cfg)
+
+	entry := model.UsersInstallEntry{
+		InboundTag: "in-a", AuthUser: "alice", AuthorizationKey: "k-alice",
+		Credential:    model.UsersCredential{UUID: "11111111-1111-1111-1111-111111111111"},
+		RouteOutbound: "direct",
+		Policy:        model.UsersRuntimePolicy{AuthorizationKey: "k-alice", Billable: true, LeaseBytes: 900, UsedBaselineBytes: 100},
+	}
+	install := model.UsersInstallRequest{
+		Scope: []string{"in-a"}, UsersRevision: 7, UsersDigest: "snapshot-1", ContentDigest: "content-7", Mode: "full",
+		Entries: []model.UsersInstallEntry{entry},
+	}
+	if ack := r.applyUsersEnvelope(context.Background(), signedTestUsersEnvelope(t, "users-token", 8, "i1", install)); !ack.Confirmed {
+		t.Fatalf("install not applied: %+v", ack)
+	}
+	if applied := r.appliedUsers(); applied == nil || applied.ContentDigest != "content-7" {
+		t.Fatalf("content identity not recorded: %+v", applied)
+	}
+
+	// Same desired state, fresher lease counters: a different snapshot digest,
+	// the same content identity.
+	refreshed := install
+	refreshed.UsersDigest = "snapshot-2"
+	refreshedEntry := entry
+	refreshedEntry.Policy.LeaseBytes = 512
+	refreshedEntry.Policy.UsedBaselineBytes = 5 << 20
+	refreshed.Entries = []model.UsersInstallEntry{refreshedEntry}
+	ack := r.applyUsersEnvelope(context.Background(), signedTestUsersEnvelope(t, "users-token", 8, "i2", refreshed))
+	if !ack.Confirmed {
+		t.Fatalf("a lease refresh at the same revision was refused: %+v", ack)
+	}
+	if applied := r.appliedUsers(); applied == nil || applied.Digest != "snapshot-2" {
+		t.Fatalf("the refreshed snapshot was not installed: %+v", applied)
+	}
+
+	// Different content at the same revision is still a conflict.
+	conflicting := install
+	conflicting.UsersDigest = "snapshot-3"
+	conflicting.ContentDigest = "content-other"
+	if ack := r.applyUsersEnvelope(context.Background(), signedTestUsersEnvelope(t, "users-token", 8, "i3", conflicting)); ack.Confirmed || ack.Error == "" {
+		t.Fatalf("different content at the same revision was accepted: %+v", ack)
+	}
+}
+
+// A node whose current revision predates content identity has nothing to compare
+// against. Refusing there would keep exactly the nodes this fix exists for stuck
+// on the binding they are already refusing.
+func TestUsersRevisionConflictResolution(t *testing.T) {
+	for name, tc := range map[string]struct {
+		req      model.UsersInstallRequest
+		applied  model.UsersAppliedSnapshot
+		conflict bool
+	}{
+		"same content": {
+			req:     model.UsersInstallRequest{UsersRevision: 3, UsersDigest: "s2", ContentDigest: "c1"},
+			applied: model.UsersAppliedSnapshot{Revision: 3, Digest: "s1", ContentDigest: "c1"},
+		},
+		"different content": {
+			req:      model.UsersInstallRequest{UsersRevision: 3, UsersDigest: "s2", ContentDigest: "c2"},
+			applied:  model.UsersAppliedSnapshot{Revision: 3, Digest: "s1", ContentDigest: "c1"},
+			conflict: true,
+		},
+		"node predates content identity": {
+			req:     model.UsersInstallRequest{UsersRevision: 3, UsersDigest: "s2", ContentDigest: "c1"},
+			applied: model.UsersAppliedSnapshot{Revision: 3, Digest: "s1"},
+		},
+		"controller predates content identity": {
+			req:      model.UsersInstallRequest{UsersRevision: 3, UsersDigest: "s2"},
+			applied:  model.UsersAppliedSnapshot{Revision: 3, Digest: "s1"},
+			conflict: true,
+		},
+		"identical snapshot": {
+			req:     model.UsersInstallRequest{UsersRevision: 3, UsersDigest: "s1"},
+			applied: model.UsersAppliedSnapshot{Revision: 3, Digest: "s1"},
+		},
+	} {
+		if got := usersRevisionConflict(tc.req, tc.applied) != ""; got != tc.conflict {
+			t.Fatalf("%s: conflict=%v, want %v", name, got, tc.conflict)
+		}
+	}
+}

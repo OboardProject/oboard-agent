@@ -116,6 +116,39 @@ func (r *Runner) verifyUsersEnvelope(envelope model.UsersEnvelope) (model.UsersI
 	return req, nil
 }
 
+// usersRevisionConflict decides whether a full install that names the revision
+// this node already holds describes different desired state, or the same state
+// with refreshed lease counters. It returns the name of the mismatched identity,
+// or an empty string when the install may proceed.
+//
+// The full digest cannot answer this on its own. It covers the used/lease/reset
+// counters the traffic lane owns, which move on every accepted traffic report,
+// so the Controller re-delivers the same revision with a different full digest
+// as a matter of course. Treating that as a conflict refused every delivery from
+// then on: the revision only advances when the content changes, so nothing on
+// either side could ever move the node off the conflicting revision, and the
+// node kept running credentials whose authorization was no longer being renewed.
+func usersRevisionConflict(req model.UsersInstallRequest, applied model.UsersAppliedSnapshot) string {
+	switch {
+	case req.ContentDigest != "" && applied.ContentDigest != "":
+		if req.ContentDigest != applied.ContentDigest {
+			return "content digest"
+		}
+		return ""
+	case req.ContentDigest != "":
+		// This node applied its current revision before it recorded content
+		// identity, so there is nothing to compare against. The install is
+		// signed desired state at a revision that is not older than ours and it
+		// names its own content, so applying it converges; refusing would keep
+		// exactly the nodes this fix exists for stuck on the old binding.
+		return ""
+	case req.UsersDigest != applied.Digest:
+		return "digest"
+	default:
+		return ""
+	}
+}
+
 func usersInstallIsRevoke(req model.UsersInstallRequest) bool {
 	if len(req.Entries) == 0 && req.Mode == "full" {
 		return true
@@ -189,8 +222,10 @@ func (r *Runner) applyRuntimeUsers(ctx context.Context, req model.UsersInstallRe
 			outcome.revision, outcome.digest, outcome.bootID = applied.Revision, applied.Digest, applied.BootID
 			outcome.verified = true
 			return outcome, nil
-		case req.UsersRevision == applied.Revision && req.Mode == "full" && req.Chunk == nil && req.UsersDigest != applied.Digest:
-			return outcome, fmt.Errorf("users revision %d already applied with a different digest", req.UsersRevision)
+		case req.UsersRevision == applied.Revision && req.Mode == "full" && req.Chunk == nil:
+			if conflict := usersRevisionConflict(req, *applied); conflict != "" {
+				return outcome, fmt.Errorf("users revision %d already applied with a different %s", req.UsersRevision, conflict)
+			}
 		}
 	}
 	for _, entry := range req.Entries {
@@ -251,7 +286,7 @@ func (r *Runner) applyRuntimeUsers(ctx context.Context, req model.UsersInstallRe
 	r.runtimeUsersBootID = status.BootID
 	// The applied snapshot is set before the persist so what lands on disk is
 	// the state this node is actually in, not the previous one.
-	r.runtimeUsersApplied = &model.UsersAppliedSnapshot{Revision: status.UsersRevision, Digest: status.UsersDigest, BootID: status.BootID}
+	r.runtimeUsersApplied = &model.UsersAppliedSnapshot{Revision: status.UsersRevision, Digest: status.UsersDigest, BootID: status.BootID, ContentDigest: req.ContentDigest}
 	if err := r.persistRuntimeUsersLocked(); err != nil {
 		r.runtimeUsersCurrent, r.runtimeUsersBootID, r.runtimeUsersApplied = previous, previousBoot, previousApplied
 		r.runtimeUsersMu.Unlock()
@@ -422,6 +457,9 @@ func (r *Runner) pullUsers(ctx context.Context, reason string) {
 		headers.Set("X-Oboard-Users-Revision", strconv.FormatInt(applied.Revision, 10))
 		headers.Set("X-Oboard-Users-Digest", applied.Digest)
 		headers.Set("X-Oboard-Users-Boot-Id", applied.BootID)
+		if applied.ContentDigest != "" {
+			headers.Set("X-Oboard-Users-Content-Digest", applied.ContentDigest)
+		}
 	}
 	var envelope model.UsersEnvelope
 	if err := r.controllerJSON(pullCtx, http.MethodGet, "/api/v1/agent/users-snapshot", headers, nil, &envelope, true); err != nil {

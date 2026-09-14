@@ -527,6 +527,21 @@ func (r *Runner) startLatencyProbeLoop(ctx context.Context) {
 	}()
 }
 
+// appliedLatencyProbe reports the plan this node currently holds, so the
+// Controller can see a plan it keeps re-sending being refused. setLatencyProbePlan
+// can only log that refusal locally; without this the two sides disagree with no
+// evidence anywhere, and the version never moves off the conflicting binding.
+func (r *Runner) appliedLatencyProbe() *model.LatencyProbeAppliedSnapshot {
+	r.latencyProbeMu.Lock()
+	defer r.latencyProbeMu.Unlock()
+	r.loadLatencyProbeStateLocked()
+	plan := r.latencyProbeState.Plan
+	if plan.Version <= 0 {
+		return nil
+	}
+	return &model.LatencyProbeAppliedSnapshot{PlanVersion: plan.Version, PlanDigest: model.LatencyProbePlanContentDigest(plan)}
+}
+
 func (r *Runner) runLatencyProbeIfDue(ctx context.Context, now time.Time) {
 	r.latencyProbeMu.Lock()
 	r.loadLatencyProbeStateLocked()

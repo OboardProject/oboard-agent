@@ -854,6 +854,18 @@ type UsersInstallRequest struct {
 	BaseRevision  int64               `json:"base_revision,omitempty"`
 	Chunk         *UsersInstallChunk  `json:"chunk,omitempty"`
 	Entries       []UsersInstallEntry `json:"entries"`
+
+	// ContentDigest is the identity the revision is allocated against: the
+	// snapshot without the lease-accounting counters the traffic lane owns.
+	//
+	// UsersDigest covers those counters, because the kernel recomputes it over
+	// the bytes it is handed. They move on every accepted traffic report, so one
+	// revision legitimately describes several delivered payloads, and a gate
+	// built on UsersDigest alone reads that refresh as a conflict and stops the
+	// lane for good. This field is what makes the revision gate decidable: equal
+	// revision plus equal content is the same desired state, whatever the
+	// counters say.
+	ContentDigest string `json:"content_digest,omitempty"`
 }
 
 type UsersInstallEntry struct {
@@ -911,6 +923,11 @@ type UsersAppliedSnapshot struct {
 	Revision int64  `json:"revision"`
 	Digest   string `json:"digest,omitempty"`
 	BootID   string `json:"boot_id,omitempty"`
+	// ContentDigest is the content identity of the revision this node holds. The
+	// full digest above covers the lease counters too, so it differs between two
+	// deliveries of the same desired state; only this field can tell a node that
+	// is behind from one that merely received fresher quota numbers.
+	ContentDigest string `json:"content_digest,omitempty"`
 }
 
 type UsersAck struct {
@@ -1460,6 +1477,10 @@ type HealthReport struct {
 	Storage                   *StorageDiskInfo              `json:"storage,omitempty"`
 	AppliedAuthorization      *AuthorizationAppliedSnapshot `json:"applied_authorization,omitempty"`
 	AppliedUsers              *UsersAppliedSnapshot         `json:"applied_users,omitempty"`
+	// AppliedLatencyProbe is the probe plan this node currently runs. It is
+	// diagnostic only: it never selects a plan, it only lets the Controller see
+	// that the node holds a different plan than the one bound to that version.
+	AppliedLatencyProbe *LatencyProbeAppliedSnapshot `json:"applied_latency_probe,omitempty"`
 }
 
 type StorageDiskInfo struct {

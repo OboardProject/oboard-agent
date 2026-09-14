@@ -3388,6 +3388,7 @@ func (r *Runner) taskResultHealth() *model.HealthReport {
 	}
 	health.AppliedAuthorization = r.appliedAuthorization()
 	health.AppliedUsers = r.appliedUsers()
+	health.AppliedLatencyProbe = r.appliedLatencyProbe()
 	return &health
 }
 
@@ -3530,6 +3531,7 @@ func (r *Runner) Probe(force bool) model.HealthReport {
 	health.RemoteAccess = r.remoteAccessReport()
 	health.AppliedAuthorization = r.appliedAuthorization()
 	health.AppliedUsers = r.appliedUsers()
+	health.AppliedLatencyProbe = r.appliedLatencyProbe()
 	diskInfo := r.storageDiskInfo()
 	health.DiskAvailableBytes = diskInfo.AvailableBytes
 	health.DiskPressure = diskInfo.Pressure
