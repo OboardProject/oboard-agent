@@ -47,7 +47,7 @@ func (r *Runner) managedLogs() []managedLog {
 	agentMax, agentBackups := applyLogTotalBudget(int64(cfg.LogMaxMB)<<20, cfg.LogBackups, agentLogTotalBudgetBytes)
 	coreMax, coreBackups := applyLogTotalBudget(int64(cfg.CoreLogMaxMB)<<20, cfg.CoreLogBackups, coreLogTotalBudgetBytes)
 	return []managedLog{
-		{Service: "agent", Path: r.serviceLogPath("oboard-agent"), MaxBytes: agentMax, Backups: agentBackups},
+		{Service: "agent", Path: r.serviceLogPath(r.agentService()), MaxBytes: agentMax, Backups: agentBackups},
 		{Service: "core", Path: r.serviceLogPath(coreService), MaxBytes: coreMax, Backups: coreBackups},
 	}
 }

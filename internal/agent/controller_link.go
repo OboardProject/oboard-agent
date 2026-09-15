@@ -5,7 +5,6 @@ import (
 	"errors"
 	"net"
 	"net/http"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -133,7 +132,7 @@ func (r *Runner) writeControllerLinkDiagnostics(snapshot controllerLinkDiagnosti
 	if err != nil {
 		return
 	}
-	_ = atomicWriteFile(filepath.Join(r.stateDir(), controllerLinkStatePath), data, 0o600)
+	_ = r.stateWrite(controllerLinkStatePath, data, 0o600)
 }
 
 // classifyControllerLinkError turns a dial or read failure into a stable class

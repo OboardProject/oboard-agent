@@ -85,7 +85,7 @@ func TestDoQActiveKernelQuery(t *testing.T) {
 	if err := os.WriteFile(path, raw, 0600); err != nil {
 		t.Fatal(err)
 	}
-	opts, _, err := LoadConfig(path, HY2Tuning{})
+	opts, _, err := LoadConfig(path, nil, HY2Tuning{})
 	if err != nil {
 		t.Fatal(err)
 	}

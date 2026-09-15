@@ -8,7 +8,7 @@ import (
 )
 
 func TestFamilySelectorConfigCanBeCreated(t *testing.T) {
-	opts, _, err := LoadConfig("testdata/family-selector.json", HY2Tuning{})
+	opts, _, err := LoadConfig("testdata/family-selector.json", nil, HY2Tuning{})
 	if err != nil {
 		t.Fatal(err)
 	}

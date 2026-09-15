@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/OboardProject/oboard-agent/internal/agentsecurity"
+	"github.com/OboardProject/oboard-agent/internal/stealth"
 	"github.com/OboardProject/oboard-agent/internal/model"
 )
 
@@ -32,11 +33,39 @@ func RunManagementConsole(defaultConfigPath string, args []string, in io.Reader,
 		errOut:  errOut,
 		manager: serviceManager(),
 	}
-	console.configPath, console.config = loadManagementConfig(defaultConfigPath)
-	if len(args) > 0 {
-		return console.runCommand(args)
+	// A stealth installation keeps its config at a generated path, so the
+	// operator passes -config/-key explicitly; the flags are accepted before
+	// any command.
+	remaining, configPath, keyPath := extractManagementFlags(args)
+	console.configPath, console.config = loadManagementConfig(defaultConfigPath, configPath, keyPath)
+	console.stealthKey = console.config.StealthKey
+	if len(remaining) > 0 {
+		return console.runCommand(remaining)
 	}
 	return console.runMenu()
+}
+
+// extractManagementFlags pulls -config/-key out of management args so both
+// interactive and one-shot modes work on a stealth installation.
+func extractManagementFlags(args []string) (remaining []string, configPath, keyPath string) {
+	remaining = append([]string(nil), args...)
+	for i := 0; i < len(remaining); i++ {
+		switch remaining[i] {
+		case "-config", "--config":
+			if i+1 < len(remaining) {
+				configPath = remaining[i+1]
+				remaining = append(remaining[:i:i], remaining[i+2:]...)
+				i--
+			}
+		case "-key", "--key":
+			if i+1 < len(remaining) {
+				keyPath = remaining[i+1]
+				remaining = append(remaining[:i:i], remaining[i+2:]...)
+				i--
+			}
+		}
+	}
+	return remaining, configPath, keyPath
 }
 
 type managementConsole struct {
@@ -46,6 +75,7 @@ type managementConsole struct {
 	manager    string
 	configPath string
 	config     Config
+	stealthKey []byte
 }
 
 func (c *managementConsole) runMenu() int {
@@ -271,7 +301,11 @@ func (c *managementConsole) printControllerCheck() {
 }
 
 func (c *managementConsole) runRemoteAccess(args []string) int {
-	store := agentsecurity.NewStore(agentsecurity.PathForConfig(c.configPath))
+	path := agentsecurity.PathForConfig(c.configPath)
+	if len(c.stealthKey) > 0 {
+		path = filepath.Join(filepath.Dir(c.configPath), stealth.PhysicalName(c.stealthKey, "local-security.json"))
+	}
+	store := agentsecurity.NewStore(path, c.stealthKey)
 	if len(args) == 0 || strings.EqualFold(args[0], "status") {
 		policy, err := store.Load()
 		if err != nil {
@@ -405,8 +439,16 @@ func checkManagementController(cfg Config) managementCheckResult {
 	return result
 }
 
-func loadManagementConfig(defaultPath string) (string, Config) {
-	candidates := []string{strings.TrimSpace(os.Getenv("OBOARD_AGENT_CONFIG")), "/etc/oboard-agent/config.json", defaultPath, "/root/.oboard-agent/config.json"}
+func loadManagementConfig(defaultPath, configPath, keyPath string) (string, Config) {
+	var key []byte
+	if strings.TrimSpace(keyPath) != "" {
+		loaded, err := stealth.LoadKey(keyPath)
+		if err != nil {
+			return "", normalizeConfig(Config{})
+		}
+		key = loaded
+	}
+	candidates := []string{strings.TrimSpace(os.Getenv("OBOARD_AGENT_CONFIG")), strings.TrimSpace(configPath), "/etc/oboard-agent/config.json", defaultPath, "/root/.oboard-agent/config.json"}
 	seen := map[string]bool{}
 	for _, path := range candidates {
 		path = strings.TrimSpace(path)
@@ -414,7 +456,7 @@ func loadManagementConfig(defaultPath string) (string, Config) {
 			continue
 		}
 		seen[path] = true
-		cfg, err := LoadConfig(path)
+		cfg, err := LoadConfigWithKey(path, key)
 		if err == nil {
 			cfg.ConfigPath = path
 			return path, normalizeConfig(cfg)
@@ -423,7 +465,12 @@ func loadManagementConfig(defaultPath string) (string, Config) {
 	return "", normalizeConfig(Config{})
 }
 
-func (c *managementConsole) agentService() string { return managementAgentService }
+func (c *managementConsole) agentService() string {
+	if service := strings.TrimSpace(c.config.AgentService); service != "" {
+		return service
+	}
+	return managementAgentService
+}
 
 func (c *managementConsole) coreService() string {
 	if service := strings.TrimSpace(c.config.CoreService); service != "" {

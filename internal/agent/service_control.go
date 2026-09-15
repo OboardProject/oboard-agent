@@ -6,23 +6,29 @@ import (
 	"time"
 )
 
-func allowedManagedService(name string) bool {
-	switch strings.TrimSpace(name) {
+// allowedManagedService reports whether name is one of this installation's
+// managed units. In stealth mode the two units carry generated identity
+// names, so the configured names are accepted alongside the fixed ones.
+func (r *Runner) allowedManagedService(name string) bool {
+	name = strings.TrimSpace(name)
+	switch name {
 	case "oboard-agent", "oboard-sb":
 		return true
-	default:
-		return false
 	}
+	if name != "" && (name == r.agentService() || name == r.coreService()) {
+		return true
+	}
+	return false
 }
 
 func (r *Runner) managedServiceStatus(name string) (map[string]any, error) {
 	manager := detectServiceManager()
 	if name == "" || name == "all" {
-		agent, _ := inspectManagedService(manager, "oboard-agent")
-		core, _ := inspectManagedService(manager, "oboard-sb")
-		return map[string]any{"manager": manager, "oboard-agent": agent, "oboard-sb": core}, nil
+		agent, _ := inspectManagedService(manager, r.agentService())
+		core, _ := inspectManagedService(manager, r.coreService())
+		return map[string]any{"manager": manager, "agent": agent, "core": core}, nil
 	}
-	if !allowedManagedService(name) {
+	if !r.allowedManagedService(name) {
 		return nil, errors.New("service is not an OBoard managed unit")
 	}
 	status, err := inspectManagedService(manager, name)
@@ -30,11 +36,11 @@ func (r *Runner) managedServiceStatus(name string) (map[string]any, error) {
 }
 
 func (r *Runner) restartManagedService(name string) (map[string]any, error) {
-	if !allowedManagedService(name) {
+	if !r.allowedManagedService(name) {
 		return nil, errors.New("service is not an OBoard managed unit")
 	}
 	manager := detectServiceManager()
-	if name == "oboard-sb" {
+	if name == r.coreService() {
 		lock, err := r.acquireHostCoreLock(hostCoreLockWait)
 		if err != nil {
 			return nil, err

@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
 
 	"github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/authorization"
 )
@@ -132,10 +131,9 @@ func OperationalConfigDigest(raw []byte) (string, error) {
 }
 
 // OperationalConfigDigestFile reads a configuration file and returns its
-// operational digest.
-func OperationalConfigDigestFile(path string) (string, error) {
-	// #nosec G304 -- path is the explicit local CLI flag supplied by the Agent service.
-	data, err := os.ReadFile(path)
+// operational digest. A non-empty key decrypts a stealth envelope first.
+func OperationalConfigDigestFile(path string, key []byte) (string, error) {
+	data, err := readConfigFile(path, key)
 	if err != nil {
 		return "", err
 	}

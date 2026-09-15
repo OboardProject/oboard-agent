@@ -37,7 +37,7 @@ func TestLoadConfigRejectsExcludedProtocols(t *testing.T) {
 			if err := os.WriteFile(path, []byte(test.raw), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			if _, _, err := LoadConfig(path, HY2Tuning{}); err == nil {
+			if _, _, err := LoadConfig(path, nil, HY2Tuning{}); err == nil {
 				t.Fatal("excluded protocol config was accepted")
 			}
 		})
@@ -56,7 +56,7 @@ func TestLoadConfigStripsRuntimeMetadata(t *testing.T) {
 	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	opts, metadata, err := LoadConfig(path, HY2Tuning{})
+	opts, metadata, err := LoadConfig(path, nil, HY2Tuning{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +90,7 @@ func TestLoadConfigAcceptsManagedWireGuardEndpoint(t *testing.T) {
 	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	opts, _, err := LoadConfig(path, HY2Tuning{})
+	opts, _, err := LoadConfig(path, nil, HY2Tuning{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +126,7 @@ func TestLoadConfigAcceptsShadowsocksUoTContract(t *testing.T) {
 	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	opts, _, err := LoadConfig(path, HY2Tuning{})
+	opts, _, err := LoadConfig(path, nil, HY2Tuning{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,7 +164,7 @@ func TestLoadConfigAcceptsAuthenticatedSocks5InboundAndOutbound(t *testing.T) {
 	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	opts, _, err := LoadConfig(path, HY2Tuning{})
+	opts, _, err := LoadConfig(path, nil, HY2Tuning{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -196,7 +196,7 @@ func TestLoadConfigAcceptsAnyTLSPaddingScheme(t *testing.T) {
 	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	opts, _, err := LoadConfig(path, HY2Tuning{})
+	opts, _, err := LoadConfig(path, nil, HY2Tuning{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -237,7 +237,7 @@ func TestLoadConfigAcceptsMieruOptionsFromLocalRegistry(t *testing.T) {
 	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	opts, _, err := LoadConfig(path, HY2Tuning{})
+	opts, _, err := LoadConfig(path, nil, HY2Tuning{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -278,7 +278,7 @@ func TestLoadConfigAcceptsSnellOptions(t *testing.T) {
 	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	opts, _, err := LoadConfig(path, HY2Tuning{})
+	opts, _, err := LoadConfig(path, nil, HY2Tuning{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -322,7 +322,7 @@ func TestLoadConfigKeepsGeneratedSnellListenersSingleUser(t *testing.T) {
 	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	opts, _, err := LoadConfig(path, HY2Tuning{})
+	opts, _, err := LoadConfig(path, nil, HY2Tuning{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -374,7 +374,7 @@ func TestLoadConfigAcceptsSnellV6Options(t *testing.T) {
 	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	opts, _, err := LoadConfig(path, HY2Tuning{})
+	opts, _, err := LoadConfig(path, nil, HY2Tuning{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -401,7 +401,7 @@ func TestLoadConfigAcceptsSourcePrefixOutbound(t *testing.T) {
 	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	opts, _, err := LoadConfig(path, HY2Tuning{})
+	opts, _, err := LoadConfig(path, nil, HY2Tuning{})
 	if err != nil {
 		t.Fatal(err)
 	}

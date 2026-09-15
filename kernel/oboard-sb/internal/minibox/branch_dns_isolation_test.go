@@ -266,7 +266,7 @@ func newBranchDNSFixture(t *testing.T) *branchDNSFixture {
 
 func (f *branchDNSFixture) start(t *testing.T) *box.Box {
 	t.Helper()
-	opts, _, err := LoadConfig(f.configPath, HY2Tuning{})
+	opts, _, err := LoadConfig(f.configPath, nil, HY2Tuning{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -550,7 +550,7 @@ func TestBranchResolveRejectsUnknownResolver(t *testing.T) {
 	if err := os.WriteFile(path, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := LoadConfig(path, HY2Tuning{}); err == nil || !strings.Contains(err.Error(), `unknown DNS server "missing"`) {
+	if _, _, err := LoadConfig(path, nil, HY2Tuning{}); err == nil || !strings.Contains(err.Error(), `unknown DNS server "missing"`) {
 		t.Fatalf("unknown resolver accepted by LoadConfig: %v", err)
 	}
 	logical, err := json.Marshal(map[string]any{
@@ -564,7 +564,7 @@ func TestBranchResolveRejectsUnknownResolver(t *testing.T) {
 	if err := os.WriteFile(path, logical, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := LoadConfig(path, HY2Tuning{}); err != nil {
+	if _, _, err := LoadConfig(path, nil, HY2Tuning{}); err != nil {
 		t.Fatalf("valid logical resolve rejected: %v", err)
 	}
 }

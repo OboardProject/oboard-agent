@@ -119,7 +119,7 @@ func (r *Runner) requestWARPConfig(ctx context.Context, plan model.WARPRequestPl
 		report.Error = err.Error()
 		return report
 	}
-	profileDir := filepath.Join(r.stateDir(), "warp", strconv.FormatInt(plan.ProfileID, 10))
+	profileDir := filepath.Join(r.stateDirPath("warp"), strconv.FormatInt(plan.ProfileID, 10))
 	if err := os.MkdirAll(profileDir, 0o700); err != nil {
 		report.Error = err.Error()
 		return report
@@ -149,9 +149,8 @@ func (r *Runner) requestWARPConfig(ctx context.Context, plan model.WARPRequestPl
 }
 
 func (r *Runner) loadPersistedWARPConfig(plan model.WARPRequestPlan) (model.WARPConfigReport, error) {
-	path := filepath.Join(r.stateDir(), "warp", strconv.FormatInt(plan.ProfileID, 10), "endpoint.json")
-	// #nosec G304 -- path is a fixed child of the Agent state directory.
-	raw, err := os.ReadFile(path)
+	path := filepath.Join(r.stateDirPath("warp"), strconv.FormatInt(plan.ProfileID, 10), "endpoint.json")
+	raw, err := r.stateReadPath(path)
 	if err != nil {
 		return model.WARPConfigReport{}, err
 	}
@@ -178,13 +177,13 @@ func (r *Runner) loadPersistedWARPConfig(plan model.WARPRequestPlan) (model.WARP
 
 func (r *Runner) persistReadyWARPReport(report model.WARPConfigReport, outbound map[string]any) model.WARPConfigReport {
 	report = readyWARPReport(report, outbound)
-	dir := filepath.Join(r.stateDir(), "warp", strconv.FormatInt(report.ProfileID, 10))
+	dir := filepath.Join(r.stateDirPath("warp"), strconv.FormatInt(report.ProfileID, 10))
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		report.Status = model.WARPStatusFailed
 		report.Error = err.Error()
 		return report
 	}
-	if err := atomicWriteFile(filepath.Join(dir, "endpoint.json"), []byte(report.ConfigJSON), 0o600); err != nil {
+	if err := r.stateWritePath(filepath.Join(dir, "endpoint.json"), []byte(report.ConfigJSON), 0o600); err != nil {
 		report.Status = model.WARPStatusFailed
 		report.Error = err.Error()
 	}

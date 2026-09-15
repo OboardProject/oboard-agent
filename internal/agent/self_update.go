@@ -100,7 +100,19 @@ func (r *Runner) signedReleaseTargets() (signedReleaseTargets, error) {
 	if err != nil {
 		return signedReleaseTargets{}, err
 	}
-	if filepath.Base(agentPath) != "oboard-agent" {
+	// In stealth mode the three binaries carry generated names from the
+	// identity; an update must replace them in place so the layout survives.
+	// In standard mode only the fixed names are accepted.
+	stealthIdentity := r.Config().Stealth
+	agentName := "oboard-agent"
+	coreName := "oboard-sb"
+	realmName := realmProcessName
+	if r.stealthOn() && stealthIdentity != nil {
+		agentName = stealthIdentity.Identity.AgentName
+		coreName = stealthIdentity.Identity.CoreName
+		realmName = stealthIdentity.Identity.RealmName
+	}
+	if filepath.Base(agentPath) != agentName {
 		return signedReleaseTargets{}, fmt.Errorf("refusing to update unexpected agent executable %s", agentPath)
 	}
 	corePath := strings.TrimSpace(r.coreBinary())
@@ -108,30 +120,40 @@ func (r *Runner) signedReleaseTargets() (signedReleaseTargets, error) {
 		if resolved, lookupErr := exec.LookPath(corePath); lookupErr == nil {
 			corePath = resolved
 		} else {
-			corePath = filepath.Join(filepath.Dir(agentPath), "oboard-sb")
+			corePath = filepath.Join(filepath.Dir(agentPath), coreName)
 		}
 	}
 	if resolved, err := filepath.EvalSymlinks(corePath); err == nil {
 		corePath = resolved
 	}
-	if filepath.Base(corePath) != "oboard-sb" {
-		corePath = filepath.Join(filepath.Dir(corePath), "oboard-sb")
+	if filepath.Base(corePath) != coreName {
+		corePath = filepath.Join(filepath.Dir(corePath), coreName)
 	}
 	if !filepath.IsAbs(corePath) {
 		return signedReleaseTargets{}, errors.New("resolved core update path is not absolute")
 	}
 	// realm ships beside the Agent and is never configurable, so it is always
 	// installed next to the executable being replaced.
-	realmPath := filepath.Join(filepath.Dir(agentPath), realmProcessName)
+	realmPath := filepath.Join(filepath.Dir(agentPath), realmName)
 	return signedReleaseTargets{
 		Agent:        filepath.Clean(agentPath),
 		Core:         filepath.Clean(corePath),
 		Realm:        filepath.Clean(realmPath),
-		ActiveConfig: filepath.Join(r.stateDir(), "sing-box.json"),
+		ActiveConfig: r.statePath(singBoxConfigFile),
 	}, nil
 }
 
-func downloadAndInstallSignedRelease(ctx context.Context, baseClient *http.Client, baseURL, repo, expectedBuild string, targets signedReleaseTargets) (releaseInstallOutcome, error) {
+// updateStagingPrefix returns the dot-prefixed staging name prefix used for
+// update sidecar files. Standard mode keeps the historical .oboard-update
+// names; stealth mode derives an unremarkable prefix from the identity.
+func (r *Runner) updateStagingPrefix() string {
+	if r.stealthOn() && r.Config().Stealth != nil {
+		return "." + r.Config().Stealth.Identity.StagingPrefix
+	}
+	return ".oboard-update"
+}
+
+func (r *Runner) downloadAndInstallSignedRelease(ctx context.Context, baseClient *http.Client, baseURL, repo, expectedBuild string, targets signedReleaseTargets, stagingPrefix string) (releaseInstallOutcome, error) {
 	var outcome releaseInstallOutcome
 	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	u, err := url.Parse(baseURL)
@@ -147,7 +169,7 @@ func downloadAndInstallSignedRelease(ctx context.Context, baseClient *http.Clien
 	client := releaseHTTPClient(baseClient, u.Scheme == "https")
 	// Prefer staging in the target filesystem to avoid cross-FS peak duplication.
 	stagingRoot := filepath.Dir(targets.Agent)
-	protectedStagingDir, stagingErr := os.MkdirTemp(stagingRoot, ".oboard-update-")
+	protectedStagingDir, stagingErr := os.MkdirTemp(stagingRoot, stagingPrefix+"-")
 	useStagingDir := stagingErr == nil
 	var tmpDir string
 	if useStagingDir {
@@ -212,13 +234,13 @@ func downloadAndInstallSignedRelease(ctx context.Context, baseClient *http.Clien
 	// serving right now, while nothing on disk has been replaced yet. Doing it
 	// after installation is what leaves a node running its old working kernel
 	// with an incompatible executable staged for the next restart.
-	state, note, err := preflightStagedCore(filepath.Join(tmpDir, coreName), targets.ActiveConfig, coreCheckTimeout)
+	state, note, err := r.preflightStagedCore(filepath.Join(tmpDir, coreName), targets.ActiveConfig, coreCheckTimeout)
 	outcome.CorePreflight = state
 	outcome.CorePreflightNote = note
 	if err != nil {
 		return outcome, err
 	}
-	if err := installVerifiedReleaseFiles([]stagedReleaseFile{
+	if err := r.installVerifiedReleaseFiles(stagingPrefix, []stagedReleaseFile{
 		{source: filepath.Join(tmpDir, agentName), target: targets.Agent},
 		{source: filepath.Join(tmpDir, coreName), target: targets.Core},
 		{source: filepath.Join(tmpDir, realmName), target: targets.Realm},
@@ -243,7 +265,7 @@ const coreCheckTimeout = 30 * time.Second
 // filesystem, the check times out) yields no verdict, and blocking every update
 // on that would be worse than proceeding — those cases are reported as skipped
 // so the task result shows the update was not preflighted.
-func preflightStagedCore(stagedCore, configPath string, timeout time.Duration) (string, string, error) {
+func (r *Runner) preflightStagedCore(stagedCore, configPath string, timeout time.Duration) (string, string, error) {
 	configPath = strings.TrimSpace(configPath)
 	if configPath == "" {
 		return corePreflightNotDeployed, "no active kernel configuration path", nil
@@ -259,7 +281,11 @@ func preflightStagedCore(stagedCore, configPath string, timeout time.Duration) (
 	if note, ok := corePreflightMemoryShortfall(); !ok {
 		return corePreflightSkipped, note, nil
 	}
-	runErr := runCommand(timeout, stagedCore, "-check", "-config", configPath)
+	checkArgs := []string{"-check", "-config", configPath}
+	if keyPath := r.stealthKeyPath(); keyPath != "" {
+		checkArgs = append(checkArgs, "-key", keyPath)
+	}
+	runErr := runCommand(timeout, stagedCore, checkArgs...)
 	if runErr == nil {
 		return corePreflightValidated, "", nil
 	}
@@ -630,7 +656,7 @@ type stagedReleaseFile struct {
 	linked bool
 }
 
-func installVerifiedReleaseFiles(items []stagedReleaseFile) error {
+func (r *Runner) installVerifiedReleaseFiles(stagingPrefix string, items []stagedReleaseFile) error {
 	cleaned := map[string]bool{}
 	for _, item := range items {
 		dir := filepath.Dir(item.target)
@@ -638,20 +664,20 @@ func installVerifiedReleaseFiles(items []stagedReleaseFile) error {
 			continue
 		}
 		cleaned[dir] = true
-		removeStaleReleaseSidecars(dir)
+		r.removeStaleReleaseSidecars(dir, stagingPrefix)
 	}
 	for i := range items {
 		// #nosec G301 -- executable installation directories must remain searchable; files are installed atomically with 0755.
 		if err := os.MkdirAll(filepath.Dir(items[i].target), 0o755); err != nil {
 			return err
 		}
-		stage, err := copyReleaseFileBeside(items[i].source, items[i].target, ".oboard-update-new.*")
+		stage, err := copyReleaseFileBeside(items[i].source, items[i].target, stagingPrefix+"-new.*")
 		if err != nil {
 			cleanupStagedReleaseFiles(items)
 			return err
 		}
 		items[i].stage = stage
-		if err := preserveExistingReleaseFile(&items[i]); err != nil {
+		if err := preserveExistingReleaseFile(&items[i], stagingPrefix); err != nil {
 			cleanupStagedReleaseFiles(items)
 			return err
 		}
@@ -664,13 +690,13 @@ func installVerifiedReleaseFiles(items []stagedReleaseFile) error {
 	return nil
 }
 
-func preserveExistingReleaseFile(item *stagedReleaseFile) error {
+func preserveExistingReleaseFile(item *stagedReleaseFile, stagingPrefix string) error {
 	if _, err := os.Stat(item.target); errors.Is(err, os.ErrNotExist) {
 		return nil
 	} else if err != nil {
 		return err
 	}
-	backup, err := reservedTempPath(filepath.Dir(item.target), ".oboard-update-backup.*")
+	backup, err := reservedTempPath(filepath.Dir(item.target), stagingPrefix+"-backup.*")
 	if err != nil {
 		return err
 	}
@@ -783,12 +809,17 @@ func isNoSpaceError(err error) bool {
 	return errors.Is(err, syscall.ENOSPC) || errors.Is(err, syscall.EDQUOT)
 }
 
-func removeStaleReleaseSidecars(dir string) {
+func (r *Runner) removeStaleReleaseSidecars(dir, stagingPrefix string) {
 	dir = filepath.Clean(dir)
 	if dir == "" || dir == "." {
 		return
 	}
-	for _, pattern := range []string{".oboard-update-new.*", ".oboard-update-backup.*"} {
+	prefixes := []string{stagingPrefix + "-new.*", stagingPrefix + "-backup.*"}
+	if stagingPrefix != ".oboard-update" {
+		// Clean up sidecars left by an older standard-mode update too.
+		prefixes = append(prefixes, ".oboard-update-new.*", ".oboard-update-backup.*")
+	}
+	for _, pattern := range prefixes {
 		matches, err := filepath.Glob(filepath.Join(dir, pattern))
 		if err != nil {
 			continue

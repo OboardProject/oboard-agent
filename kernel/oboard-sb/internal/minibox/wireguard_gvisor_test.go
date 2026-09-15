@@ -10,7 +10,7 @@ import (
 )
 
 func TestManagedWireGuardEndpointCanBeCreated(t *testing.T) {
-	opts, _, err := LoadConfig("testdata/warp.json", HY2Tuning{})
+	opts, _, err := LoadConfig("testdata/warp.json", nil, HY2Tuning{})
 	if err != nil {
 		t.Fatal(err)
 	}

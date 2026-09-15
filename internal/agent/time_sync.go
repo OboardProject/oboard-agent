@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
@@ -341,7 +340,7 @@ func normalizeNTPServers(servers []string) ([]string, error) {
 }
 
 func (r *Runner) configureCoreClock(ctx context.Context) error {
-	configPath := filepath.Join(r.stateDir(), "sing-box.json")
+	configPath := r.statePath(singBoxConfigFile)
 	info, err := os.Stat(configPath)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -365,7 +364,7 @@ func (r *Runner) configureCoreClock(ctx context.Context) error {
 	}
 	client := r.coreClient
 	if client == nil {
-		client = unixHTTPClient(coreAPISocket)
+		client = unixHTTPClient(r.coreAPISocketPath())
 	}
 	requestCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
@@ -386,7 +385,7 @@ func (r *Runner) configureCoreClock(ctx context.Context) error {
 }
 
 func (r *Runner) unsupportedLogicalTimePaths() []string {
-	data, err := os.ReadFile(filepath.Join(r.stateDir(), "sing-box.json"))
+	data, err := r.stateRead(singBoxConfigFile)
 	if err != nil {
 		return nil
 	}

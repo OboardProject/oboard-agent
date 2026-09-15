@@ -260,7 +260,7 @@ func TestConfigureCoreClockDefersUntilCoreIsConfigured(t *testing.T) {
 
 func TestRuntimeClockPersistsAndRestoresMonotonicReference(t *testing.T) {
 	dir := t.TempDir()
-	clock := newRuntimeClock(dir)
+	clock := newRuntimeClock(dir, nil)
 	reference := time.Now().UTC().Add(2 * time.Minute)
 	if err := clock.Apply(true, reference, "ntp:test", reference); err != nil {
 		t.Fatal(err)
@@ -272,7 +272,7 @@ func TestRuntimeClockPersistsAndRestoresMonotonicReference(t *testing.T) {
 	if info.Mode().Perm() != 0o600 {
 		t.Fatalf("runtime clock state mode = %o", info.Mode().Perm())
 	}
-	restored := newRuntimeClock(dir)
+	restored := newRuntimeClock(dir, nil)
 	if !restored.Snapshot().Enabled || restored.Snapshot().Source != "ntp:test" {
 		t.Fatalf("restored clock state = %#v", restored.Snapshot())
 	}

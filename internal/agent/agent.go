@@ -28,7 +28,9 @@ import (
 	"github.com/OboardProject/oboard-agent/internal/core"
 	"github.com/OboardProject/oboard-agent/internal/logging"
 	"github.com/OboardProject/oboard-agent/internal/model"
+	"github.com/OboardProject/oboard-agent/internal/agentlink"
 	"github.com/OboardProject/oboard-agent/internal/security"
+	"github.com/OboardProject/oboard-agent/internal/stealth"
 	"github.com/OboardProject/oboard-agent/internal/version"
 )
 
@@ -41,6 +43,9 @@ type Config struct {
 	StateDir                string                   `json:"state_dir"`
 	CoreBinary              string                   `json:"core_binary"`
 	CoreService             string                   `json:"core_service"`
+	AgentService            string                   `json:"agent_service,omitempty"`
+	CoreSocket              string                   `json:"core_socket,omitempty"`
+	Stealth                 *stealth.Settings        `json:"stealth,omitempty"`
 	ResourceProfile         string                   `json:"resource_profile"`
 	CommandTimeoutSeconds   int                      `json:"command_timeout_seconds"`
 	ReloadCommand           string                   `json:"reload_command"`
@@ -64,6 +69,10 @@ type Config struct {
 	AllowInsecureController bool                     `json:"allow_insecure_controller"`
 	UpdateRepo              string                   `json:"update_repo,omitempty"`
 	ConnectionAuditEnabled  bool                     `json:"connection_audit_enabled"`
+	// StealthKey holds the raw stealth key at runtime when the agent was
+	// started with -key. It is never serialized: the key lives only in the
+	// key file and in memory.
+	StealthKey []byte `json:"-"`
 }
 
 type Runner struct {
@@ -170,6 +179,10 @@ type Runner struct {
 	coreServiceActiveCheck func() error
 	controllerLinkMu       sync.Mutex
 	controllerLink         controllerLinkDiagnostics
+	controlSessionMu       sync.Mutex
+	controlSessionLink     *agentlink.Session
+	stealthSwitchMu        sync.Mutex
+	stealthSwitchPending   *stealthSwitchFinalizer
 }
 
 const (
@@ -177,18 +190,25 @@ const (
 	controllerResponseLimit = 2 << 20
 )
 
+func coreSocketOrDefault(socket string) string {
+	if socket = strings.TrimSpace(socket); socket != "" {
+		return socket
+	}
+	return coreAPISocket
+}
+
 const defaultUpdateRepo = "OboardProject/oboard-agent"
 
 func New(cfg Config) *Runner {
 	cfg = normalizeConfig(cfg)
 	resources := DetectResourceInfo(cfg.ResourceProfile)
 	tuning := agentRuntimeTuning(resources)
-	clock := newRuntimeClock(cfg.StateDir)
+	clock := newRuntimeClock(cfg.StateDir, cfg.StealthKey)
 	profile := StorageProfile(strings.ToLower(strings.TrimSpace(cfg.StorageProfile)))
 	if profile == StorageProfileAuto {
 		profile = detectStorageProfile(cfg.StateDir, StorageProfileAuto)
 	}
-	runner := &Runner{coreClient: unixHTTPClient(coreAPISocket), lastForwardProbe: map[int64]time.Time{}, resources: resources, tuning: tuning, hostInfo: detectHostStaticInfo(), logDir: "/var/log", logMaintenanceEvery: logMaintenanceIntervalForProfile(profile), monitoringMode: "lightweight", metricReportWake: make(chan struct{}, 1), authorizationSyncWake: make(chan struct{}, 1), usersSyncWake: make(chan struct{}, 1), connectionAudit: newConnectionAuditAccumulator(cfg.ConnectionAuditEnabled), clock: clock}
+	runner := &Runner{coreClient: unixHTTPClient(coreSocketOrDefault(cfg.CoreSocket)), lastForwardProbe: map[int64]time.Time{}, resources: resources, tuning: tuning, hostInfo: detectHostStaticInfo(), logDir: "/var/log", logMaintenanceEvery: logMaintenanceIntervalForProfile(profile), monitoringMode: "lightweight", metricReportWake: make(chan struct{}, 1), authorizationSyncWake: make(chan struct{}, 1), usersSyncWake: make(chan struct{}, 1), connectionAudit: newConnectionAuditAccumulator(cfg.ConnectionAuditEnabled), clock: clock}
 	runner.client = &http.Client{Timeout: 20 * time.Second, Transport: runner.lowOverheadTransport()}
 	runner.storeConfig(cfg)
 	runner.refreshLogLevel()
@@ -213,11 +233,25 @@ func (cfg Config) Validate() error {
 	if err := validateManagedPath("state_dir", cfg.StateDir); err != nil {
 		return err
 	}
-	if err := validateManagedPath("core_binary", cfg.CoreBinary); err != nil {
+	if err := cfg.validateCoreBinaryPath(); err != nil {
 		return err
 	}
 	if err := validateServiceName(cfg.CoreService); err != nil {
 		return err
+	}
+	if err := validateServiceName(cfg.AgentService); err != nil {
+		return err
+	}
+	if err := validateSocketPath(cfg.CoreSocket); err != nil {
+		return err
+	}
+	if cfg.Stealth != nil {
+		if err := cfg.Stealth.Validate(); err != nil {
+			return fmt.Errorf("stealth: %w", err)
+		}
+		if cfg.Stealth.KeyPath == cfg.ConfigPath {
+			return fmt.Errorf("stealth key path must differ from the config path")
+		}
 	}
 	if err := validateWarpCommand(cfg.WarpCommand); err != nil {
 		return err
@@ -292,11 +326,131 @@ func (r *Runner) stateDir() string {
 	return "/var/lib/oboard-agent"
 }
 
+// stealthOn reports whether this runner was started with a stealth key and
+// therefore stores state files encrypted under derived physical names.
+func (r *Runner) stealthOn() bool {
+	return len(r.Config().StealthKey) == stealth.KeyLen
+}
+
+// statePath maps a logical state-file name to its on-disk path. In standard
+// mode the logical name is the file name; in stealth mode it is the
+// HMAC-derived physical name, so no OBoard marker ever appears on disk.
+func (r *Runner) statePath(logical string) string {
+	if r.stealthOn() {
+		return filepath.Join(r.stateDir(), stealth.PhysicalName(r.Config().StealthKey, logical))
+	}
+	return filepath.Join(r.stateDir(), logical)
+}
+
+// stateDirPath maps a logical state-directory name ("tunnels", "warp", ...)
+// to its on-disk directory path.
+func (r *Runner) stateDirPath(logical string) string {
+	return r.statePath(logical)
+}
+
+// stateRead reads a state file by logical name, decrypting when needed.
+// A plaintext file in stealth mode is returned as-is (sniffed) so a crash
+// between migration steps cannot wedge the agent on unreadable state.
+func (r *Runner) stateRead(logical string) ([]byte, error) {
+	return r.stateReadPath(r.statePath(logical))
+}
+
+// stateReadPath reads a state file by physical path, decrypting an envelope
+// when the runner is in stealth mode.
+func (r *Runner) stateReadPath(path string) ([]byte, error) {
+	// #nosec G304 -- paths are derived from the agent state directory.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if r.stealthOn() && stealth.IsEncrypted(data) {
+		return stealth.Decrypt(r.Config().StealthKey, data)
+	}
+	return data, nil
+}
+
+// stateWrite writes a state file by logical name, encrypting in stealth mode.
+func (r *Runner) stateWrite(logical string, data []byte, perm os.FileMode) error {
+	return r.stateWritePath(r.statePath(logical), data, perm)
+}
+
+// stateWritePath writes a state file by physical path, encrypting in stealth
+// mode. The temporary file used by the atomic rename is removed again, so no
+// plaintext bytes survive on disk.
+func (r *Runner) stateWritePath(path string, data []byte, perm os.FileMode) error {
+	if r.stealthOn() {
+		encrypted, err := stealth.Encrypt(r.Config().StealthKey, data)
+		if err != nil {
+			return err
+		}
+		data = encrypted
+	}
+	return atomicWriteFile(path, data, perm)
+}
+
+// stateWritePathSynced writes a state file by physical path with an fsync
+// before rename, encrypting in stealth mode. Used by traffic accounting,
+// whose checkpoints must not be lost on a crash.
+func (r *Runner) stateWritePathSynced(path string, data []byte, perm os.FileMode) error {
+	if r.stealthOn() {
+		encrypted, err := stealth.Encrypt(r.Config().StealthKey, data)
+		if err != nil {
+			return err
+		}
+		data = encrypted
+	}
+	return atomicWriteFileWithSync(path, data, perm)
+}
+
+// agentService returns the agent's own service name.
+func (r *Runner) agentService() string {
+	if service := strings.TrimSpace(r.Config().AgentService); service != "" {
+		return service
+	}
+	return "oboard-agent"
+}
+
+// coreAPISocketPath returns the kernel local API socket path.
+func (r *Runner) coreAPISocketPath() string {
+	if socket := strings.TrimSpace(r.Config().CoreSocket); socket != "" {
+		return socket
+	}
+	return coreAPISocket
+}
+
 func LoadConfig(path string) (Config, error) {
+	return loadConfigBytes(path, nil)
+}
+
+// LoadConfigWithKey reads a config that may be a stealth envelope. A nil key
+// keeps legacy plaintext reading; a key decrypts an envelope and rejects a
+// plaintext file so a missing key file can never silently downgrade an
+// installation to plaintext.
+func LoadConfigWithKey(path string, key []byte) (Config, error) {
+	if len(key) == 0 {
+		return LoadConfig(path)
+	}
+	cfg, err := loadConfigBytes(path, key)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.StealthKey = key
+	return cfg, nil
+}
+
+func loadConfigBytes(path string, key []byte) (Config, error) {
 	// #nosec G304,G703 -- path is an explicit local CLI flag, not a Controller task field.
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return Config{}, err
+	}
+	if len(key) > 0 {
+		if !stealth.IsEncrypted(b) {
+			return Config{}, errors.New("config file is not encrypted but a stealth key was provided")
+		}
+		if b, err = stealth.Decrypt(key, b); err != nil {
+			return Config{}, err
+		}
 	}
 	var cfg Config
 	if err := json.Unmarshal(b, &cfg); err != nil {
@@ -313,6 +467,16 @@ func LoadConfig(path string) (Config, error) {
 }
 
 func SaveConfig(path string, cfg Config) error {
+	return saveConfigBytes(path, cfg, nil)
+}
+
+// SaveConfigWithKey writes the config as a stealth envelope when a key is
+// present. The caller keeps ownership of the key; nothing here persists it.
+func SaveConfigWithKey(path string, cfg Config, key []byte) error {
+	return saveConfigBytes(path, cfg, key)
+}
+
+func saveConfigBytes(path string, cfg Config, key []byte) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
@@ -320,7 +484,22 @@ func SaveConfig(path string, cfg Config) error {
 	if err != nil {
 		return err
 	}
+	if len(key) > 0 {
+		if b, err = stealth.Encrypt(key, b); err != nil {
+			return err
+		}
+	}
 	return atomicWriteFile(path, b, 0o600)
+}
+
+// saveAgentConfig persists cfg to the configured path, applying stealth
+// encryption when this runner holds a key.
+func (r *Runner) saveAgentConfig(cfg Config) error {
+	path := strings.TrimSpace(cfg.ConfigPath)
+	if path == "" {
+		path = "/etc/oboard-agent/config.json"
+	}
+	return saveConfigBytes(path, cfg, r.Config().StealthKey)
 }
 
 func normalizeConfig(cfg Config) Config {
@@ -414,10 +593,34 @@ func normalizeConfig(cfg Config) Config {
 	return cfg
 }
 
-func validateManagedPath(field, value string) error {
+func validateManagedPath(field, value string, opts ...map[string][]string) error {
 	value = strings.TrimSpace(value)
 	if value == "" {
 		return nil
+	}
+	var allowedBasenames, allowedCoreDirs []string
+	for _, opt := range opts {
+		allowedBasenames = append(allowedBasenames, opt["basenames"]...)
+		allowedCoreDirs = append(allowedCoreDirs, opt["coreDirs"]...)
+	}
+	basenameAllowed := func(base string) bool {
+		for _, allowed := range allowedBasenames {
+			if base == allowed {
+				return true
+			}
+		}
+		return false
+	}
+	coreDirAllowed := func(dir string) bool {
+		if allowedCoreBinaryDir(dir) {
+			return true
+		}
+		for _, allowed := range allowedCoreDirs {
+			if dir == allowed {
+				return true
+			}
+		}
+		return false
 	}
 	if !filepath.IsAbs(value) {
 		return fmt.Errorf("%s must be an absolute path", field)
@@ -446,14 +649,15 @@ func validateManagedPath(field, value string) error {
 		// hosts that still reference the upstream binary name after the
 		// rename to oboard-sb. New installs must use oboard-sb; remove the
 		// sing-box alternative after the first stable release with enforced
-		// oldest direct-upgrade version.
-		if base != "oboard-sb" && base != "sing-box" {
+		// oldest direct-upgrade version. Stealth installations carry a
+		// generated name from their identity instead.
+		if base != "oboard-sb" && base != "sing-box" && !basenameAllowed(base) {
 			return fmt.Errorf("core_binary base name must be oboard-sb or sing-box")
 		}
 		// The Agent executes this path as root, so a matching base name is not
 		// sufficient: a writable directory such as /tmp lets a local user plant
 		// the file and gain root. Restrict it to root-owned system locations.
-		if !allowedCoreBinaryDir(filepath.Dir(cleaned)) {
+		if !coreDirAllowed(filepath.Dir(cleaned)) {
 			return fmt.Errorf("core_binary must live in a system binary directory")
 		}
 	case "realm_binary":
@@ -461,8 +665,9 @@ func validateManagedPath(field, value string) error {
 		// always derived from the running executable, and self-update installs
 		// it into that same directory. Anyone able to write there already owns
 		// the Agent binary, so a directory allowlist would add no protection
-		// while making the install and execution paths disagree.
-		if filepath.Base(cleaned) != "oboard-realm" {
+		// while making the install and execution paths disagree. Stealth
+		// installations carry a generated name from their identity instead.
+		if filepath.Base(cleaned) != "oboard-realm" && !basenameAllowed(filepath.Base(cleaned)) {
 			return fmt.Errorf("realm_binary base name must be oboard-realm")
 		}
 	}
@@ -578,6 +783,42 @@ func validateServiceName(value string) error {
 	return nil
 }
 
+// validateCoreBinaryPath validates core_binary with the stealth identity
+// name allowed when this configuration describes a hidden layout. A stealth
+// core may also live beside the running agent executable: the operator chose
+// that directory for the agent binary itself, so it carries the same trust,
+// and custom install roots must keep working after a switch.
+func (cfg Config) validateCoreBinaryPath() error {
+	if cfg.Stealth != nil {
+		if err := validateManagedPath("core_binary", cfg.CoreBinary, map[string][]string{"basenames": {cfg.Stealth.Identity.CoreName}}); err != nil {
+			if executable, exeErr := selfExecutablePath(); exeErr == nil && filepath.Dir(executable) == filepath.Dir(filepath.Clean(strings.TrimSpace(cfg.CoreBinary))) {
+				return nil
+			}
+			return err
+		}
+		return nil
+	}
+	return validateManagedPath("core_binary", cfg.CoreBinary)
+}
+
+func validateSocketPath(value string) error {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	if !filepath.IsAbs(value) {
+		return fmt.Errorf("core_socket must be an absolute path")
+	}
+	cleaned := filepath.Clean(value)
+	if cleaned != value || strings.Contains(cleaned, "..") {
+		return fmt.Errorf("core_socket must be a cleaned absolute path")
+	}
+	if i := strings.IndexFunc(cleaned, unsafeManagedPathRune); i >= 0 {
+		return fmt.Errorf("core_socket must not contain %q", cleaned[i:i+1])
+	}
+	return nil
+}
+
 func ValidateManagedCommand(field, value string) error {
 	switch strings.TrimSpace(value) {
 	case "", "auto", "none", "systemd-reload", "systemd-restart", "openrc-reload", "openrc-restart", "chrony", "systemd-timesyncd":
@@ -618,8 +859,11 @@ func lowOverheadTransportWithClock(now func() time.Time) *http.Transport {
 
 func (r *Runner) Enroll(ctx context.Context, enrollmentToken string) error {
 	bootstrap := r.Config()
+	if bootstrap.Stealth != nil && strings.TrimSpace(bootstrap.Stealth.ControllerAddr) != "" {
+		return r.enrollStealth(ctx, bootstrap.Stealth.ControllerAddr, bootstrap.Stealth.ControllerCertSHA256, enrollmentToken)
+	}
 	if strings.TrimSpace(bootstrap.ConfigPath) != "" {
-		if err := SaveConfig(bootstrap.ConfigPath, bootstrap); err != nil {
+		if err := r.saveAgentConfig(bootstrap); err != nil {
 			return fmt.Errorf("save enrollment bootstrap config: %w", err)
 		}
 	}
@@ -645,7 +889,7 @@ func (r *Runner) Enroll(ctx context.Context, enrollmentToken string) error {
 	r.storeConfig(cfg)
 	r.connectionAudit.setEnabled(cfg.ConnectionAuditEnabled)
 	if strings.TrimSpace(cfg.ConfigPath) != "" {
-		if err := SaveConfig(cfg.ConfigPath, cfg); err != nil {
+		if err := r.saveAgentConfig(cfg); err != nil {
 			return fmt.Errorf("save enrolled agent config: %w", err)
 		}
 	}
@@ -658,6 +902,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		return errors.New("agent is not enrolled")
 	}
 	r.tuning = ApplyRuntimeTuning(r.resources)
+	r.reconcileStealthSwitchCleanup()
 	r.logStartupSummary(cfg)
 	r.applyLowMemorySocketTuning()
 	r.reconcileUpdateArtifacts()
@@ -743,18 +988,71 @@ func (r *Runner) logStartupSummary(cfg Config) {
 	logging.Infof("agent starting version=%s server_id=%d controller=%s state_dir=%s core_binary=%s core_service=%s update_source=%s update_repo=%s monitoring=%s", version.String(), cfg.ServerID, displayControllerURL(cfg.ControllerURL), cfg.StateDir, coreBinary, coreService, cfg.UpdateSource, cfg.UpdateRepo, r.monitoringMode)
 }
 
+// controlConn is the transport-neutral control channel the agent session
+// loop runs over: the standard WebSocket or the stealth binary protocol.
+type controlConn interface {
+	Close() error
+	RemoteAddr() string
+	// WriteJSON sends one message envelope.
+	WriteJSON(payload any) error
+	// ReadMessage returns the next raw message envelope bytes.
+	ReadMessage() ([]byte, error)
+	// SetReadDeadline extends the read deadline after any traffic.
+	SetReadDeadline(t time.Time) error
+}
+
+// wsControlConn adapts the gorilla connection.
+type wsControlConn struct {
+	conn *websocket.Conn
+}
+
+func (c wsControlConn) Close() error       { return c.conn.Close() }
+func (c wsControlConn) RemoteAddr() string { return c.conn.RemoteAddr().String() }
+func (c wsControlConn) WriteJSON(payload any) error {
+	if err := c.conn.SetWriteDeadline(time.Now().Add(controllerSocketWriteTimeout)); err != nil {
+		return err
+	}
+	return c.conn.WriteJSON(payload)
+}
+func (c wsControlConn) ReadMessage() ([]byte, error) {
+	_, data, err := c.conn.ReadMessage()
+	return data, err
+}
+func (c wsControlConn) SetReadDeadline(t time.Time) error { return c.conn.SetReadDeadline(t) }
+
 func (r *Runner) connect(ctx context.Context) error {
+	if cfg := r.Config(); cfg.Stealth != nil && strings.TrimSpace(cfg.Stealth.ControllerAddr) != "" {
+		return r.connectStealth(ctx)
+	}
+	wsConn, err := r.dialControl(ctx)
+	if err != nil {
+		return err
+	}
+	conn := wsControlConn{conn: wsConn}
+	wsConn.SetReadLimit(controllerSocketReadLimit)
+	configureControllerSocket(wsConn, controllerSocketReadTimeout)
+	return r.runControlSession(ctx, conn)
+}
+
+// dialControl establishes the standard WebSocket channel.
+func (r *Runner) dialControl(ctx context.Context) (*websocket.Conn, error) {
 	cfg := r.Config()
 	url, err := security.ControllerWebSocketURL(cfg.ControllerURL, version.IsDev(), cfg.AllowInsecureController)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	header := http.Header{"Authorization": []string{"Bearer " + cfg.AgentToken}, "X-Agent-ID": []string{cfg.AgentID}}
 	dialer := websocket.Dialer{ReadBufferSize: 1024, WriteBufferSize: 1024, EnableCompression: false, HandshakeTimeout: 10 * time.Second, TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, Time: time.Now}}
 	conn, handshakeResponse, err := dialer.DialContext(ctx, url, header)
 	if err != nil {
-		return newControllerHandshakeError(err, handshakeResponse)
+		return nil, newControllerHandshakeError(err, handshakeResponse)
 	}
+	return conn, nil
+}
+
+// runControlSession drives the shared session loop over one transport.
+func (r *Runner) runControlSession(ctx context.Context, conn controlConn) error {
+	cfg := r.Config()
 	r.recordControllerLinkConnected(time.Now().UTC())
 	logging.Debugf("controller connection peer: server_id=%d remote=%s", cfg.ServerID, conn.RemoteAddr())
 	defer conn.Close()
@@ -769,8 +1067,6 @@ func (r *Runner) connect(ctx context.Context) error {
 		case <-done:
 		}
 	}()
-	conn.SetReadLimit(controllerSocketReadLimit)
-	configureControllerSocket(conn, controllerSocketReadTimeout)
 	defer r.closeAllTerminalSessions("controller_disconnect")
 	type websocketWriteRequest struct {
 		payload any
@@ -785,10 +1081,7 @@ func (r *Runner) connect(ctx context.Context) error {
 		write := func(request websocketWriteRequest) bool {
 			// A Controller that stopped reading would otherwise park this
 			// writer forever, filling the queue and stalling every task ack.
-			err := conn.SetWriteDeadline(time.Now().Add(controllerSocketWriteTimeout))
-			if err == nil {
-				err = conn.WriteJSON(request.payload)
-			}
+			err := conn.WriteJSON(request.payload)
 			if request.done != nil {
 				request.done <- err
 			}
@@ -1063,6 +1356,13 @@ func (r *Runner) connect(ctx context.Context) error {
 						return
 					}
 				}
+				if item.task.Type == model.AgentTaskTypeApplyStealth && status == "succeeded" {
+					if err := r.runStealthSwitchFinalizer(); err != nil {
+						logging.Errorf("schedule stealth switch handoff: %v", err)
+						cancelConnection()
+						return
+					}
+				}
 				if item.task.Type == model.AgentTaskTypeUninstallAgent && status == "succeeded" {
 					if err := r.finalizeAgentUninstall(); err != nil {
 						logging.Errorf("schedule agent uninstall finalizer: %v", err)
@@ -1072,7 +1372,7 @@ func (r *Runner) connect(ctx context.Context) error {
 		}
 	}()
 	for {
-		_, data, err := conn.ReadMessage()
+		data, err := conn.ReadMessage()
 		if err != nil {
 			return err
 		}
@@ -1371,6 +1671,13 @@ func (r *Runner) executeAgentTask(task model.AgentTask) (string, string) {
 			return "failed", jsonMap(result)
 		}
 		return "succeeded", jsonMap(result)
+	case model.AgentTaskTypeApplyStealth:
+		result, err := r.applyStealthTask(task.PayloadJSON)
+		if err != nil {
+			result["error"] = err.Error()
+			return "failed", jsonMap(result)
+		}
+		return "succeeded", jsonMap(result)
 	case model.AgentTaskTypeDiagnoseNetwork:
 		result := r.runNetworkDiagnostics(task.PayloadJSON)
 		return "succeeded", jsonMap(result)
@@ -1557,14 +1864,26 @@ func (r *Runner) updateAgentBinary(payloadJSON string) (map[string]any, error) {
 	if err != nil {
 		return map[string]any{"message": "agent update failed", "source": source}, err
 	}
-	outcome, err := downloadAndInstallSignedRelease(context.Background(), r.client, releaseBaseURL, repo, payload.ExpectedBuild, targets)
+	if r.stealthTransportActive() {
+		// Stealth agents never touch the panel's HTTP download surface; the
+		// same signed release travels over the binary transport.
+		outcome, err := r.downloadAndInstallSignedReleaseOverTransport(context.Background(), repo, payload.ExpectedBuild, targets, r.updateStagingPrefix())
+		return r.updateAgentResult(err, outcome, source, controllerURL, payload, targets, beforeAgent, beforeCore)
+	}
+	outcome, err := r.downloadAndInstallSignedRelease(context.Background(), r.client, releaseBaseURL, repo, payload.ExpectedBuild, targets, r.updateStagingPrefix())
+	return r.updateAgentResult(err, outcome, source, controllerURL, payload, targets, beforeAgent, beforeCore)
+}
+
+// updateAgentResult assembles the update task result and runs kernel
+// activation after a successful install. Both download paths share it.
+func (r *Runner) updateAgentResult(err error, outcome releaseInstallOutcome, source, controllerURL string, payload model.UpdateAgentTaskPayload, targets signedReleaseTargets, beforeAgent, beforeCore string) (map[string]any, error) {
 	manifest := outcome.Manifest
 	result := map[string]any{
 		"message":        "agent update completed",
 		"controller_url": controllerURL,
 		"expected_build": payload.ExpectedBuild,
 		"source":         source,
-		"github_repo":    repo,
+		"github_repo":    "",
 		"before_agent":   beforeAgent,
 		"before_core":    beforeCore,
 		"installed":      false,
@@ -1628,7 +1947,7 @@ func (r *Runner) scheduleAgentRestart() error {
 	if schedule := r.agentRestartCommand; schedule != nil {
 		return r.scheduleAgentRestartWith(schedule)
 	}
-	return r.scheduleAgentRestartWith(scheduleAgentRestartCommand)
+	return r.scheduleAgentRestartWith(r.scheduleAgentRestartCommand)
 }
 
 func (r *Runner) scheduleAgentRestartWith(schedule func() error) error {
@@ -1642,15 +1961,19 @@ func (r *Runner) scheduleAgentRestartWith(schedule func() error) error {
 	return err
 }
 
-func scheduleAgentRestartCommand() error {
+// scheduleAgentRestartCommand arms this process's single self-restart. The
+// service name comes from the config so a stealth installation restarts its
+// own generated unit; the PID suffix stays (one restart per process).
+func (r *Runner) scheduleAgentRestartCommand() error {
+	service := r.agentService()
 	switch detectServiceManager() {
 	case "systemd":
-		unit := fmt.Sprintf("oboard-agent-restart-%d", os.Getpid())
-		return runCommand(10*time.Second, "systemd-run", "--quiet", "--collect", "--on-active=5s", "--unit", unit, "systemctl", "restart", "oboard-agent")
+		unit := fmt.Sprintf("%s-restart-%d", service, os.Getpid())
+		return runCommand(10*time.Second, "systemd-run", "--quiet", "--collect", "--on-active=5s", "--unit", unit, "systemctl", "restart", service)
 	case "openrc":
-		return runCommand(5*time.Second, "sh", "-c", "nohup sh -c 'sleep 5; rc-service oboard-agent restart' >/dev/null 2>&1 &")
+		return runCommand(5*time.Second, "sh", "-c", "nohup sh -c "+shellQuoteValue("sleep 5; rc-service "+service+" restart")+" >/dev/null 2>&1 &")
 	default:
-		return errors.New("supported service manager is unavailable; restart oboard-agent manually to activate the update")
+		return fmt.Errorf("supported service manager is unavailable; restart %s manually to activate the update", service)
 	}
 }
 
@@ -1673,13 +1996,37 @@ func isLocalSecurityField(key string) bool {
 	return strings.Contains(normalized, "localsecurity")
 }
 
+// isStealthIdentityField reports whether a config key belongs to the stealth
+// identity. These fields are bound to the installed unit files and binary
+// names; a remote patch would desynchronize the config from the running
+// layout, so they are rejected like local-security fields.
+func isStealthIdentityField(key string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(key))
+	normalized = strings.ReplaceAll(normalized, "-", "")
+	normalized = strings.ReplaceAll(normalized, "_", "")
+	return strings.Contains(normalized, "stealth") || normalized == "agentservice" || normalized == "coresocket"
+}
+
 func (r *Runner) updateAgentConfig(patch Config, fields map[string]json.RawMessage) (map[string]any, error) {
 	for key := range fields {
 		if isLocalSecurityField(key) {
 			return map[string]any{"message": "agent config update rejected"}, errors.New("update_agent_config cannot modify local-security.json")
 		}
+		if isStealthIdentityField(key) {
+			return map[string]any{"message": "agent config update rejected"}, errors.New("update_agent_config cannot modify the stealth layout; use the apply_stealth task")
+		}
 	}
 	current := r.Config()
+	if r.stealthOn() {
+		// The stealth layout binds state_dir, core_binary, and core_service to
+		// the installed unit files; a remote change would break the next
+		// restart.
+		if (strings.TrimSpace(patch.StateDir) != "" && strings.TrimSpace(patch.StateDir) != current.StateDir) ||
+			(strings.TrimSpace(patch.CoreBinary) != "" && strings.TrimSpace(patch.CoreBinary) != current.CoreBinary) ||
+			(strings.TrimSpace(patch.CoreService) != "" && strings.TrimSpace(patch.CoreService) != current.CoreService) {
+			return map[string]any{"message": "agent config update rejected"}, errors.New("state_dir, core_binary, and core_service are fixed by the stealth layout; use the apply_stealth task to change it")
+		}
+	}
 	currentCoreService := r.coreService()
 	oldController := current.ControllerURL
 	oldStateDir := current.StateDir
@@ -1785,7 +2132,7 @@ func (r *Runner) updateAgentConfig(patch Config, fields map[string]json.RawMessa
 			stoppedPreviousService = true
 		}
 	}
-	if err := SaveConfig(path, next); err != nil {
+	if err := r.saveAgentConfig(next); err != nil {
 		if stoppedPreviousService {
 			_ = startManagedService(previousServiceManager, currentCoreService)
 		}
@@ -1880,27 +2227,28 @@ func (r *Runner) runNetworkDiagnostics(payloadJSON string) map[string]any {
 		"public_ipv6":        diagnosticCommand("curl", "-6", "-fsS", "--max-time", "5", "https://api-ipv6.ip.sb/ip"),
 		"tcp_socket_buffers": diagnosticCommand("sysctl", "net.ipv4.tcp_rmem", "net.ipv4.tcp_wmem"),
 	}
+	agentService := r.agentService()
 	switch serviceManager() {
 	case "systemd":
 		commands["oboard_sb_active"] = diagnosticCommand("systemctl", "is-active", r.coreService())
 		commands["oboard_sb_status"] = diagnosticCommand("systemctl", "--no-pager", "--full", "status", r.coreService())
-		commands["oboard_agent_status"] = diagnosticCommand("systemctl", "--no-pager", "--full", "status", "oboard-agent")
+		commands["oboard_agent_status"] = diagnosticCommand("systemctl", "--no-pager", "--full", "status", agentService)
 		commands["oboard_sb_journal"] = diagnosticCommand("journalctl", "-u", r.coreService(), "-n", "80", "--no-pager")
-		commands["oboard_agent_journal"] = diagnosticCommand("journalctl", "-u", "oboard-agent", "-n", "80", "--no-pager")
+		commands["oboard_agent_journal"] = diagnosticCommand("journalctl", "-u", agentService, "-n", "80", "--no-pager")
 	case "openrc":
 		commands["openrc_status"] = diagnosticCommand("rc-status", "-s")
 		commands["oboard_sb_status"] = diagnosticCommand("rc-service", r.coreService(), "status")
-		commands["oboard_agent_status"] = diagnosticCommand("rc-service", "oboard-agent", "status")
+		commands["oboard_agent_status"] = diagnosticCommand("rc-service", agentService, "status")
 	}
 	result["commands"] = commands
 	resourceCtx, resourceCancel := context.WithTimeout(context.Background(), 3*time.Second)
 	result["core_resources"] = r.coreResourceSnapshot(resourceCtx)
 	resourceCancel()
 	files := map[string]any{
-		"agent_config":          readDiagnosticFile(r.configPath()),
-		"sing_box_config":       readDiagnosticFile(filepath.Join(r.stateDir(), "sing-box.json")),
-		"core_watchdog":         readDiagnosticFile(filepath.Join(r.stateDir(), "core-watchdog.json")),
-		"socket_tuning":         readDiagnosticFile(filepath.Join(r.stateDir(), "socket-tuning.json")),
+		"agent_config":          r.readDiagnosticConfigFile(r.configPath()),
+		"sing_box_config":       readDiagnosticDecrypted(r, r.statePath(singBoxConfigFile)),
+		"core_watchdog":         readDiagnosticDecrypted(r, r.statePath("core-watchdog.json")),
+		"socket_tuning":         readDiagnosticDecrypted(r, r.statePath("socket-tuning.json")),
 		"traffic_sync":          r.trafficSyncDiagnostics(),
 		"cgroup_memory_events":  readDiagnosticFile("/sys/fs/cgroup/memory.events"),
 		"cgroup_memory_current": readDiagnosticFile("/sys/fs/cgroup/memory.current"),
@@ -1913,8 +2261,8 @@ func (r *Runner) runNetworkDiagnostics(payloadJSON string) map[string]any {
 	// diagnostics: both units redirect stdout and stderr there, so the systemd
 	// journal carries lifecycle lines only. Attach them on every service
 	// manager, not just OpenRC.
-	files["oboard_agent_log"] = readDiagnosticTail("/var/log/oboard-agent.log", 80)
-	files["oboard_sb_log"] = readDiagnosticTail(filepath.Join("/var/log", r.coreService()+".log"), 80)
+	files["oboard_agent_log"] = readDiagnosticTail(r.agentLogPath(), 80)
+	files["oboard_sb_log"] = readDiagnosticTail(r.coreLogPath(), 80)
 	result["files"] = files
 	result["log_policy"] = r.logPolicySummary()
 	result["ssh_inbounds"] = r.currentSSHDiagnostics()
@@ -1976,6 +2324,17 @@ func (r *Runner) configPath() string {
 	return "/etc/oboard-agent/config.json"
 }
 
+// agentLogPath returns the agent service log path. In stealth mode the log
+// file carries the generated service name.
+func (r *Runner) agentLogPath() string {
+	return filepath.Join("/var/log", r.agentService()+".log")
+}
+
+// coreLogPath returns the kernel service log path.
+func (r *Runner) coreLogPath() string {
+	return filepath.Join("/var/log", r.coreService()+".log")
+}
+
 func (r *Runner) collectLogs(payloadJSON string) map[string]any {
 	maintenance := r.enforceLogLimits(false)
 	var payload model.CollectLogsTaskPayload
@@ -2008,7 +2367,7 @@ func (r *Runner) collectLogs(payloadJSON string) map[string]any {
 	}
 	logs := map[string]any{}
 	if services == "all" || services == "agent" {
-		logs["agent"] = r.collectServiceLog("oboard-agent", payload.Lines)
+		logs["agent"] = r.collectServiceLog(r.agentService(), payload.Lines)
 	}
 	if services == "all" || services == "core" {
 		logs["core"] = r.collectServiceLog(r.coreService(), payload.Lines)
@@ -2020,7 +2379,7 @@ func (r *Runner) collectLogs(payloadJSON string) map[string]any {
 func (r *Runner) collectServiceLog(service string, lines int) map[string]any {
 	logPath := r.serviceLogPath(service)
 	backups := r.Config().CoreLogBackups
-	if service == "oboard-agent" {
+	if service == r.agentService() {
 		backups = r.Config().LogBackups
 	}
 	logFile := readManagedLogTail(logPath, backups, lines)
@@ -2061,7 +2420,13 @@ func (r *Runner) collectServiceLog(service string, lines int) map[string]any {
 	return item
 }
 
+// serviceManagerOverride is a test seam for the detected service manager.
+var serviceManagerOverride func() string
+
 func serviceManager() string {
+	if serviceManagerOverride != nil {
+		return serviceManagerOverride()
+	}
 	if _, err := exec.LookPath("systemctl"); err == nil {
 		if st, statErr := os.Stat("/run/systemd/system"); statErr == nil && st.IsDir() {
 			return "systemd"
@@ -2103,6 +2468,35 @@ func diagnosticCommand(name string, args ...string) map[string]any {
 		item["ok"] = true
 	}
 	return item
+}
+
+// readDiagnosticDecrypted reads a state file for diagnostics, decrypting it
+// in stealth mode so the operator still gets useful content. The output is
+// scrubbed like every other diagnostic.
+func readDiagnosticDecrypted(r *Runner, path string) map[string]any {
+	item := map[string]any{"path": path}
+	data, err := r.stateReadPath(path)
+	if err != nil {
+		item["ok"] = false
+		item["error"] = err.Error()
+		return item
+	}
+	if len(data) > commandOutputLimit {
+		data = data[:commandOutputLimit]
+		item["truncated"] = true
+	}
+	item["ok"] = true
+	item["content"] = scrubDiagnosticOutput(string(data))
+	return item
+}
+
+// readDiagnosticConfigFile reads the agent config for diagnostics, decrypting
+// it when the runner holds a stealth key.
+func (r *Runner) readDiagnosticConfigFile(path string) map[string]any {
+	if r.stealthOn() {
+		return readDiagnosticDecrypted(r, path)
+	}
+	return readDiagnosticFile(path)
 }
 
 func readDiagnosticFile(path string) map[string]any {
@@ -2431,11 +2825,10 @@ func (r *Runner) applyCoreConfigUnlocked(version int64, config string, forceRest
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		return result, err
 	}
-	current := filepath.Join(stateDir, "sing-box.json")
-	backup := filepath.Join(stateDir, "sing-box.last-good.json")
+	current := r.statePath(singBoxConfigFile)
+	backup := r.statePath(singBoxLastGoodFile)
 	var previousConfig []byte
-	// #nosec G304 -- current is a fixed file below the Agent's configured state directory.
-	if b, err := os.ReadFile(current); err == nil {
+	if b, err := r.stateReadPath(current); err == nil {
 		previousConfig = b
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return result, err
@@ -2474,26 +2867,27 @@ func (r *Runner) applyCoreConfigUnlocked(version int64, config string, forceRest
 		return finishOperationalApply("core config already active", "unchanged", false)
 	}
 	if len(previousConfig) > 0 {
-		if err := atomicWriteFile(backup, previousConfig, 0o600); err != nil {
+		if err := r.stateWritePath(backup, previousConfig, 0o600); err != nil {
 			return result, err
 		}
 	}
-	candidate := filepath.Join(stateDir, fmt.Sprintf("sing-box.%d.json", version))
-	if err := atomicWriteFile(candidate, []byte(config), 0o600); err != nil {
+	candidateLogical := fmt.Sprintf("sing-box.%d.json", version)
+	candidate := r.statePath(candidateLogical)
+	if err := r.stateWritePath(candidate, []byte(config), 0o600); err != nil {
 		return result, err
 	}
 	defer os.Remove(candidate)
-	if err := validateSingBox(r.coreBinary(), candidate, r.commandTimeout()); err != nil {
+	if err := r.validateSingBox(r.coreBinary(), candidate, r.commandTimeout()); err != nil {
 		result["reload_strategy"] = "validation_failed"
 		return result, err
 	}
 	result["validated"] = true
-	if err := atomicWriteFile(current, []byte(config), 0o600); err != nil {
+	if err := r.stateWritePath(current, []byte(config), 0o600); err != nil {
 		return result, err
 	}
 	metadataOnly, metadataErr := coreRuntimeMetadataOnlyChange(previousConfig, []byte(config))
 	if metadataErr != nil {
-		if restoreErr := restoreCoreConfigFile(current, previousConfig); restoreErr != nil {
+		if restoreErr := r.restoreCoreConfigFile(current, previousConfig); restoreErr != nil {
 			result["rollback_error"] = restoreErr.Error()
 		}
 		result["reload_strategy"] = "metadata_compare_failed"
@@ -2510,14 +2904,14 @@ func (r *Runner) applyCoreConfigUnlocked(version int64, config string, forceRest
 		}
 		policies, err := embeddedCoreTrafficPolicies([]byte(config))
 		if err != nil {
-			if restoreErr := restoreCoreConfigFile(current, previousConfig); restoreErr != nil {
+			if restoreErr := r.restoreCoreConfigFile(current, previousConfig); restoreErr != nil {
 				result["rollback_error"] = restoreErr.Error()
 			}
 			result["reload_strategy"] = "runtime_policy_parse_failed"
 			return result, err
 		}
 		if err := r.pushTrafficPolicies(context.Background(), policies, r.trafficAcknowledgements()); err != nil {
-			if restoreErr := restoreCoreConfigFile(current, previousConfig); restoreErr != nil {
+			if restoreErr := r.restoreCoreConfigFile(current, previousConfig); restoreErr != nil {
 				result["rollback_error"] = restoreErr.Error()
 			}
 			result["reload_strategy"] = "runtime_policy_sync_failed"
@@ -2654,9 +3048,9 @@ func (r *Runner) applyCoreConfigUnlocked(version int64, config string, forceRest
 	return finishOperationalApply("config applied with restart fallback", "restart_fallback", false)
 }
 
-func restoreCoreConfigFile(path string, previous []byte) error {
+func (r *Runner) restoreCoreConfigFile(path string, previous []byte) error {
 	if len(previous) > 0 {
-		return atomicWriteFile(path, previous, 0o600)
+		return r.stateWritePath(path, previous, 0o600)
 	}
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
@@ -2716,6 +3110,11 @@ func (r *Runner) managedRestartEnabled() bool {
 // keep the reload path. This must stay false for oboard-sb until the kernel
 // advertises a real runtime-reload capability.
 func (r *Runner) coreHotReloadSupported() bool {
+	// In stealth mode the core is always the OBoard kernel under a generated
+	// name, so the reload path must stay closed exactly as for oboard-sb.
+	if r.stealthOn() {
+		return false
+	}
 	binary := strings.ToLower(filepath.Base(strings.TrimSpace(r.coreBinary())))
 	service := strings.ToLower(strings.TrimSpace(r.coreService()))
 	return binary != "oboard-sb" && service != "oboard-sb"
@@ -2858,6 +3257,9 @@ func (r *Runner) realmBinary() string {
 	if err != nil {
 		return ""
 	}
+	if r.stealthOn() && r.Config().Stealth != nil {
+		return filepath.Join(filepath.Dir(executable), r.Config().Stealth.Identity.RealmName)
+	}
 	return InstalledRealmBinary(executable)
 }
 
@@ -2929,12 +3331,44 @@ func (r *Runner) reloadCore() error {
 	}
 }
 
-func validateSingBox(binary, path string, timeout time.Duration) error {
-	if err := validateSnellCoreFile(path); err != nil {
+// singBoxConfigFile and singBoxLastGoodFile are the logical state names for
+// the kernel configuration. In stealth mode they map to derived physical
+// names; the constants exist so every reader agrees on the logical name.
+const (
+	singBoxConfigFile   = "sing-box.json"
+	singBoxLastGoodFile = "sing-box.last-good.json"
+)
+
+// stealthKeyPath returns the on-disk key file path when running in stealth
+// mode, for subprocesses (-check, -operational-digest) that must decrypt the
+// configuration themselves.
+func (r *Runner) stealthKeyPath() string {
+	if !r.stealthOn() {
+		return ""
+	}
+	return r.Config().Stealth.KeyPath
+}
+
+func (r *Runner) validateSingBox(binary, path string, timeout time.Duration) error {
+	raw, err := r.stateReadPath(path)
+	if err != nil {
+		return err
+	}
+	if err := validateSnellCoreConfig(raw); err != nil {
 		return err
 	}
 	if _, err := exec.LookPath(binary); err != nil {
 		return nil
+	}
+	// In stealth mode the core is always the OBoard kernel (third-party cores
+	// cannot read an encrypted configuration), so the oboard-sb flag style is
+	// correct regardless of the renamed binary.
+	if r.stealthOn() {
+		args := []string{"-check", "-config", path}
+		if keyPath := r.stealthKeyPath(); keyPath != "" {
+			args = append(args, "-key", keyPath)
+		}
+		return runCommand(timeout, binary, args...)
 	}
 	if filepath.Base(binary) == "oboard-sb" {
 		return runCommand(timeout, binary, "-check", "-config", path)
@@ -2951,8 +3385,13 @@ func (r *Runner) postControllerJSON(ctx context.Context, path string, body any, 
 }
 
 // controllerJSON performs one authenticated Controller callback. A nil body
-// sends no request body (GET); extra headers are added verbatim.
+// sends no request body (GET); extra headers are added verbatim. In stealth
+// mode the callback travels as an RPC frame over the binary transport
+// instead of HTTP: the agent never touches the panel's HTTP surface.
 func (r *Runner) controllerJSON(ctx context.Context, method, path string, headers http.Header, body any, out any, auth bool) error {
+	if r.stealthTransportActive() {
+		return r.controllerJSONOverTransport(ctx, method, path, body, out, auth)
+	}
 	var reader io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -3025,6 +3464,7 @@ func (r *Runner) taskResultHealth() *model.HealthReport {
 	}
 	health.AppliedAuthorization = r.appliedAuthorization()
 	health.AppliedUsers = r.appliedUsers()
+	health.AppliedLatencyProbe = r.appliedLatencyProbe()
 	return &health
 }
 
@@ -3156,7 +3596,7 @@ func (r *Runner) Probe(force bool) model.HealthReport {
 		r.mu.Unlock()
 	}
 
-	health := buildHealthReport(r.coreBinary(), r.commandTimeout(), r.hostInfo, probe, publicIPv4, publicIPv6, coreVersion, kernelCapabilities)
+	health := buildHealthReport(r.coreBinary(), r.commandTimeout(), r.hostInfo, probe, publicIPv4, publicIPv6, coreVersion, r.agentCapabilities(kernelCapabilities))
 	health.AgentID = r.Config().AgentID
 	health.RegionCode = regionCode
 	health.NetworkUploadBPS = probe.NetworkUploadBPS
@@ -3167,6 +3607,7 @@ func (r *Runner) Probe(force bool) model.HealthReport {
 	health.RemoteAccess = r.remoteAccessReport()
 	health.AppliedAuthorization = r.appliedAuthorization()
 	health.AppliedUsers = r.appliedUsers()
+	health.AppliedLatencyProbe = r.appliedLatencyProbe()
 	diskInfo := r.storageDiskInfo()
 	health.DiskAvailableBytes = diskInfo.AvailableBytes
 	health.DiskPressure = diskInfo.Pressure
@@ -3247,11 +3688,30 @@ func buildHealthReport(binary string, timeout time.Duration, host hostStaticInfo
 		AgentVersion:       version.Version,
 		AgentBuild:         version.Build,
 		SingBoxVersion:     coreVersion,
-		KernelCapabilities: append(append([]string(nil), kernelCapabilities...), model.AgentCapabilityTrafficPolicy, model.AgentCapabilityAuthorizationControl, model.AgentCapabilityRuntimeUsers, "runtime_users_snell_psk_control_v1", model.AgentCapabilityHostPower),
+		KernelCapabilities: kernelCapabilities,
 		TCPFastOpenState:   tfoState,
 		TCPFastOpenValue:   tfoValue,
 		Timestamp:          time.Now().UTC(),
 	}
+}
+
+// agentCapabilities merges the kernel capabilities with the agent's own.
+// stealth_v1 is advertised by every agent that understands the apply_stealth
+// task; stealth_active_v1 only while actually running in the hidden layout,
+// so the Controller can show desired versus actual state.
+func (r *Runner) agentCapabilities(kernelCapabilities []string) []string {
+	capabilities := append(append([]string(nil), kernelCapabilities...),
+		model.AgentCapabilityTrafficPolicy,
+		model.AgentCapabilityAuthorizationControl,
+		model.AgentCapabilityRuntimeUsers,
+		"runtime_users_snell_psk_control_v1",
+		model.AgentCapabilityHostPower,
+		model.AgentCapabilityStealth)
+	if r.stealthOn() {
+		capabilities = append(capabilities, model.AgentCapabilityStealthActive)
+	}
+	sort.Strings(capabilities)
+	return capabilities
 }
 
 // detectInterfaceIPv6 returns one global unicast IPv6 address assigned to any

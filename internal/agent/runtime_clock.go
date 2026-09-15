@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/OboardProject/oboard-agent/internal/stealth"
 )
 
 const runtimeClockStateFile = "runtime-clock.json"
@@ -26,12 +28,20 @@ type runtimeClock struct {
 	source    string
 	checkedAt time.Time
 	stateDir  string
+	key       []byte
 }
 
-func newRuntimeClock(stateDir string) *runtimeClock {
-	clock := &runtimeClock{stateDir: stateDir}
+func newRuntimeClock(stateDir string, key []byte) *runtimeClock {
+	clock := &runtimeClock{stateDir: stateDir, key: key}
 	clock.restore()
 	return clock
+}
+
+func (c *runtimeClock) statePath() string {
+	if len(c.key) == stealth.KeyLen {
+		return filepath.Join(c.stateDir, stealth.PhysicalName(c.key, runtimeClockStateFile))
+	}
+	return filepath.Join(c.stateDir, runtimeClockStateFile)
 }
 
 func (c *runtimeClock) Now() time.Time {
@@ -91,16 +101,27 @@ func (c *runtimeClock) persist() error {
 	if err != nil {
 		return err
 	}
-	return atomicWriteFile(filepath.Join(c.stateDir, runtimeClockStateFile), data, 0o600)
+	if len(c.key) == stealth.KeyLen {
+		if data, err = stealth.Encrypt(c.key, data); err != nil {
+			return err
+		}
+	}
+	return atomicWriteFile(c.statePath(), data, 0o600)
 }
 
 func (c *runtimeClock) restore() {
 	if c == nil {
 		return
 	}
-	data, err := os.ReadFile(filepath.Join(c.stateDir, runtimeClockStateFile))
+	// #nosec G304 -- statePath is derived from the agent state directory.
+	data, err := os.ReadFile(c.statePath())
 	if err != nil {
 		return
+	}
+	if len(c.key) == stealth.KeyLen && stealth.IsEncrypted(data) {
+		if data, err = stealth.Decrypt(c.key, data); err != nil {
+			return
+		}
 	}
 	var state runtimeClockState
 	if json.Unmarshal(data, &state) != nil || !state.Enabled || state.ReferenceTime.IsZero() || state.LocalTime.IsZero() {

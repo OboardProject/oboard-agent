@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
-	"path/filepath"
 	"sort"
 	"time"
 
@@ -28,7 +27,7 @@ type metricReportLocalState struct {
 }
 
 func (r *Runner) metricReportStatePath() string {
-	return filepath.Join(r.stateDir(), metricReportStateFile)
+	return r.statePath(metricReportStateFile)
 }
 
 func (r *Runner) loadMetricReportStateLocked() {
@@ -36,7 +35,7 @@ func (r *Runner) loadMetricReportStateLocked() {
 		return
 	}
 	r.metricReportStateLoaded = true
-	data, err := os.ReadFile(r.metricReportStatePath())
+	data, err := r.stateReadPath(r.metricReportStatePath())
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
 			logging.Errorf("read metric report queue: %v", err)
@@ -64,7 +63,7 @@ func (r *Runner) persistMetricReportStateLocked() error {
 	if err != nil {
 		return err
 	}
-	return atomicWriteFile(r.metricReportStatePath(), data, 0o600)
+	return r.stateWritePath(r.metricReportStatePath(), data, 0o600)
 }
 
 func (r *Runner) pruneMetricReportStateLocked(now time.Time) int {

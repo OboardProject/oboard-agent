@@ -19,7 +19,7 @@ const authorizationReaperMaxWait = 5 * time.Second
 
 // InitializeAuthorization runs before listeners start. Its state is independent
 // of configuration files, so a rollback cannot restore a superseded grant.
-func (t *RateLimitTracker) InitializeAuthorization(path string, lease *authorization.Lease) error {
+func (t *RateLimitTracker) InitializeAuthorization(path string, key []byte, lease *authorization.Lease) error {
 	if lease == nil {
 		for _, state := range t.states {
 			if state.loadedPolicy().AuthorizationKey != "" {
@@ -27,7 +27,7 @@ func (t *RateLimitTracker) InitializeAuthorization(path string, lease *authoriza
 			}
 		}
 	}
-	store := authorization.NewStore(path)
+	store := authorization.NewStore(path, key)
 	if t.now != nil {
 		store.SetClock(t.timeNow)
 	}
@@ -74,7 +74,7 @@ func (t *RateLimitTracker) UpdateAuthorization(lease *authorization.Lease) error
 // Agent update, then reaps revoked sessions.
 func (t *RateLimitTracker) ApplyAuthorization(update AuthorizationUpdate) error {
 	if t.authorization == nil {
-		t.installAuthorizationStore(authorization.NewStore(""))
+		t.installAuthorizationStore(authorization.NewStore("", nil))
 	}
 	if len(update.Deny) > 0 {
 		revision := int64(0)
@@ -98,7 +98,7 @@ func (t *RateLimitTracker) ApplyAuthorization(update AuthorizationUpdate) error 
 // watermark and closes their sessions without waiting for a full snapshot.
 func (t *RateLimitTracker) DenyAuthorization(keys []string, revision int64) (int, error) {
 	if t.authorization == nil {
-		t.installAuthorizationStore(authorization.NewStore(""))
+		t.installAuthorizationStore(authorization.NewStore("", nil))
 	}
 	if err := t.authorization.Deny(keys, revision); err != nil {
 		return 0, err
@@ -152,7 +152,7 @@ func (t *RateLimitTracker) ReapAuthorization() int {
 // fixed 100 ms full scan.
 func (t *RateLimitTracker) RunAuthorizationReaper(ctx context.Context) {
 	if t.authorization == nil {
-		t.installAuthorizationStore(authorization.NewStore(""))
+		t.installAuthorizationStore(authorization.NewStore("", nil))
 	}
 	wake := t.authorizationWake
 	timer := time.NewTimer(t.nextAuthorizationWait())

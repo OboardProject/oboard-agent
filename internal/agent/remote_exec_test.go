@@ -95,7 +95,7 @@ func TestRemoteExecArgvDoesNotExpandShell(t *testing.T) {
 
 func TestRemoteExecJournalAtMostOnce(t *testing.T) {
 	dir := t.TempDir()
-	journal := newRemoteExecJournal(filepath.Join(dir, "remote-exec"))
+	journal := newRemoteExecJournal(filepath.Join(dir, "remote-exec"), nil)
 	if rec, err := journal.Begin("req-1", "abc"); err != nil || rec != nil {
 		t.Fatalf("first begin: rec=%v err=%v", rec, err)
 	}
@@ -117,14 +117,14 @@ func TestRemoteExecJournalAtMostOnce(t *testing.T) {
 func TestRemoteExecJournalSurvivesRestart(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "remote-exec")
-	first := newRemoteExecJournal(path)
+	first := newRemoteExecJournal(path, nil)
 	if _, err := first.Begin("req-persist", "hash"); err != nil {
 		t.Fatal(err)
 	}
 	if err := first.Complete("req-persist", "hash", []byte(`{"exit_code":7}`)); err != nil {
 		t.Fatal(err)
 	}
-	second := newRemoteExecJournal(path)
+	second := newRemoteExecJournal(path, nil)
 	rec, err := second.Begin("req-persist", "hash")
 	if err != nil || rec == nil || string(rec.ResultJSON) != `{"exit_code":7}` {
 		t.Fatalf("persisted replay: rec=%v err=%v", rec, err)

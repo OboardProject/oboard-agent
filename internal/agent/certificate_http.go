@@ -28,7 +28,7 @@ func (r *Runner) issueCertificateHTTP(taskID int64, payload model.IssueCertifica
 	default:
 		return nil, fmt.Errorf("unsupported ACME CA %q", payload.ACMECA)
 	}
-	home := filepath.Join(r.stateDir(), "acme")
+	home := r.stateDirPath("acme")
 	if err := os.MkdirAll(home, 0o700); err != nil {
 		return nil, err
 	}

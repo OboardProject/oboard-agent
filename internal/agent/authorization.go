@@ -11,7 +11,6 @@ import (
 	"math/big"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -35,7 +34,7 @@ func (r *Runner) authorizationState() *authorization.Store {
 	r.authorizationMu.Lock()
 	defer r.authorizationMu.Unlock()
 	if r.authorizationStore == nil {
-		r.authorizationStore = authorization.NewStore(filepath.Join(r.stateDir(), "authorization.json"))
+		r.authorizationStore = authorization.NewStore(r.statePath("authorization.json"), r.Config().StealthKey)
 		if r.clock != nil {
 			r.authorizationStore.SetClock(r.clock.Now)
 		}
@@ -219,7 +218,7 @@ func (r *Runner) applyAuthorization(ctx context.Context, lease *model.Authorizat
 	}
 	revision, count = latest.Revision, len(latest.Grants)
 	stage = "read_kernel_config"
-	raw, err := os.ReadFile(filepath.Join(r.stateDir(), "sing-box.json"))
+	raw, err := r.stateRead(singBoxConfigFile)
 	if os.IsNotExist(err) {
 		outcome.Runtimes["kernel"] = "no_config"
 		outcome.RuntimeVerified = true

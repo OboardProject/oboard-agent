@@ -11,7 +11,7 @@ func TestLeasePersistsRevocationAcrossRenewalReplayAndRestart(t *testing.T) {
 	now := time.Now().UTC()
 	path := filepath.Join(t.TempDir(), "authorization.json")
 	grant := &Lease{Revision: 1, IssuedAt: now.Format(time.RFC3339Nano), Grants: map[string]string{"old": now.Add(MaxLifetime).Format(time.RFC3339Nano)}}
-	store := NewStore(path)
+	store := NewStore(path, nil)
 	if err := store.Update(grant); err != nil {
 		t.Fatal(err)
 	}
@@ -28,7 +28,7 @@ func TestLeasePersistsRevocationAcrossRenewalReplayAndRestart(t *testing.T) {
 	if err := store.Update(revoked); err != nil {
 		t.Fatal(err)
 	}
-	store = NewStore(path)
+	store = NewStore(path, nil)
 	for _, old := range []*Lease{grant, renewed, nil} {
 		if err := store.Update(old); err != nil {
 			t.Fatal(err)
@@ -67,7 +67,7 @@ func TestLeaseAbsoluteDeadlineAndCorruptStateFailClosed(t *testing.T) {
 	if err := os.WriteFile(path, []byte("invalid-json"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	store := NewStore(path)
+	store := NewStore(path, nil)
 	if store.Allows("key", now) {
 		t.Fatal("corrupt state authorized")
 	}
@@ -79,7 +79,7 @@ func TestLeaseAbsoluteDeadlineAndCorruptStateFailClosed(t *testing.T) {
 func TestLeaseSequenceOrdersRenewalsAndDenyWatermarkSurvivesRestart(t *testing.T) {
 	now := time.Now().UTC()
 	path := filepath.Join(t.TempDir(), "authorization.json")
-	store := NewStore(path)
+	store := NewStore(path, nil)
 	first := &Lease{Revision: 3, Sequence: 1, Digest: "d3", IssuedAt: now.Format(time.RFC3339Nano), ExpiresAt: now.Add(MaxLifetime).Format(time.RFC3339Nano), Grants: map[string]string{"a": now.Add(MaxLifetime).Format(time.RFC3339Nano), "b": now.Add(MaxLifetime).Format(time.RFC3339Nano)}}
 	if _, err := store.UpdateWithResult(first); err != nil {
 		t.Fatal(err)
@@ -111,7 +111,7 @@ func TestLeaseSequenceOrdersRenewalsAndDenyWatermarkSurvivesRestart(t *testing.T
 		t.Fatalf("status: %+v", store.Status())
 	}
 	// Restart: the watermark is persisted next to the lease.
-	restarted := NewStore(path)
+	restarted := NewStore(path, nil)
 	if !restarted.Denied("b") || restarted.Allows("b", now.Add(2*time.Second)) {
 		t.Fatal("deny watermark lost across restart")
 	}
@@ -136,7 +136,7 @@ func TestLeaseSequenceOrdersRenewalsAndDenyWatermarkSurvivesRestart(t *testing.T
 
 func TestAuthorizationPersistenceFailureDeniesExistingGrants(t *testing.T) {
 	now := time.Now().UTC()
-	store := NewStore("")
+	store := NewStore("", nil)
 	if err := store.Update(&Lease{Revision: 1, IssuedAt: now.Format(time.RFC3339Nano), Grants: map[string]string{"key": now.Add(time.Minute).Format(time.RFC3339Nano)}}); err != nil {
 		t.Fatal(err)
 	}

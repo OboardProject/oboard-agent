@@ -153,7 +153,7 @@ func (r *Runner) coreConnectionPresenceEvents(ctx context.Context) ([]connection
 	}
 	client := r.coreClient
 	if client == nil {
-		client = unixHTTPClient(coreAPISocket)
+		client = unixHTTPClient(r.coreAPISocketPath())
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://oboard-sb/connections/presence/drain", nil)
 	if err != nil {
@@ -192,7 +192,7 @@ func (r *Runner) validateConnectionPresenceCapability(ctx context.Context) error
 	}
 	client := r.coreClient
 	if client == nil {
-		client = unixHTTPClient(coreAPISocket)
+		client = unixHTTPClient(r.coreAPISocketPath())
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://oboard-sb/version", nil)
 	if err != nil {

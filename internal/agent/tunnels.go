@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -65,6 +66,93 @@ type tunnelApplyResult struct {
 	Tunnels      map[string]string `json:"tunnels,omitempty"`
 }
 
+// managedSSHIdentity bundles the names the managed tunnel SSH machinery uses
+// on this runner. In standard mode they are the fixed OBoard names; in stealth
+// mode they come from the generated identity so no process, user, or path
+// carries an OBoard marker.
+type managedSSHIdentity struct {
+	User        string
+	Home        string
+	ProcessName string
+	PidPrefix   string // /run prefix for the sshd PidFile directive
+	SSHName     string // symlink name for the ssh client
+}
+
+func (r *Runner) managedSSHIdentity() managedSSHIdentity {
+	if r.stealthOn() {
+		if id := r.Config().Stealth.Identity; id.SshdName != "" {
+			return managedSSHIdentity{
+				User:        id.SshName,
+				Home:        filepath.Join("/var/lib", id.SshName),
+				ProcessName: id.SshdName,
+				PidPrefix:   filepath.Join("/run", id.SshdName),
+				SSHName:     id.SshName,
+			}
+		}
+	}
+	return managedSSHIdentity{
+		User:        managedSSHUser,
+		Home:        managedSSHHome,
+		ProcessName: managedSSHProcessName,
+		PidPrefix:   filepath.Join("/run", managedSSHProcessName),
+		SSHName:     "ssh",
+	}
+}
+
+// tunnelRuntimeDir returns the tmpfs directory that holds plaintext runtime
+// artifacts (sshd config and host key, ssh client key, WireGuard configs) in
+// stealth mode. The second return is false in standard mode, where artifacts
+// keep living inside the private tunnels state directory as before.
+func (r *Runner) tunnelRuntimeDir() (string, bool) {
+	if !r.stealthOn() {
+		return "", false
+	}
+	id := r.Config().Stealth.Identity
+	return filepath.Join("/run", id.StagingPrefix+"-tun"), true
+}
+
+// ensureTunnelRuntimeDir creates (and tightens) the stealth runtime directory.
+func (r *Runner) ensureTunnelRuntimeDir() (string, error) {
+	dir, ok := r.tunnelRuntimeDir()
+	if !ok {
+		return "", nil
+	}
+	// #nosec G301 -- 0700 is intended: only root and the tunnel processes read these files.
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	return dir, nil
+}
+
+// writeTunnelArtifact writes a plaintext runtime artifact: into the tmpfs
+// runtime directory in stealth mode, or beside the other tunnel files in the
+// private state directory otherwise.
+func (r *Runner) writeTunnelArtifact(dir, name string, data []byte, perm os.FileMode) (string, error) {
+	if runtimeDir, ok := r.tunnelRuntimeDir(); ok {
+		if err := os.MkdirAll(runtimeDir, 0o700); err != nil {
+			return "", err
+		}
+		path := filepath.Join(runtimeDir, name)
+		if err := atomicWriteFile(path, data, perm); err != nil {
+			return "", err
+		}
+		return path, nil
+	}
+	path := filepath.Join(dir, name)
+	if err := atomicWriteFile(path, data, perm); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+// tunnelArtifactPath resolves a runtime artifact path for reading or removal.
+func (r *Runner) tunnelArtifactPath(dir, name string) string {
+	if runtimeDir, ok := r.tunnelRuntimeDir(); ok {
+		return filepath.Join(runtimeDir, name)
+	}
+	return filepath.Join(dir, name)
+}
+
 func (r *Runner) applyTunnels(plan model.TunnelPlan) (tunnelApplyResult, error) {
 	r.tunnelLifecycleMu.Lock()
 	defer r.tunnelLifecycleMu.Unlock()
@@ -85,11 +173,10 @@ func (r *Runner) applyTunnels(plan model.TunnelPlan) (tunnelApplyResult, error) 
 		return result, err
 	}
 	result.Capabilities = detectTunnelCapabilities()
-	current := filepath.Join(stateDir, tunnelsCurrent)
-	backup := filepath.Join(stateDir, tunnelsLastGood)
-	// #nosec G304 -- current is a fixed file below the Agent's configured state directory.
-	if b, err := os.ReadFile(current); err == nil {
-		if err := atomicWriteFile(backup, b, 0o600); err != nil {
+	current := r.statePath(tunnelsCurrent)
+	backup := r.statePath(tunnelsLastGood)
+	if b, err := r.stateReadPath(current); err == nil {
+		if err := r.stateWritePath(backup, b, 0o600); err != nil {
 			return result, err
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -107,7 +194,7 @@ func (r *Runner) applyTunnels(plan model.TunnelPlan) (tunnelApplyResult, error) 
 		}
 		return result, err
 	}
-	if err := atomicWriteFile(current, data, 0o600); err != nil {
+	if err := r.stateWritePath(current, data, 0o600); err != nil {
 		if rollbackErr := r.restoreLastGoodTunnels(backup); rollbackErr != nil {
 			result.Warnings = append(result.Warnings, fmt.Sprintf("restore last-good tunnels: %v", rollbackErr))
 		}
@@ -118,7 +205,7 @@ func (r *Runner) applyTunnels(plan model.TunnelPlan) (tunnelApplyResult, error) 
 }
 
 func (r *Runner) restoreManagedTunnelsOnStartup() error {
-	b, err := os.ReadFile(filepath.Join(r.stateDir(), tunnelsCurrent))
+	b, err := r.stateRead(tunnelsCurrent)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
@@ -134,8 +221,7 @@ func (r *Runner) restoreManagedTunnelsOnStartup() error {
 }
 
 func (r *Runner) restoreLastGoodTunnels(path string) error {
-	// #nosec G304 -- path is the fixed last-good file assembled below the Agent state directory.
-	b, err := os.ReadFile(path)
+	b, err := r.stateReadPath(path)
 	if errors.Is(err, os.ErrNotExist) {
 		result := tunnelApplyResult{Capabilities: detectTunnelCapabilities(), Tunnels: map[string]string{}}
 		return r.applyTunnelSet(nil, &result)
@@ -307,24 +393,24 @@ func sshServerBinary() string {
 // the private tunnels state directory and is refreshed to follow host sshd
 // relocation. sshd requires an absolute path for its re-exec, which this
 // always provides.
-func managedSSHExecPath(dir string) (string, error) {
+func managedSSHExecPath(dir, processName string) (string, error) {
 	sshd := sshServerBinary()
 	if sshd == "" {
 		return "", errors.New("sshd is unavailable")
 	}
 	if !filepath.IsAbs(sshd) {
 		if absolute, err := filepath.Abs(sshd); err != nil {
-			return "", fmt.Errorf("resolve %s path: %w", managedSSHProcessName, err)
+			return "", fmt.Errorf("resolve %s path: %w", processName, err)
 		} else {
 			sshd = absolute
 		}
 	}
-	if linkPath, err := managedSSHSymlinkTo(dir, managedSSHProcessName, sshd); err != nil {
-		return "", fmt.Errorf("create %s symlink: %w", managedSSHProcessName, err)
+	if linkPath, err := managedSSHSymlinkTo(dir, processName, sshd); err != nil {
+		return "", fmt.Errorf("create %s symlink: %w", processName, err)
 	} else if linkPath != "" {
 		return linkPath, nil
 	}
-	return "", fmt.Errorf("create %s symlink: %w", managedSSHProcessName, errSymlinkUnavailable)
+	return "", fmt.Errorf("create %s symlink: %w", processName, errSymlinkUnavailable)
 }
 
 var errSymlinkUnavailable = errors.New("symlink unavailable")
@@ -395,7 +481,7 @@ func (r *Runner) applyTunnelSet(tunnels []model.Tunnel, result *tunnelApplyResul
 	if err := validateTunnelSet(tunnels, result.Capabilities); err != nil {
 		return err
 	}
-	dir := filepath.Join(r.stateDir(), tunnelsDir)
+	dir := r.stateDirPath(tunnelsDir)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
@@ -493,10 +579,33 @@ func (r *Runner) stopManagedTunnels(dir string, result *tunnelApplyResult) error
 	if !result.Capabilities["wireguard"] {
 		return nil
 	}
-	if configs, err := filepath.Glob(filepath.Join(dir, "obw*.conf")); err == nil {
+	wgPattern := "obw*.conf"
+	if r.stealthOn() {
+		prefix := r.Config().Stealth.Identity.SshName
+		if len(prefix) > 6 {
+			prefix = prefix[:6]
+		}
+		wgPattern = prefix + "*.conf"
+	}
+	if configs, err := filepath.Glob(r.tunnelArtifactPath(dir, wgPattern)); err == nil {
 		for _, path := range configs {
 			if err := runCommand(r.commandTimeout(), "wg-quick", "down", path); err != nil {
 				result.Warnings = append(result.Warnings, fmt.Sprintf("down wireguard %s: %v", filepath.Base(path), err))
+			}
+		}
+	}
+	// In stealth mode the plaintext runtime artifacts live in a tmpfs
+	// directory; remove them so nothing outlives the apply.
+	if runtimeDir, ok := r.tunnelRuntimeDir(); ok {
+		if entries, err := os.ReadDir(runtimeDir); err == nil {
+			for _, entry := range entries {
+				if entry.IsDir() {
+					continue
+				}
+				name := entry.Name()
+				if strings.HasPrefix(name, "ssh-") || strings.HasPrefix(name, "sshd-") {
+					_ = os.Remove(filepath.Join(runtimeDir, name))
+				}
 			}
 		}
 	}
@@ -520,10 +629,9 @@ func (r *Runner) applyWireGuardTunnel(dir string, t model.Tunnel) error {
 	if cfg.PersistentKeepalive == 0 {
 		cfg.PersistentKeepalive = 25
 	}
-	name := fmt.Sprintf("obw%d", t.ID)
-	path := filepath.Join(dir, name+".conf")
+	name := r.wireGuardInterfaceName(t.ID)
 	var b strings.Builder
-	b.WriteString("# Generated by OBoard Agent. Do not edit manually.\n")
+	b.WriteString("# Generated. Do not edit manually.\n")
 	b.WriteString("[Interface]\n")
 	b.WriteString("PrivateKey = " + cfg.PrivateKey + "\n")
 	if t.LocalAddress != "" {
@@ -541,7 +649,8 @@ func (r *Runner) applyWireGuardTunnel(dir string, t model.Tunnel) error {
 		b.WriteString("AllowedIPs = " + strings.Join(cfg.AllowedIPs, ",") + "\n")
 	}
 	b.WriteString(fmt.Sprintf("PersistentKeepalive = %d\n", cfg.PersistentKeepalive))
-	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil {
+	path, err := r.writeTunnelArtifact(dir, name+".conf", []byte(b.String()), 0o600)
+	if err != nil {
 		return err
 	}
 	_ = runCommand(r.commandTimeout(), "wg-quick", "down", path)
@@ -549,6 +658,27 @@ func (r *Runner) applyWireGuardTunnel(dir string, t model.Tunnel) error {
 		return err
 	}
 	return waitForWireGuardHandshake(name, t.PeerAddress, 40*time.Second)
+}
+
+// wireGuardInterfaceName derives the WireGuard interface (and config) name
+// for a tunnel. Standard mode keeps the historical obw<id>; stealth mode uses
+// a prefix from the generated identity so `ip link` shows no OBoard marker.
+// Linux interface names are limited to 15 characters, so the prefix is short
+// and very large IDs fall back to a hash suffix.
+func (r *Runner) wireGuardInterfaceName(id int64) string {
+	if !r.stealthOn() {
+		return fmt.Sprintf("obw%d", id)
+	}
+	prefix := r.Config().Stealth.Identity.SshName
+	if len(prefix) > 6 {
+		prefix = prefix[:6]
+	}
+	name := fmt.Sprintf("%s%d", prefix, id)
+	if len(name) > 15 {
+		digest := sha256.Sum256([]byte(fmt.Sprintf("wg-%d", id)))
+		name = fmt.Sprintf("%s%x", prefix, digest[:4])
+	}
+	return name[:min(15, len(name))]
 }
 
 func waitForWireGuardHandshake(interfaceName, peerAddress string, timeout time.Duration) error {
@@ -626,11 +756,12 @@ func (r *Runner) reconcileSSHServerAccount(dir string, tunnels []model.Tunnel) e
 	if runtime.GOOS != "linux" || os.Geteuid() != 0 {
 		return errors.New("managed SSH server account requires root on Linux")
 	}
-	account, err := ensureManagedSSHAccount(marker)
+	identity := r.managedSSHIdentity()
+	account, err := r.ensureManagedSSHAccount(marker, identity)
 	if err != nil {
 		return err
 	}
-	sshDir := filepath.Join(managedSSHHome, ".ssh")
+	sshDir := filepath.Join(identity.Home, ".ssh")
 	if err := os.MkdirAll(sshDir, 0o700); err != nil {
 		return err
 	}
@@ -642,11 +773,11 @@ func (r *Runner) reconcileSSHServerAccount(dir string, tunnels []model.Tunnel) e
 	if err != nil {
 		return err
 	}
-	if err := os.Chown(managedSSHHome, uid, gid); err != nil {
+	if err := os.Chown(identity.Home, uid, gid); err != nil {
 		return err
 	}
 	// #nosec G302 -- this is a directory and 0700 is the intended private-directory mode.
-	if err := os.Chmod(managedSSHHome, 0o700); err != nil {
+	if err := os.Chmod(identity.Home, 0o700); err != nil {
 		return err
 	}
 	if err := os.Chown(sshDir, uid, gid); err != nil {
@@ -679,7 +810,7 @@ func (r *Runner) reconcileSSHServerAccount(dir string, tunnels []model.Tunnel) e
 		ports[parseSSHTunnelConfig(tunnel.ConfigJSON).ServerPort] = true
 	}
 	for port := range ports {
-		if err := startManagedSSHServer(dir, port); err != nil {
+		if err := r.startManagedSSHServer(dir, port); err != nil {
 			return err
 		}
 	}
@@ -786,17 +917,17 @@ func tcp6Available() bool {
 	return true
 }
 
-func ensureManagedSSHAccount(marker string) (*user.User, error) {
-	account, lookupErr := user.Lookup(managedSSHUser)
+func (r *Runner) ensureManagedSSHAccount(marker string, identity managedSSHIdentity) (*user.User, error) {
+	account, lookupErr := user.Lookup(identity.User)
 	markerExists := false
 	if _, err := os.Stat(marker); err == nil {
 		markerExists = true
 	}
 	if lookupErr == nil {
 		if !markerExists {
-			return nil, fmt.Errorf("refusing to modify existing unmanaged account %q", managedSSHUser)
+			return nil, fmt.Errorf("refusing to modify existing unmanaged account %q", identity.User)
 		}
-		if err := setManagedSSHPasswordHash(); err != nil {
+		if err := setManagedSSHPasswordHash(identity.User); err != nil {
 			return nil, err
 		}
 		return account, nil
@@ -804,7 +935,7 @@ func ensureManagedSSHAccount(marker string) (*user.User, error) {
 	if _, ok := lookupErr.(user.UnknownUserError); !ok {
 		return nil, lookupErr
 	}
-	if err := os.MkdirAll(managedSSHHome, 0o700); err != nil {
+	if err := os.MkdirAll(identity.Home, 0o700); err != nil {
 		return nil, err
 	}
 	nologin := "/usr/sbin/nologin"
@@ -815,20 +946,20 @@ func ensureManagedSSHAccount(marker string) (*user.User, error) {
 		}
 	}
 	if _, err := exec.LookPath("useradd"); err == nil {
-		if err := runCommand(20*time.Second, "useradd", "--system", "--user-group", "--home-dir", managedSSHHome, "--shell", nologin, managedSSHUser); err != nil {
+		if err := runCommand(20*time.Second, "useradd", "--system", "--user-group", "--home-dir", identity.Home, "--shell", nologin, identity.User); err != nil {
 			return nil, err
 		}
 	} else if _, err := exec.LookPath("adduser"); err == nil {
-		if err := runCommand(20*time.Second, "adduser", "-S", "-D", "-H", "-h", managedSSHHome, "-s", nologin, managedSSHUser); err != nil {
+		if err := runCommand(20*time.Second, "adduser", "-S", "-D", "-H", "-h", identity.Home, "-s", nologin, identity.User); err != nil {
 			return nil, err
 		}
 	} else {
 		return nil, errors.New("managed SSH account requires useradd or adduser")
 	}
-	if err := atomicWriteFile(marker, []byte(managedSSHUser+"\n"), 0o600); err != nil {
+	if err := atomicWriteFile(marker, []byte(identity.User+"\n"), 0o600); err != nil {
 		return nil, err
 	}
-	if err := setManagedSSHPasswordHash(); err != nil {
+	if err := setManagedSSHPasswordHash(identity.User); err != nil {
 		return nil, err
 	}
 	account, err := user.Lookup(managedSSHUser)
@@ -838,7 +969,7 @@ func ensureManagedSSHAccount(marker string) (*user.User, error) {
 	return account, nil
 }
 
-func setManagedSSHPasswordHash() error {
+func setManagedSSHPasswordHash(userName string) error {
 	// OpenSSH rejects accounts whose shadow hash begins with ! or *. A literal
 	// invalid hash keeps the account enabled for public-key forwarding while no
 	// password can ever verify against it.
@@ -847,7 +978,7 @@ func setManagedSSHPasswordHash() error {
 		defer cancel()
 		// #nosec G204 -- path is returned by exec.LookPath for the fixed chpasswd executable.
 		cmd := exec.CommandContext(ctx, path, "-e")
-		cmd.Stdin = strings.NewReader(managedSSHUser + ":x\n")
+		cmd.Stdin = strings.NewReader(userName + ":x\n")
 		var out limitBuffer
 		out.limit = commandOutputLimit
 		cmd.Stdout = &out
@@ -858,38 +989,62 @@ func setManagedSSHPasswordHash() error {
 		return nil
 	}
 	if _, err := exec.LookPath("usermod"); err == nil {
-		return runCommand(10*time.Second, "usermod", "-p", "x", managedSSHUser)
+		return runCommand(10*time.Second, "usermod", "-p", "x", userName)
 	}
 	return errors.New("managed SSH account requires chpasswd or usermod")
 }
 
-func startManagedSSHServer(dir string, port int) error {
+func (r *Runner) startManagedSSHServer(dir string, port int) error {
 	if port <= 0 {
 		return errors.New("managed SSH server port is invalid")
 	}
-	sshd, err := managedSSHExecPath(dir)
+	identity := r.managedSSHIdentity()
+	sshd, err := managedSSHExecPath(dir, identity.ProcessName)
 	if err != nil {
 		return err
 	}
+	// The host key is persistent server identity: it is stored encrypted at
+	// rest (standard mode keeps the plaintext PEM) and materialized for the
+	// sshd process. ssh-keygen writes the key itself, so generation goes
+	// through the runtime artifact path and is then persisted.
+	hostKeyArtifact := fmt.Sprintf("sshd-%d.hostkey", port)
 	hostKeyPath := filepath.Join(dir, "sshd-host-ed25519")
-	if _, err := os.Stat(hostKeyPath); errors.Is(err, os.ErrNotExist) {
+	hostKeyBytes, readErr := r.stateReadPath(hostKeyPath)
+	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+		return readErr
+	}
+	if len(hostKeyBytes) == 0 {
 		if _, keygenErr := exec.LookPath("ssh-keygen"); keygenErr != nil {
 			return errors.New("managed sshd requires ssh-keygen")
 		}
 		if err := runCommand(20*time.Second, "ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", hostKeyPath); err != nil {
 			return err
 		}
-	} else if err != nil {
-		return err
+		if hostKeyBytes, readErr = r.stateReadPath(hostKeyPath); readErr != nil {
+			return readErr
+		}
 	}
-	configPath := filepath.Join(dir, fmt.Sprintf("sshd-%d.conf", port))
+	if r.stealthOn() {
+		// Re-encrypt the generated key at rest and keep only a tmpfs copy for
+		// the daemon. The plaintext generated by ssh-keygen is overwritten by
+		// the encrypted envelope immediately.
+		if err := r.stateWritePath(hostKeyPath, hostKeyBytes, 0o600); err != nil {
+			return err
+		}
+		materialized, err := r.writeTunnelArtifact(dir, hostKeyArtifact, hostKeyBytes, 0o600)
+		if err != nil {
+			return err
+		}
+		hostKeyPath = materialized
+	}
 	pidPath := filepath.Join(dir, fmt.Sprintf("sshd-%d.pid", port))
 	logPath := filepath.Join(dir, fmt.Sprintf("sshd-%d.log", port))
-	config, err := managedSSHServerConfig(dir, port, hostKeyPath)
+	config, err := r.managedSSHServerConfig(dir, port, hostKeyPath)
 	if err != nil {
 		return err
 	}
-	if err := atomicWriteFile(configPath, []byte(config), 0o600); err != nil {
+	configPath, err := r.writeTunnelArtifact(dir, fmt.Sprintf("sshd-%d.conf", port), []byte(config), 0o600)
+	if err != nil {
 		return err
 	}
 	// #nosec G301 -- OpenSSH requires /run/sshd to be searchable by the daemon before privilege separation.
@@ -921,7 +1076,7 @@ func startManagedSSHServer(dir string, port int) error {
 		return fmt.Errorf("managed sshd exited before ready: %w%s", err, sshFailureLogSuffix(logPath))
 	case <-time.After(300 * time.Millisecond):
 	}
-	if err := writeManagedPIDFile(pidPath, cmd.Process.Pid, managedSSHProcessName); err != nil {
+	if err := writeManagedPIDFile(pidPath, cmd.Process.Pid, identity.ProcessName); err != nil {
 		_ = cmd.Process.Kill()
 		return err
 	}
@@ -949,22 +1104,23 @@ func startManagedSSHServer(dir string, port int) error {
 // oboard-sshd symlink) and needs no directive. An unknown directive would
 // fail `sshd -t`, so each is emitted only when the host sshd itself reports
 // it.
-func managedSSHServerConfig(dir string, port int, hostKeyPath string) (string, error) {
-	if _, err := managedSSHExecPath(dir); err != nil {
+func (r *Runner) managedSSHServerConfig(dir string, port int, hostKeyPath string) (string, error) {
+	identity := r.managedSSHIdentity()
+	if _, err := managedSSHExecPath(dir, identity.ProcessName); err != nil {
 		return "", err
 	}
 	configLines := []string{
 		"Port " + strconv.Itoa(port),
 		"AddressFamily any",
 		"HostKey " + hostKeyPath,
-		"PidFile /run/oboard-sshd-" + strconv.Itoa(port) + ".pid",
-		"AuthorizedKeysFile " + filepath.Join(managedSSHHome, ".ssh", "authorized_keys"),
+		"PidFile " + identity.PidPrefix + "-" + strconv.Itoa(port) + ".pid",
+		"AuthorizedKeysFile " + filepath.Join(identity.Home, ".ssh", "authorized_keys"),
 		"AuthenticationMethods publickey",
 		"PubkeyAuthentication yes",
 		"PasswordAuthentication no",
 		"KbdInteractiveAuthentication no",
 		"PermitRootLogin no",
-		"AllowUsers " + managedSSHUser,
+		"AllowUsers " + identity.User,
 		"AllowTcpForwarding local",
 		"AllowAgentForwarding no",
 		"GatewayPorts no",
@@ -976,10 +1132,10 @@ func managedSSHServerConfig(dir string, port int, hostKeyPath string) (string, e
 		"StrictModes yes",
 		"LogLevel ERROR",
 	}
-	if sessionPath := managedSSHSessionBinary(dir, "sshdsessionpath", managedSSHProcessName+"-session"); sessionPath != "" {
+	if sessionPath := managedSSHSessionBinary(dir, "sshdsessionpath", identity.ProcessName+"-session"); sessionPath != "" {
 		configLines = append(configLines, "SshdSessionPath "+sessionPath)
 	}
-	if authPath := managedSSHSessionBinary(dir, "sshdauthpath", managedSSHProcessName+"-auth"); authPath != "" {
+	if authPath := managedSSHSessionBinary(dir, "sshdauthpath", identity.ProcessName+"-auth"); authPath != "" {
 		configLines = append(configLines, "SshdAuthPath "+authPath)
 	}
 	return strings.Join(append(configLines, ""), "\n"), nil
@@ -1008,8 +1164,9 @@ func (r *Runner) applySSHTunnel(dir string, t model.Tunnel) error {
 		if cfg.Role != "client" {
 			return fmt.Errorf("ssh tunnel %q cannot start non-client managed role %q", t.Name, cfg.Role)
 		}
-		keyPath = filepath.Join(dir, fmt.Sprintf("ssh-%d.key", t.ID))
-		if err := atomicWriteFile(keyPath, []byte(cfg.ClientPrivateKey), 0o600); err != nil {
+		var err error
+		keyPath, err = r.writeTunnelArtifact(dir, fmt.Sprintf("ssh-%d.key", t.ID), []byte(cfg.ClientPrivateKey), 0o600)
+		if err != nil {
 			return err
 		}
 	}
@@ -1030,8 +1187,8 @@ func (r *Runner) applySSHTunnel(dir string, t model.Tunnel) error {
 		"-i", keyPath,
 	}
 	if cfg.ManagedPair {
-		knownHostsPath := filepath.Join(dir, "ssh-known-hosts")
-		// #nosec G304 -- knownHostsPath is a fixed file below the private tunnel state directory.
+		knownHostsPath := r.tunnelArtifactPath(dir, "ssh-known-hosts")
+		// #nosec G304 -- knownHostsPath is a fixed runtime artifact path below the private tunnel state or runtime directory.
 		knownHostsFile, err := os.OpenFile(knownHostsPath, os.O_CREATE|os.O_WRONLY, 0o600)
 		if err != nil {
 			return err
@@ -1059,8 +1216,8 @@ func (r *Runner) applySSHTunnel(dir string, t model.Tunnel) error {
 	}
 	var lastErr error
 	for {
-		// #nosec G204 -- the executable is the fixed OpenSSH client and validated fields are separate argv entries.
-		cmd := exec.Command("ssh", args...)
+		// #nosec G204 -- the executable is the fixed OpenSSH client (through the managed symlink in stealth mode) and validated fields are separate argv entries.
+		cmd := exec.Command(r.sshClientBinary(dir), args...)
 		// #nosec G304 -- logPath is a fixed file below the private tunnel state directory.
 		logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 		if err != nil {
@@ -1104,6 +1261,23 @@ func (r *Runner) applySSHTunnel(dir string, t model.Tunnel) error {
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
+}
+
+// sshClientBinary returns the ssh client executable. In stealth mode a
+// same-named symlink in the tunnels directory renames the process so `ps`
+// shows the generated identity instead of a plain ssh client started by an
+// unknown service.
+func (r *Runner) sshClientBinary(dir string) string {
+	identity := r.managedSSHIdentity()
+	if !r.stealthOn() {
+		return "ssh"
+	}
+	if sshBinary, err := exec.LookPath("ssh"); err == nil {
+		if linkPath, err := managedSSHSymlinkTo(dir, identity.SSHName, sshBinary); err == nil && linkPath != "" {
+			return linkPath
+		}
+	}
+	return "ssh"
 }
 
 func sshTunnelProcessAlive(cmd *exec.Cmd) bool {

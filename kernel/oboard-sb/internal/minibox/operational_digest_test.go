@@ -50,7 +50,7 @@ func TestOperationalConfigDigestFileMatchesBytes(t *testing.T) {
 	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	fromFile, err := OperationalConfigDigestFile(path)
+	fromFile, err := OperationalConfigDigestFile(path, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

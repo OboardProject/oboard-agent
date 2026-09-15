@@ -41,7 +41,7 @@ func TestHostPowerUsesStubAndRecordsIntent(t *testing.T) {
 		return nil
 	})
 	cfg := testAgentConfig(dir, 9)
-	if err := agentsecurity.NewStore(agentsecurity.PathForConfig(cfg.ConfigPath)).SetAllow("host-power", true); err != nil {
+	if err := agentsecurity.NewStore(agentsecurity.PathForConfig(cfg.ConfigPath), nil).SetAllow("host-power", true); err != nil {
 		t.Fatal(err)
 	}
 	runner := New(cfg)
