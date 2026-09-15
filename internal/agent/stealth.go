@@ -78,9 +78,10 @@ func (o stealthBootstrapOptions) withDefaults() stealthBootstrapOptions {
 
 // RunStealthBootstrap converts a freshly downloaded standard install (the
 // three oboard-named binaries in InstallDir) into a hidden layout: it
-// generates the identity and key, renames the binaries, writes the encrypted
-// config, and installs the service units. It does not start anything; the
-// caller enrolls and starts the agent service afterwards.
+// generates the identity and key, moves the binaries into a randomly named
+// installation directory beside InstallDir, writes the encrypted config,
+// and installs the service units. It does not start anything; the caller
+// enrolls and starts the agent service afterwards.
 func RunStealthBootstrap(opts stealthBootstrapOptions) (stealth.Layout, error) {
 	opts = opts.withDefaults()
 	if opts.Manager != "systemd" && opts.Manager != "openrc" {
@@ -95,19 +96,31 @@ func RunStealthBootstrap(opts stealthBootstrapOptions) (stealth.Layout, error) {
 			return stealth.Layout{}, fmt.Errorf("%s binary is missing from %s", name, installDir)
 		}
 	}
+	installParent := filepath.Dir(installDir)
+	if installParent == "/" || installDir == "/" {
+		return stealth.Layout{}, fmt.Errorf("install dir %s must be nested below a parent directory so the hidden layout can randomize it", installDir)
+	}
 	identity, err := stealth.GenerateIdentity(stealth.CollisionCheck{
-		InstallDir:   installDir,
-		ConfigParent: opts.ConfigParent,
-		StateParent:  opts.StateParent,
-		LogDir:       opts.LogDir,
-		RunDir:       opts.RunDir,
-		SystemdUnits: unitDirIf(opts.Manager == "systemd", opts.UnitDir),
-		InitDir:      unitDirIf(opts.Manager == "openrc", opts.UnitDir),
+		InstallDir:    installDir,
+		InstallParent: installParent,
+		ConfigParent:  opts.ConfigParent,
+		StateParent:   opts.StateParent,
+		LogDir:        opts.LogDir,
+		RunDir:        opts.RunDir,
+		SystemdUnits:  unitDirIf(opts.Manager == "systemd", opts.UnitDir),
+		InitDir:       unitDirIf(opts.Manager == "openrc", opts.UnitDir),
 	})
 	if err != nil {
 		return stealth.Layout{}, err
 	}
-	layout := stealth.ResolveLayout(identity, installDir, opts.ConfigParent, opts.StateParent)
+	hiddenInstallDir := filepath.Join(installParent, identity.InstallDirName)
+	if _, statErr := os.Lstat(hiddenInstallDir); statErr == nil {
+		return stealth.Layout{}, fmt.Errorf("refusing to reuse existing directory %s", hiddenInstallDir)
+	}
+	if err := os.Mkdir(hiddenInstallDir, 0o755); err != nil {
+		return stealth.Layout{}, err
+	}
+	layout := stealth.ResolveLayout(identity, hiddenInstallDir, opts.ConfigParent, opts.StateParent)
 	layout.AgentLog = filepath.Join(opts.LogDir, identity.AgentLogName+".log")
 	layout.CoreLog = filepath.Join(opts.LogDir, identity.CoreLogName+".log")
 	layout.CoreSocket = filepath.Join(opts.RunDir, identity.SocketName+".sock")
@@ -116,7 +129,8 @@ func RunStealthBootstrap(opts stealthBootstrapOptions) (stealth.Layout, error) {
 	if err != nil {
 		return stealth.Layout{}, err
 	}
-	// Rename the binaries in place. Nothing references the old names yet.
+	// Move the binaries into the hidden directory. Nothing references the
+	// old names yet.
 	for _, pair := range []struct{ from, to string }{
 		{filepath.Join(installDir, "oboard-agent"), layout.AgentBinary},
 		{filepath.Join(installDir, "oboard-sb"), layout.CoreBinary},
@@ -129,6 +143,18 @@ func RunStealthBootstrap(opts stealthBootstrapOptions) (stealth.Layout, error) {
 			return stealth.Layout{}, err
 		}
 	}
+	// The staging directory held only the three binaries (plus, on a
+	// reinstall over a removed standard layout, its helper symlink); drop
+	// both so the fixed OBoard path does not survive the install. Remove
+	// only succeeds while the directory is empty, so anything else an
+	// operator keeps there stays.
+	obagPath := filepath.Join(installDir, "obag")
+	if target, linkErr := os.Readlink(obagPath); linkErr == nil && filepath.Clean(target) == filepath.Join(installDir, "oboard-agent") {
+		_ = os.Remove(obagPath)
+	}
+	if removeErr := os.Remove(installDir); removeErr != nil {
+		logging.Infof("stealth bootstrap: staging directory %s kept: %v", installDir, removeErr)
+	}
 	if err := os.MkdirAll(layout.ConfigDir, 0o700); err != nil {
 		return stealth.Layout{}, err
 	}
@@ -139,17 +165,17 @@ func RunStealthBootstrap(opts stealthBootstrapOptions) (stealth.Layout, error) {
 		return stealth.Layout{}, err
 	}
 	cfg := Config{
-		ConfigPath:       layout.ConfigPath,
-		ControllerURL:    strings.TrimSpace(opts.ControllerURL),
-		StateDir:         layout.StateDir,
-		CoreBinary:       layout.CoreBinary,
-		CoreService:      layout.CoreService,
-		AgentService:     layout.AgentService,
-		CoreSocket:       layout.CoreSocket,
+		ConfigPath:    layout.ConfigPath,
+		ControllerURL: strings.TrimSpace(opts.ControllerURL),
+		StateDir:      layout.StateDir,
+		CoreBinary:    layout.CoreBinary,
+		CoreService:   layout.CoreService,
+		AgentService:  layout.AgentService,
+		CoreSocket:    layout.CoreSocket,
 		Stealth: &stealth.Settings{
-			Identity:           identity,
-			KeyPath:            layout.KeyPath,
-			ControllerAddr:     strings.TrimSpace(opts.ControllerAddr),
+			Identity:             identity,
+			KeyPath:              layout.KeyPath,
+			ControllerAddr:       strings.TrimSpace(opts.ControllerAddr),
 			ControllerCertSHA256: strings.TrimSpace(opts.ControllerCertSHA256),
 		},
 		UpdateSource:     strings.TrimSpace(opts.UpdateSource),
@@ -166,13 +192,13 @@ func RunStealthBootstrap(opts stealthBootstrapOptions) (stealth.Layout, error) {
 	if err := cfg.Validate(); err != nil {
 		return stealth.Layout{}, err
 	}
-	// Re-validate core_binary with the operator-chosen install directory
-	// allowed: the bootstrap just verified the binaries there, and the
-	// operator picked that root for the agent binary itself. At runtime the
-	// agent runs from the same directory, so its own validation accepts it.
+	// Re-validate core_binary with the hidden installation directory
+	// allowed: the bootstrap just created it beside the operator-chosen
+	// install root and placed the binaries there. At runtime the agent
+	// runs from the same directory, so its own validation accepts it.
 	if err := validateManagedPath("core_binary", cfg.CoreBinary, map[string][]string{
 		"basenames": {identity.CoreName},
-		"coreDirs":  {installDir},
+		"coreDirs":  {hiddenInstallDir},
 	}); err != nil {
 		return stealth.Layout{}, err
 	}
@@ -401,7 +427,6 @@ WantedBy=multi-user.target
 `, u.Layout.AgentService, u.Layout.AgentBinary, u.Layout.ConfigPath, u.KeyPath, u.Layout.AgentLog, u.Layout.AgentLog, filepath.Dir(u.Layout.AgentBinary), u.Layout.ConfigDir, u.Layout.StateDir)
 }
 
-
 // stateTopLevelFiles lists every top-level logical state file name the agent
 // and kernel create. The disable migration is list-driven because physical
 // names cannot be reversed without it. Entries with a derived suffix (the
@@ -521,21 +546,33 @@ func (r *Runner) enableStealthLocked(manager string) (map[string]any, error) {
 		return map[string]any{"message": "stealth switch failed"}, err
 	}
 	installDir := filepath.Dir(agentPath)
+	installParent := filepath.Dir(installDir)
+	if installParent == "/" || installDir == "/" {
+		return map[string]any{"message": "stealth switch failed"}, fmt.Errorf("install dir %s must be nested below a parent directory so the hidden layout can randomize it", installDir)
+	}
 	configParent := filepath.Dir(r.configPath())
 	stateParent := filepath.Dir(r.stateDir())
 	identity, err := stealth.GenerateIdentity(stealth.CollisionCheck{
-		InstallDir:   installDir,
-		ConfigParent: configParent,
-		StateParent:  stateParent,
-		LogDir:       "/var/log",
-		RunDir:       "/run",
-		SystemdUnits: unitDirIf(manager == "systemd", "/etc/systemd/system"),
-		InitDir:      unitDirIf(manager == "openrc", "/etc/init.d"),
+		InstallDir:    installDir,
+		InstallParent: installParent,
+		ConfigParent:  configParent,
+		StateParent:   stateParent,
+		LogDir:        "/var/log",
+		RunDir:        "/run",
+		SystemdUnits:  unitDirIf(manager == "systemd", "/etc/systemd/system"),
+		InitDir:       unitDirIf(manager == "openrc", "/etc/init.d"),
 	})
 	if err != nil {
 		return map[string]any{"message": "stealth switch failed"}, err
 	}
-	layout := stealth.ResolveLayout(identity, installDir, configParent, stateParent)
+	hiddenInstallDir := filepath.Join(installParent, identity.InstallDirName)
+	if _, statErr := os.Lstat(hiddenInstallDir); statErr == nil {
+		return map[string]any{"message": "stealth switch failed"}, fmt.Errorf("refusing to reuse existing directory %s", hiddenInstallDir)
+	}
+	if err := os.Mkdir(hiddenInstallDir, 0o755); err != nil {
+		return map[string]any{"message": "stealth switch failed"}, err
+	}
+	layout := stealth.ResolveLayout(identity, hiddenInstallDir, configParent, stateParent)
 	key, err := stealth.GenerateKey()
 	if err != nil {
 		return map[string]any{"message": "stealth switch failed"}, err
@@ -592,6 +629,7 @@ func (r *Runner) enableStealthLocked(manager string) (map[string]any, error) {
 		previousConfigDir = configParent
 	}
 	previousLayout := stealth.PreviousLayout{
+		InstallDir:   installDir,
 		AgentBinary:  agentPath,
 		CoreBinary:   r.coreBinary(),
 		RealmBinary:  r.realmBinary(),
@@ -642,11 +680,11 @@ func (r *Runner) enableStealthLocked(manager string) (map[string]any, error) {
 	r.armStealthSwitchFinalizer("oboard-agent", layout.AgentService, manager)
 	logging.Infof("stealth layout enabled agent_service=%s core_service=%s", layout.AgentService, layout.CoreService)
 	return map[string]any{
-		"message":        "安全进程布局已启用，Agent 将在回执后重启",
+		"message":         "安全进程布局已启用，Agent 将在回执后重启",
 		"stealth_enabled": true,
-		"agent_service":  layout.AgentService,
-		"core_service":   layout.CoreService,
-		"restart":        "after_result_acknowledged",
+		"agent_service":   layout.AgentService,
+		"core_service":    layout.CoreService,
+		"restart":         "after_result_acknowledged",
 	}, nil
 }
 
@@ -692,6 +730,11 @@ func (r *Runner) disableStealthLocked(manager string) (map[string]any, error) {
 		return map[string]any{"message": "stealth switch failed"}, err
 	}
 	_ = r.persistTrafficCheckpointBeforeRuntimeTransition(context.Background())
+	// The origin install directory may have been removed by the post-enable
+	// cleanup; recreate it before the binaries are restored into it.
+	if err := os.MkdirAll(filepath.Dir(originAgentBinary), 0o755); err != nil {
+		return map[string]any{"message": "stealth switch failed"}, err
+	}
 	for _, pair := range []struct{ from, to string }{
 		{agentPath, originAgentBinary},
 		{r.coreBinary(), originCoreBinary},
@@ -732,7 +775,12 @@ func (r *Runner) disableStealthLocked(manager string) (map[string]any, error) {
 	next.Stealth = &stealth.Settings{
 		Identity: cfg.Stealth.Identity,
 		KeyPath:  cfg.Stealth.KeyPath,
+		// Origin survives the disable so the restored standard layout keeps
+		// its operator-chosen install root trusted while this process still
+		// runs from the hidden directory.
+		Origin: cfg.Stealth.Origin,
 		Previous: &stealth.PreviousLayout{
+			InstallDir:   installDir,
 			AgentBinary:  agentPath,
 			CoreBinary:   r.coreBinary(),
 			RealmBinary:  r.realmBinary(),
@@ -757,7 +805,7 @@ func (r *Runner) disableStealthLocked(manager string) (map[string]any, error) {
 	if _, err := LoadConfig(configPath); err != nil {
 		return map[string]any{"message": "stealth switch failed"}, fmt.Errorf("verify restored config: %w", err)
 	}
-	if err := writeStandardUnits(manager, installDir, configPath, stateDir, originAgentBinary, originCoreBinary); err != nil {
+	if err := writeStandardUnits(manager, filepath.Dir(originAgentBinary), configPath, stateDir, originAgentBinary, originCoreBinary); err != nil {
 		return map[string]any{"message": "stealth switch failed"}, err
 	}
 	if err := enableStandardUnits(manager); err != nil {
@@ -774,11 +822,11 @@ func (r *Runner) disableStealthLocked(manager string) (map[string]any, error) {
 	r.armStealthSwitchFinalizer(cfg.AgentService, "oboard-agent", manager)
 	logging.Infof("stealth layout disabled; standard layout restored")
 	return map[string]any{
-		"message":        "安全进程布局已停用，Agent 将在回执后重启",
+		"message":         "安全进程布局已停用，Agent 将在回执后重启",
 		"stealth_enabled": false,
-		"agent_service":  "oboard-agent",
-		"core_service":   "oboard-sb",
-		"restart":        "after_result_acknowledged",
+		"agent_service":   "oboard-agent",
+		"core_service":    "oboard-sb",
+		"restart":         "after_result_acknowledged",
 	}, nil
 }
 
@@ -1212,11 +1260,11 @@ func (r *Runner) reconcileStealthSwitchCleanup() {
 	}
 	// Remove previous binaries, directories, logs, socket, and key file.
 	current := map[string]bool{
-		selfPath:               true,
-		r.coreBinary():         true,
-		r.realmBinary():        true,
-		r.configPath():         true,
-		r.stateDir():           true,
+		selfPath:        true,
+		r.coreBinary():  true,
+		r.realmBinary(): true,
+		r.configPath():  true,
+		r.stateDir():    true,
 		agentsecurity.PathForConfig(r.configPath()): true,
 	}
 	if cfg.Stealth != nil {
@@ -1233,6 +1281,18 @@ func (r *Runner) reconcileStealthSwitchCleanup() {
 	removeIfNotIn(previous.CoreSocket, current)
 	if previous.ConfigDir != "" && previous.ConfigDir != filepath.Dir(r.configPath()) {
 		removeIfNotIn(previous.ConfigDir, current)
+	}
+	// Remove the previous installation directory once its known contents
+	// are gone. os.Remove only succeeds on an empty directory, so anything
+	// else an operator keeps there survives; the standard layout's obag
+	// helper symlink is a known leftover of the switched-away layout.
+	if previous.InstallDir != "" && previous.InstallDir != "/" && previous.InstallDir != filepath.Dir(selfPath) {
+		if target, linkErr := os.Readlink(filepath.Join(previous.InstallDir, "obag")); linkErr == nil && filepath.Clean(target) == previous.AgentBinary {
+			_ = os.Remove(filepath.Join(previous.InstallDir, "obag"))
+		}
+		if err := os.Remove(previous.InstallDir); err == nil {
+			logging.Infof("stealth cleanup removed the previous install directory %s", previous.InstallDir)
+		}
 	}
 	// Drop the previous record so cleanup runs exactly once; Origin survives
 	// so a later disable still restores the original layout.

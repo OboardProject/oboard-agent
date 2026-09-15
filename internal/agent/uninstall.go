@@ -181,6 +181,12 @@ func uninstallFinalizerCommand(paths uninstallPaths) string {
 	if paths.Stealth && paths.RuntimeDir != "" {
 		parts = append(parts, "rm -rf "+shellQuoteValue(paths.RuntimeDir))
 	}
+	if paths.Stealth {
+		// The hidden install directory carries a random name; once its
+		// binaries are gone an empty directory is pure leftover. rmdir
+		// never removes a directory that still holds anything.
+		parts = append(parts, "rmdir "+shellQuoteValue(paths.InstallDir)+" 2>/dev/null || true")
+	}
 	if manager == "systemd" {
 		parts = append(parts, "systemctl daemon-reload 2>/dev/null || true")
 	}

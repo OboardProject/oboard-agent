@@ -24,11 +24,11 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"github.com/OboardProject/oboard-agent/internal/agentlink"
 	"github.com/OboardProject/oboard-agent/internal/authorization"
 	"github.com/OboardProject/oboard-agent/internal/core"
 	"github.com/OboardProject/oboard-agent/internal/logging"
 	"github.com/OboardProject/oboard-agent/internal/model"
-	"github.com/OboardProject/oboard-agent/internal/agentlink"
 	"github.com/OboardProject/oboard-agent/internal/security"
 	"github.com/OboardProject/oboard-agent/internal/stealth"
 	"github.com/OboardProject/oboard-agent/internal/version"
@@ -787,12 +787,31 @@ func validateServiceName(value string) error {
 // name allowed when this configuration describes a hidden layout. A stealth
 // core may also live beside the running agent executable: the operator chose
 // that directory for the agent binary itself, so it carries the same trust,
-// and custom install roots must keep working after a switch.
+// and custom install roots must keep working after a switch. While a hidden
+// layout is being created, this process still runs from the staging
+// directory but the binaries are already moving into
+// <install parent>/<identity.InstallDirName>; that directory carries the
+// same trust for the same reason.
 func (cfg Config) validateCoreBinaryPath() error {
 	if cfg.Stealth != nil {
 		if err := validateManagedPath("core_binary", cfg.CoreBinary, map[string][]string{"basenames": {cfg.Stealth.Identity.CoreName}}); err != nil {
-			if executable, exeErr := selfExecutablePath(); exeErr == nil && filepath.Dir(executable) == filepath.Dir(filepath.Clean(strings.TrimSpace(cfg.CoreBinary))) {
-				return nil
+			if executable, exeErr := selfExecutablePath(); exeErr == nil {
+				coreDir := filepath.Dir(filepath.Clean(strings.TrimSpace(cfg.CoreBinary)))
+				if filepath.Dir(executable) == coreDir {
+					return nil
+				}
+				if name := cfg.Stealth.Identity.InstallDirName; name != "" {
+					if hidden := filepath.Join(filepath.Dir(filepath.Dir(executable)), name); hidden == coreDir {
+						return nil
+					}
+				}
+				// While a hidden layout is being disabled, this process still runs
+				// from the hidden directory but the configuration already points
+				// at the restored standard layout; its directory was chosen by the
+				// operator for the agent binary before the switch.
+				if origin := cfg.Stealth.Origin; origin != nil && origin.AgentBinary != "" && filepath.Dir(origin.AgentBinary) == coreDir {
+					return nil
+				}
 			}
 			return err
 		}

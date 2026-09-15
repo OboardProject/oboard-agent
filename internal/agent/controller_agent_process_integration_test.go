@@ -72,6 +72,8 @@ func TestControllerAndAgentProcessesConvergeOfflineSavedConfiguration(t *testing
 	if token == "" {
 		t.Fatal("Controller login did not return a token")
 	}
+	// Enrollment command generation requires the public controller address.
+	processJSONRequest(t, baseURL, http.MethodPost, "/api/v1/ui/settings", token, map[string]any{"controller_url": baseURL}, http.StatusOK)
 	created := processJSONRequest(t, baseURL, http.MethodPost, "/api/v1/ui/servers", token, map[string]any{
 		"name": "process-node", "listen_ip": "0.0.0.0", "entry_ip_mode": "custom", "entry_address": "198.51.100.20", "public_ipv4": "198.51.100.20", "port_range_start": 10000, "port_range_end": 11000,
 	}, http.StatusCreated)

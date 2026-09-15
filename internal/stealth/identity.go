@@ -23,6 +23,11 @@ func ValidName(name string) bool {
 type Identity struct {
 	// AgentName is used for both the Agent binary and its service unit.
 	AgentName string `json:"agent_name"`
+	// InstallDirName is the installation directory basename under the
+	// install parent (normally /opt). Empty on layouts created before the
+	// directory was randomized: those keep the fixed install directory and
+	// the runtime resolves the directory from the executable path anyway.
+	InstallDirName string `json:"install_dir_name,omitempty"`
 	// CoreName is used for both the kernel binary and its service unit.
 	CoreName string `json:"core_name"`
 	// RealmName is the port-forward binary name.
@@ -59,6 +64,7 @@ func (i Identity) Validate() error {
 		value string
 	}{
 		{"agent_name", i.AgentName},
+		{"install_dir_name", i.InstallDirName},
 		{"core_name", i.CoreName},
 		{"realm_name", i.RealmName},
 		{"config_dir_name", i.ConfigDirName},
@@ -74,6 +80,11 @@ func (i Identity) Validate() error {
 	}
 	seen := map[string]string{}
 	for _, field := range fields {
+		// install_dir_name may be empty: layouts created before the
+		// randomized install directory keep running from the fixed one.
+		if field.name == "install_dir_name" && field.value == "" {
+			continue
+		}
 		if !ValidName(field.value) {
 			return fmt.Errorf("stealth identity field %s is not a valid generated name", field.name)
 		}
@@ -91,6 +102,9 @@ func (i Identity) Validate() error {
 type CollisionCheck struct {
 	// InstallDir is where the three binaries live.
 	InstallDir string
+	// InstallParent is the parent of the installation directory; the
+	// randomized install directory is created inside it.
+	InstallParent string
 	// ConfigParent is the parent of the config directory (normally /etc).
 	ConfigParent string
 	// StateParent is the parent of the state directory (normally /var/lib).
@@ -108,6 +122,11 @@ type CollisionCheck struct {
 func (c CollisionCheck) taken(name string) bool {
 	if c.InstallDir != "" {
 		if _, err := os.Lstat(filepath.Join(c.InstallDir, name)); err == nil {
+			return true
+		}
+	}
+	if c.InstallParent != "" {
+		if _, err := os.Lstat(filepath.Join(c.InstallParent, name)); err == nil {
 			return true
 		}
 	}
@@ -165,6 +184,7 @@ func GenerateIdentity(check CollisionCheck) (Identity, error) {
 	var err error
 	fields := []*string{
 		&identity.AgentName,
+		&identity.InstallDirName,
 		&identity.CoreName,
 		&identity.RealmName,
 		&identity.ConfigDirName,
@@ -253,6 +273,9 @@ type Settings struct {
 // behind. The agent that starts after the switch removes these paths once,
 // then drops the section. Paths that match the current layout are skipped.
 type PreviousLayout struct {
+	// InstallDir is the directory the previous layout's binaries lived in;
+	// the post-switch cleanup removes it once its known contents are gone.
+	InstallDir   string `json:"install_dir,omitempty"`
 	AgentBinary  string `json:"agent_binary,omitempty"`
 	CoreBinary   string `json:"core_binary,omitempty"`
 	RealmBinary  string `json:"realm_binary,omitempty"`

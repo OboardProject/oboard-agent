@@ -162,7 +162,7 @@ func TestGenerateIdentityCollisions(t *testing.T) {
 	// Occupy every generated name, then verify generation picks different
 	// free names instead of reusing any of them.
 	occupied := map[string]bool{}
-	for _, name := range []string{identity.AgentName, identity.CoreName, identity.RealmName, identity.ConfigDirName, identity.StateDirName, identity.AgentLogName, identity.CoreLogName, identity.SocketName, identity.SshdName, identity.SshName, identity.StagingPrefix, identity.ConfigFileName, identity.KeyFileName} {
+	for _, name := range []string{identity.AgentName, identity.InstallDirName, identity.CoreName, identity.RealmName, identity.ConfigDirName, identity.StateDirName, identity.AgentLogName, identity.CoreLogName, identity.SocketName, identity.SshdName, identity.SshName, identity.StagingPrefix, identity.ConfigFileName, identity.KeyFileName} {
 		occupied[name] = true
 		for _, suffix := range []string{"", ".log", ".sock", ".service"} {
 			_ = os.WriteFile(filepath.Join(dir, name+suffix), []byte("x"), 0o600)
@@ -172,7 +172,7 @@ func TestGenerateIdentityCollisions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{second.AgentName, second.CoreName, second.RealmName, second.ConfigDirName, second.StateDirName, second.AgentLogName, second.CoreLogName, second.SocketName, second.SshdName, second.SshName, second.StagingPrefix, second.ConfigFileName, second.KeyFileName} {
+	for _, name := range []string{second.AgentName, second.InstallDirName, second.CoreName, second.RealmName, second.ConfigDirName, second.StateDirName, second.AgentLogName, second.CoreLogName, second.SocketName, second.SshdName, second.SshName, second.StagingPrefix, second.ConfigFileName, second.KeyFileName} {
 		if occupied[name] {
 			t.Fatalf("regenerated identity reused occupied name %q", name)
 		}
@@ -211,6 +211,20 @@ func TestIdentityValidateRejectsBadNames(t *testing.T) {
 	identity.CoreName = identity.AgentName
 	if err := identity.Validate(); err == nil {
 		t.Fatal("duplicate names must be rejected")
+	}
+	identity.CoreName = "abcdefghij"
+	// An empty install_dir_name is a legacy layout and stays valid.
+	identity.InstallDirName = ""
+	if err := identity.Validate(); err != nil {
+		t.Fatalf("legacy identity without install_dir_name rejected: %v", err)
+	}
+	identity.InstallDirName = "OBOARD"
+	if err := identity.Validate(); err == nil {
+		t.Fatal("invalid install_dir_name must be rejected")
+	}
+	identity.InstallDirName = identity.AgentName
+	if err := identity.Validate(); err == nil {
+		t.Fatal("duplicate install_dir_name must be rejected")
 	}
 }
 

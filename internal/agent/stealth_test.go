@@ -125,11 +125,19 @@ func TestStealthBootstrapCreatesHiddenLayout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The oboard-named binaries must be gone; the identity-named ones present.
+	// The oboard-named binaries must be gone; the identity-named ones live
+	// in a randomly named sibling directory, and the fixed staging
+	// directory must not survive the install.
 	for _, name := range []string{"oboard-agent", "oboard-sb", "oboard-realm"} {
 		if _, err := os.Stat(filepath.Join(installDir, name)); !os.IsNotExist(err) {
 			t.Fatalf("%s should have been renamed away", name)
 		}
+	}
+	if filepath.Dir(layout.AgentBinary) == installDir {
+		t.Fatalf("hidden binaries must leave the staging directory: %s", layout.AgentBinary)
+	}
+	if _, err := os.Stat(installDir); !os.IsNotExist(err) {
+		t.Fatalf("staging directory %s must be removed once empty: %v", installDir, err)
 	}
 	for _, path := range []string{layout.AgentBinary, layout.CoreBinary, layout.RealmBinary, layout.KeyPath, layout.ConfigPath} {
 		if _, err := os.Stat(path); err != nil {
@@ -208,6 +216,10 @@ func TestApplyStealthEnableDisableRoundTrip(t *testing.T) {
 	if hiddenStateDir == stateDir {
 		t.Fatal("state dir must have moved to the hidden layout")
 	}
+	hiddenInstallDir := filepath.Dir(runner.Config().CoreBinary)
+	if hiddenInstallDir == installDir {
+		t.Fatal("hidden binaries must live in a randomized install directory")
+	}
 	// The migrated traffic state must exist encrypted under its derived name.
 	key := runner.Config().StealthKey
 	trafficPhysical := stealth.PhysicalName(key, "traffic-state.json")
@@ -243,7 +255,7 @@ func TestApplyStealthEnableDisableRoundTrip(t *testing.T) {
 
 	// Simulate the restarted process: the executable now resolves to the
 	// hidden binary, so the cleanup may remove the old layout.
-	osExecutable = func() (string, error) { return filepath.Join(installDir, newService), nil }
+	osExecutable = func() (string, error) { return filepath.Join(hiddenInstallDir, newService), nil }
 	runner.reconcileStealthSwitchCleanup()
 	if _, err := os.Stat(stateDir); !os.IsNotExist(err) {
 		t.Fatalf("old state dir must be removed by cleanup: %v", err)
@@ -254,8 +266,11 @@ func TestApplyStealthEnableDisableRoundTrip(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(installDir, "oboard-agent")); !os.IsNotExist(err) {
 		t.Fatal("old agent binary must be removed by cleanup")
 	}
-	if _, err := os.Stat(filepath.Join(installDir, newService)); err != nil {
+	if _, err := os.Stat(filepath.Join(hiddenInstallDir, newService)); err != nil {
 		t.Fatalf("hidden agent binary must survive cleanup: %v", err)
+	}
+	if _, err := os.Stat(installDir); !os.IsNotExist(err) {
+		t.Fatal("old install directory must be removed by cleanup once empty")
 	}
 	if runner.Config().Stealth != nil && runner.Config().Stealth.Previous != nil {
 		t.Fatal("cleanup must drop the previous-layout record")
@@ -292,8 +307,61 @@ func TestApplyStealthEnableDisableRoundTrip(t *testing.T) {
 	if runner.Config().Stealth != nil && runner.Config().Stealth.Previous != nil {
 		t.Fatal("cleanup after disable must drop the previous-layout record")
 	}
-	if _, err := os.Stat(filepath.Join(installDir, newService)); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(hiddenInstallDir, newService)); !os.IsNotExist(err) {
 		t.Fatal("cleanup after disable must remove the hidden agent binary")
+	}
+	if _, err := os.Stat(hiddenInstallDir); !os.IsNotExist(err) {
+		t.Fatal("cleanup after disable must remove the hidden install directory")
+	}
+	if _, err := os.Stat(filepath.Join(installDir, "oboard-agent")); err != nil {
+		t.Fatalf("restored standard agent binary must survive cleanup: %v", err)
+	}
+}
+
+// TestLegacyStealthConfigWithoutInstallDirNameStaysValid pins the previous
+// model: stealth identities created before the install directory was
+// randomized carry no install_dir_name and keep running from the fixed
+// directory. Such a config must keep loading and validating after the
+// upgrade, or every existing stealth installation would stop starting.
+func TestLegacyStealthConfigWithoutInstallDirNameStaysValid(t *testing.T) {
+	installDir, _, _, configPath, stateDir := standardLayoutFixture(t)
+	identity := stealth.Identity{
+		AgentName: "aaaaaaaaaa", CoreName: "bbbbbbbbbb", RealmName: "cccccccccc",
+		ConfigDirName: "dddddddddd", StateDirName: "eeeeeeeeee", AgentLogName: "ffffffffff",
+		CoreLogName: "gggggggggg", SocketName: "hhhhhhhhhh", SshdName: "iiiiiiiiii",
+		SshName: "jjjjjjjjjj", StagingPrefix: "kkkkkkkkkk", ConfigFileName: "llllllllll",
+		KeyFileName: "mmmmmmmmmm",
+	}
+	if err := identity.Validate(); err != nil {
+		t.Fatalf("legacy identity without install_dir_name rejected: %v", err)
+	}
+	// The legacy layout renamed the binaries in place inside the fixed
+	// install directory.
+	hiddenAgent := filepath.Join(installDir, identity.AgentName)
+	hiddenCore := filepath.Join(installDir, identity.CoreName)
+	if err := os.Rename(filepath.Join(installDir, "oboard-agent"), hiddenAgent); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(installDir, "oboard-sb"), hiddenCore); err != nil {
+		t.Fatal(err)
+	}
+	original := osExecutable
+	osExecutable = func() (string, error) { return hiddenAgent, nil }
+	t.Cleanup(func() { osExecutable = original })
+	cfg := normalizeConfig(Config{
+		ConfigPath:    configPath,
+		ControllerURL: "https://controller.example.com",
+		StateDir:      stateDir,
+		CoreBinary:    hiddenCore,
+		CoreService:   identity.CoreName,
+		AgentService:  identity.AgentName,
+		Stealth: &stealth.Settings{
+			Identity: identity,
+			KeyPath:  filepath.Join(configPath + ".key"),
+		},
+	})
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("legacy stealth config rejected: %v", err)
 	}
 }
 
@@ -317,13 +385,13 @@ func TestMigrateStateTreeRoundTrip(t *testing.T) {
 	dst := t.TempDir()
 	key, _ := stealth.GenerateKey()
 	files := map[string]string{
-		"sing-box.json":              `{"inbounds":[]}`,
-		"traffic-state.json":         `{"schema_version":2}`,
-		"traffic-state.json.bak":     `{"schema_version":1}`,
-		"authorization.json":         `{"revision":3}`,
-		"realm.pid":                  `{"pid":123}`,
-		hostCoreLockName:             "",
-		"last-applied-version.json":  `{"version":9}`,
+		"sing-box.json":             `{"inbounds":[]}`,
+		"traffic-state.json":        `{"schema_version":2}`,
+		"traffic-state.json.bak":    `{"schema_version":1}`,
+		"authorization.json":        `{"revision":3}`,
+		"realm.pid":                 `{"pid":123}`,
+		hostCoreLockName:            "",
+		"last-applied-version.json": `{"version":9}`,
 	}
 	for name, content := range files {
 		if err := os.WriteFile(filepath.Join(src, name), []byte(content), 0o600); err != nil {
@@ -456,7 +524,7 @@ func TestUpdateAgentConfigRejectsStealthIdentityFields(t *testing.T) {
 	cfg := normalizeConfig(Config{ConfigPath: filepath.Join(dir, "config.bin"), StateDir: dir, ControllerURL: "https://controller.example.com", Stealth: &stealth.Settings{Identity: stealth.Identity{AgentName: "abcdefghij", CoreName: "abcdefghik"}, KeyPath: filepath.Join(dir, "key")}, AgentService: "abcdefghij", CoreService: "abcdefghik"})
 	cfg.StealthKey = key
 	runner := New(cfg)
-	if _, err := runner.updateAgentConfig(Config{}, map[string]json.RawMessage{"agent_service": json.RawMessage(`"zzzzzzzzzz"`)}) ; err == nil {
+	if _, err := runner.updateAgentConfig(Config{}, map[string]json.RawMessage{"agent_service": json.RawMessage(`"zzzzzzzzzz"`)}); err == nil {
 		t.Fatal("agent_service patch must be rejected")
 	}
 	if _, err := runner.updateAgentConfig(Config{}, map[string]json.RawMessage{"stealth": json.RawMessage(`{}`)}); err == nil {

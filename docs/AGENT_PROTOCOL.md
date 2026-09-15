@@ -1260,8 +1260,9 @@ Payload:
 Controller queues this admin-only task when the per-server security-process
 switch changes on an enrolled, online server whose Agent advertises the
 `stealth_v1` capability. `enable=true` switches the installation into the
-hidden layout: the Agent generates a random identity (binary, service, config,
-state, log, and socket names), copies the binaries under their new names,
+hidden layout: the Agent generates a random identity (installation directory,
+binary, service, config, state, log, and socket names), copies the binaries
+into the randomly named installation directory beside the current one,
 migrates every state file into AES-256-GCM envelopes under HMAC-derived
 physical names, writes an encrypted config plus key file, installs the two
 renamed service units, restarts the kernel onto its new unit, and disables the
