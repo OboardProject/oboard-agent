@@ -244,7 +244,7 @@ func (c *httpObfsServerConn) Write(p []byte) (int, error) {
 	}
 	c.responseSent = true
 	fakeResponse := httpObfsServerResponse()
-	response := make([]byte, 0, len(fakeResponse)+len(p))
+	response := make([]byte, 0, len(p))
 	response = append(append(response, fakeResponse...), p...)
 	_, err := c.Conn.Write(response)
 	if err != nil {
@@ -349,7 +349,7 @@ func (c *tlsObfsClientConn) Write(p []byte) (int, error) {
 	// Surge 6.4.4 (10661): -[SGObfsHelperTLS encodeObfsData:] patches this ClientHello template with
 	// the current time, fresh randomness, the first 0x400 payload bytes as a session ticket and the
 	// obfs hostname as the server name, then appends the remaining payload as normal records.
-	out := make([]byte, 0, tlsObfsClientHelloOverhead+len(host)+len(p)+tlsObfsRecordHeaderLen)
+	out := make([]byte, 0, len(p))
 	out = append(out, 0x16, 0x03, 0x01)
 	out = binary.BigEndian.AppendUint16(out, uint16(tlsObfsClientRecordOverhead+len(host)+len(payload)))
 	out = append(out, 0x01, 0x00)
@@ -457,7 +457,7 @@ func (c *tlsObfsServerConn) Write(p []byte) (int, error) {
 	common.Must1(rand.Read(sessionID[:]))
 	// Surge 6.4.4 (10661): -[SGObfsHelperTLS decodeObfsData:outData:] never parses this response, it
 	// only requires the first payload length at 0x69 and the payload itself at 0x6b.
-	out := make([]byte, 0, tlsObfsServerHelloPayloadOffset+len(p)+tlsObfsRecordHeaderLen)
+	out := make([]byte, 0, len(p))
 	out = append(out, 0x16, 0x03, 0x01)
 	out = binary.BigEndian.AppendUint16(out, 91)
 	out = append(out, 0x02, 0x00, 0x00, 0x57, 0x03, 0x03)

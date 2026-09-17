@@ -761,9 +761,9 @@ func (c *serverReuseConn[U]) writeResponse(payload []byte) error {
 	if len(first) > maxPayload-1 {
 		first = payload[:maxPayload-1]
 	}
-	reply := make([]byte, 1+len(first))
-	reply[0] = snell.ReplyTunnel
-	copy(reply[1:], first)
+	reply := make([]byte, 0, len(first))
+	reply = append(reply, snell.ReplyTunnel)
+	reply = append(reply, first...)
 	var err error
 	if c.session.writer == nil {
 		c.session.writer, err = writeFirstRecord(c.session.Conn, c.session.service.mode, c.session.service.psk, c.session.service.profile, reply)

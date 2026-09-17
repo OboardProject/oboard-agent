@@ -294,9 +294,9 @@ func (c *serverConn) writeResponse(payload []byte) error {
 	if len(first) > maxPayload-1 {
 		first = payload[:maxPayload-1]
 	}
-	reply := make([]byte, 1+len(first))
-	reply[0] = snell.ReplyTunnel
-	copy(reply[1:], first)
+	reply := make([]byte, 0, len(first))
+	reply = append(reply, snell.ReplyTunnel)
+	reply = append(reply, first...)
 	writer, err := writeFirstRecord(c.Conn, c.service.mode, c.service.psk, c.service.profile, reply)
 	if err != nil {
 		return E.Cause(err, "write reply")
