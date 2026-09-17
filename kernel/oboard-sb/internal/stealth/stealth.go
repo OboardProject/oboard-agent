@@ -29,12 +29,21 @@ const (
 	nonceLen     = 12
 	nameLen      = 16
 	nameDomain   = "oboard-stealth-name-v1:"
+	// envelopeOverhead is the fixed per-envelope overhead: magic, nonce, and
+	// the AES-GCM tag that NewGCM always appends (aead.Overhead()).
+	envelopeOverhead = len(EnvelopeMagic) + nonceLen + 16
+	// maxSealPlaintext bounds Encrypt input so the envelope allocation can
+	// never overflow; every caller seals bounded local state, the largest
+	// being the runtime-users store at a few tens of MiB.
+	maxSealPlaintext = 64 << 20
 )
 
 var (
 	ErrBadKey           = errors.New("stealth key must be 32 bytes")
 	ErrNotEncrypted     = errors.New("data is not a stealth envelope")
 	ErrCorruptEnvelope  = errors.New("stealth envelope is corrupt or the key does not match")
+	// ErrSealTooLarge is returned when Encrypt input exceeds maxSealPlaintext.
+	ErrSealTooLarge = errors.New("stealth plaintext exceeds the seal limit")
 )
 
 func gcm(key []byte) (cipher.AEAD, error) {
@@ -50,11 +59,14 @@ func gcm(key []byte) (cipher.AEAD, error) {
 
 // Encrypt seals plaintext into an envelope: magic || nonce || ciphertext.
 func Encrypt(key, plaintext []byte) ([]byte, error) {
+	if len(plaintext) > maxSealPlaintext {
+		return nil, ErrSealTooLarge
+	}
 	aead, err := gcm(key)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]byte, 0, len(EnvelopeMagic)+nonceLen+len(plaintext)+aead.Overhead())
+	out := make([]byte, 0, envelopeOverhead+len(plaintext))
 	out = append(out, EnvelopeMagic...)
 	nonce := make([]byte, nonceLen)
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {

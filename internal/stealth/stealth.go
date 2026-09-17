@@ -37,6 +37,13 @@ const (
 	// nameDomain prefixes the logical name inside the HMAC input. Bumping it
 	// rotates every derived filename at once without touching the key format.
 	nameDomain = "oboard-stealth-name-v1:"
+	// envelopeOverhead is the fixed per-envelope overhead: magic, nonce, and
+	// the AES-GCM tag that NewGCM always appends (aead.Overhead()).
+	envelopeOverhead = len(EnvelopeMagic) + nonceLen + 16
+	// maxSealPlaintext bounds Encrypt input so the envelope allocation can
+	// never overflow; every caller seals bounded local state, the largest
+	// being the runtime-users store at a few tens of MiB.
+	maxSealPlaintext = 64 << 20
 )
 
 var (
@@ -48,6 +55,8 @@ var (
 	// ErrCorruptEnvelope is returned for data that carries the magic but
 	// cannot be decrypted (truncated, tampered, or wrong key).
 	ErrCorruptEnvelope = errors.New("stealth envelope is corrupt or the key does not match")
+	// ErrSealTooLarge is returned when Encrypt input exceeds maxSealPlaintext.
+	ErrSealTooLarge = errors.New("stealth plaintext exceeds the seal limit")
 )
 
 // GenerateKey returns a fresh random stealth key.
@@ -122,11 +131,14 @@ func gcm(key []byte) (cipher.AEAD, error) {
 // Every call uses a fresh nonce; identical plaintext encrypts to different
 // envelopes, so file contents never become a fingerprint across hosts.
 func Encrypt(key, plaintext []byte) ([]byte, error) {
+	if len(plaintext) > maxSealPlaintext {
+		return nil, ErrSealTooLarge
+	}
 	aead, err := gcm(key)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]byte, 0, len(EnvelopeMagic)+nonceLen+len(plaintext)+aead.Overhead())
+	out := make([]byte, 0, envelopeOverhead+len(plaintext))
 	out = append(out, EnvelopeMagic...)
 	nonce := make([]byte, nonceLen)
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {

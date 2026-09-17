@@ -353,6 +353,11 @@ func validateUserInstall(req UserInstallRequest) error {
 }
 
 func (r *RuntimeUsers) acceptChunk(req UserInstallRequest) ([]UserInstallEntry, bool, error) {
+	// Defense in depth beside validateUserInstall: the chunk buffer
+	// allocation below is only as large as the chunk-count cap.
+	if req.Chunk.Total < 1 || req.Chunk.Total > maxUserInstallChunks {
+		return nil, false, ErrUserInstallIllegal
+	}
 	payload, err := json.Marshal(req.Entries)
 	if err != nil {
 		return nil, false, err

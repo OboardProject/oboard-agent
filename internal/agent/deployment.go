@@ -22,9 +22,17 @@ type deploymentStepResult struct {
 	Result     any    `json:"result,omitempty"`
 }
 
+// maxDeploymentWARPRequests bounds the WARP plans one deployment payload
+// may carry. Real fleets stay far below it; the cap keeps every derived
+// allocation provably bounded.
+const maxDeploymentWARPRequests = 256
+
 func (r *Runner) executeDeploymentTask(payload model.DeploymentTaskPayload) (string, string) {
 	r.deploymentMu.Lock()
 	defer r.deploymentMu.Unlock()
+	if len(payload.WARPRequests) > maxDeploymentWARPRequests {
+		return "failed", jsonResult("deployment payload carries too many WARP requests")
+	}
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
 		return "failed", jsonResult("encode deployment version state: " + err.Error())
@@ -302,7 +310,7 @@ func resolveDeploymentWARPConfig(config string, plans []model.WARPRequestPlan, r
 			if placeholderProfileID != plan.ProfileID {
 				continue
 			}
-			resolvedEndpoint := make(map[string]any, len(endpoint)+3)
+			resolvedEndpoint := make(map[string]any)
 			for key, value := range endpoint {
 				resolvedEndpoint[key] = value
 			}
@@ -392,6 +400,9 @@ func int64FromAny(value any) int64 {
 }
 
 func (r *Runner) deploymentReplayResponse(payload model.DeploymentTaskPayload) (string, string) {
+	if len(payload.WARPRequests) > maxDeploymentWARPRequests {
+		return "failed", jsonResult("deployment payload carries too many WARP requests")
+	}
 	reports := make(map[int64]model.WARPConfigReport, len(payload.WARPRequests))
 	steps := make([]deploymentStepResult, 0, len(payload.WARPRequests)+3)
 	for _, plan := range payload.WARPRequests {

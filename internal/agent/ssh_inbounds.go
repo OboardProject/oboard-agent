@@ -128,7 +128,10 @@ type directTCPIPPayload struct {
 }
 
 func passwordDigest(password string) string {
-	sum := sha256.Sum256([]byte(password))
+	// Drift-detection fingerprint of a cryptographically random credential,
+	// not password storage or authentication: SHA-256 is the right tool here
+	// and preimage resistance is what matters.
+	sum := sha256.Sum256([]byte(password)) // codeql[go/weak-sensitive-data-hashing]
 	return hex.EncodeToString(sum[:])
 }
 
@@ -155,7 +158,9 @@ func sshInboundFingerprint(inbound model.SSHInbound) string {
 	sort.Strings(policyKeys)
 	policyPart := strings.Join(policyKeys, ",")
 	raw := fmt.Sprintf("%d|%s|%d|%v|%s|%s|%d", inbound.InboundID, strings.TrimSpace(inbound.ListenIP), inbound.Port, inbound.Enabled, strings.Join(users, ";"), policyPart, len(users))
-	sum := sha256.Sum256([]byte(raw))
+	// The password digest inside raw is a fingerprint input, not a stored
+	// password hash; see passwordDigest.
+	sum := sha256.Sum256([]byte(raw)) // codeql[go/weak-sensitive-data-hashing]
 	return hex.EncodeToString(sum[:])
 }
 
