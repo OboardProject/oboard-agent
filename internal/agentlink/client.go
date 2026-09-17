@@ -47,7 +47,7 @@ func Dial(ctx context.Context, cfg ClientConfig) (*Session, error) {
 		expected := cfg.CertSHA256
 		// The SHA-256 pin below is the verification: InsecureSkipVerify only
 		// replaces chain validation with it. Never remove the pin.
-		tlsCfg.InsecureSkipVerify = true // codeql[go/disabled-certificate-check]
+		tlsCfg.InsecureSkipVerify = true
 		tlsCfg.VerifyPeerCertificate = func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
 			if len(rawCerts) == 0 {
 				return errors.New("server presented no certificate")
