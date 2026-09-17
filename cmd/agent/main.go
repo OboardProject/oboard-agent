@@ -309,6 +309,8 @@ func runStealthBootstrap(args []string) int {
 	fs.SetOutput(os.Stderr)
 	installDir := fs.String("install-dir", "/usr/local/bin", "directory holding the downloaded oboard-agent, oboard-sb, and oboard-realm binaries")
 	manager := fs.String("manager", "", "service manager: systemd or openrc")
+	cleanupExisting := fs.Bool("cleanup-existing", false, "remove previous managed installations after replacement is running")
+	keepConfig := fs.String("keep-config", "", "configuration of the replacement installation to preserve")
 	controllerURL := fs.String("controller-url", "", "Controller base URL recorded in the encrypted config")
 	updateSource := fs.String("update-source", "panel", "agent update source: panel or github")
 	allowPanelUpdate := fs.Bool("allow-panel-update", true, "allow future Agent updates from the controller panel")
@@ -320,16 +322,23 @@ func runStealthBootstrap(args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
+	if *cleanupExisting {
+		if err := agent.CleanupPreviousAgentInstalls(*manager, *keepConfig); err != nil {
+			fmt.Fprintf(os.Stderr, "previous Agent cleanup failed: %v\n", err)
+			return 1
+		}
+		return 0
+	}
 	layout, err := agent.RunStealthBootstrap(agent.StealthBootstrapOptions{
-		InstallDir:          *installDir,
-		Manager:             *manager,
-		ControllerURL:       *controllerURL,
-		UpdateSource:        *updateSource,
-		AllowPanelUpdate:    *allowPanelUpdate,
-		UpdateRepo:          *updateRepo,
-		ConfigParent:        *configParent,
-		StateParent:         *stateParent,
-		ControllerAddr:      *controllerAddr,
+		InstallDir:           *installDir,
+		Manager:              *manager,
+		ControllerURL:        *controllerURL,
+		UpdateSource:         *updateSource,
+		AllowPanelUpdate:     *allowPanelUpdate,
+		UpdateRepo:           *updateRepo,
+		ConfigParent:         *configParent,
+		StateParent:          *stateParent,
+		ControllerAddr:       *controllerAddr,
 		ControllerCertSHA256: *controllerPin,
 	})
 	if err != nil {
