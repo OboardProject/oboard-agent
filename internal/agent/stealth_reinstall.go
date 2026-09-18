@@ -51,7 +51,19 @@ func cleanupPreviousAgentInstalls(opts stealthBootstrapOptions, keepConfig strin
 			continue
 		}
 		cfg, err := LoadConfigWithKey(configPath, key)
-		if err != nil || cfg.Stealth == nil || cfg.Stealth.Identity.AgentName == "" {
+		if err != nil {
+			// A stealth config that no longer decrypts but parses as plaintext
+			// is a broken installation: a runtime writer once replaced the
+			// encrypted envelope with a plaintext config. Recognize it so a
+			// verified reinstall can remove it; the strict unit-derived checks
+			// below still apply unchanged.
+			plain, plainErr := LoadConfig(configPath)
+			if plainErr != nil {
+				continue
+			}
+			cfg = plain
+		}
+		if cfg.Stealth == nil || cfg.Stealth.Identity.AgentName == "" {
 			continue
 		}
 		id := cfg.Stealth.Identity

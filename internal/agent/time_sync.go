@@ -42,7 +42,13 @@ type ntpSample struct {
 }
 
 var queryNTPSource = queryNTP
-var saveTimeCorrectionConfig = SaveConfig
+
+// saveTimeCorrectionConfig is a seam so tests can observe (and fail) the
+// persistence step. Production always routes through the key-aware writer so
+// a stealth installation never downgrades its encrypted config to plaintext.
+var saveTimeCorrectionConfig = func(r *Runner, cfg Config) error {
+	return r.saveAgentConfig(cfg)
+}
 
 func (r *Runner) runTimeCheckTask(ctx context.Context, plan model.TimeCheckPlan) (model.TimeCheckResult, error) {
 	plan.CorrectionMode = normalizeTimeCorrectionMode(plan.CorrectionMode)
@@ -188,7 +194,7 @@ func (r *Runner) persistTimeCorrectionMode(mode model.TimeCorrectionMode) error 
 	}
 	cfg.TimeCorrectionMode = mode
 	if strings.TrimSpace(cfg.ConfigPath) != "" {
-		if err := saveTimeCorrectionConfig(cfg.ConfigPath, cfg); err != nil {
+		if err := saveTimeCorrectionConfig(r, cfg); err != nil {
 			return err
 		}
 	}

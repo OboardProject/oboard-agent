@@ -1548,7 +1548,10 @@ func (r *Runner) bindServerIdentity(serverID int64) error {
 	logging.Infof("agent identity bound: server_id=%d", serverID)
 	cfg.ServerID = serverID
 	if strings.TrimSpace(cfg.ConfigPath) != "" {
-		if err := SaveConfig(cfg.ConfigPath, cfg); err != nil {
+		// Persist through the key-aware writer: a stealth installation must
+		// never let this runtime write downgrade the encrypted envelope to
+		// plaintext, or the next start (and the reinstall cleanup) rejects it.
+		if err := r.saveAgentConfig(cfg); err != nil {
 			return fmt.Errorf("persist enrolled server_id: %w", err)
 		}
 	}

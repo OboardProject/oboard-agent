@@ -83,7 +83,9 @@ func (r *Runner) refreshLogLevel() logging.Level {
 		next.LogLevel = logging.DefaultLevel.String()
 		next.LogLevelExpiresAt = ""
 		if path := agentConfigPath(next); path != "" {
-			if err := SaveConfig(path, next); err != nil {
+			// Key-aware writer: retiring a verbose level on a stealth
+			// installation must keep the config envelope encrypted.
+			if err := r.saveAgentConfig(next); err != nil {
 				logging.Errorf("log level expiry could not be persisted path=%s: %v", path, err)
 			}
 		}

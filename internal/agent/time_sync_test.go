@@ -182,8 +182,8 @@ func TestTimeCheckConfigFailureAndRecovery(t *testing.T) {
 			runner := New(cfg)
 			previousSave := saveTimeCorrectionConfig
 			t.Cleanup(func() { saveTimeCorrectionConfig = previousSave })
-			saveTimeCorrectionConfig = func(path string, _ Config) error {
-				return &os.LinkError{Op: "rename", Old: path + ".tmp", New: path, Err: failure.err}
+			saveTimeCorrectionConfig = func(_ *Runner, cfg Config) error {
+				return &os.LinkError{Op: "rename", Old: cfg.ConfigPath + ".tmp", New: cfg.ConfigPath, Err: failure.err}
 			}
 			plan := model.TimeCheckPlan{CorrectionMode: model.TimeCorrectionNTP, NTPServers: []string{"one.example", "two.example", "three.example"}}
 			payload, err := json.Marshal(plan)
@@ -220,7 +220,7 @@ func TestTimeCheckConfigFailureAndRecovery(t *testing.T) {
 			if err != nil || saved.TimeCorrectionMode != model.TimeCorrectionNTP || runner.Config().TimeCorrectionMode != model.TimeCorrectionNTP {
 				t.Fatalf("persisted mode after recovery = %s, err=%v", saved.TimeCorrectionMode, err)
 			}
-			saveTimeCorrectionConfig = func(string, Config) error {
+			saveTimeCorrectionConfig = func(*Runner, Config) error {
 				t.Fatal("unchanged mode must not rewrite config")
 				return failure.err
 			}

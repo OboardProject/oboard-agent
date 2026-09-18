@@ -545,7 +545,9 @@ func (r *Runner) setConnectionAuditPolicy(enabled bool) {
 	if changed {
 		cfg.ConnectionAuditEnabled = enabled
 		if strings.TrimSpace(cfg.ConfigPath) != "" {
-			if err := SaveConfig(cfg.ConfigPath, cfg); err != nil {
+			// Key-aware writer: on a stealth installation this policy change
+			// must not rewrite the encrypted config envelope as plaintext.
+			if err := r.saveAgentConfig(cfg); err != nil {
 				return
 			}
 		}

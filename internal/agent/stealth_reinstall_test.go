@@ -118,6 +118,67 @@ func TestStealthReinstallRequiresVerifiedReplacement(t *testing.T) {
 	}
 }
 
+// A previous installation whose encrypted config was downgraded to plaintext
+// by a runtime writer cannot be decrypted, but it is still a managed layout:
+// the reinstall cleanup must recognize and remove it instead of leaving the
+// broken install behind forever.
+func TestStealthReinstallCleansPlaintextBrokenLayout(t *testing.T) {
+	for _, manager := range []string{"systemd", "openrc"} {
+		t.Run(manager, func(t *testing.T) {
+			fakeSwitchEnvironment(t, manager)
+			installDir, configParent, stateParent, _, _ := standardLayoutFixture(t)
+			opts := stealthBootstrapOptions{InstallDir: installDir, Manager: manager, ControllerURL: "https://controller.example.com", ConfigParent: configParent, StateParent: stateParent, UnitDir: filepath.Join(configParent, "units"), LogDir: filepath.Join(configParent, "log"), RunDir: filepath.Join(configParent, "run")}
+			original := osExecutable
+			osExecutable = func() (string, error) { return filepath.Join(opts.InstallDir, "oboard-agent"), nil }
+			t.Cleanup(func() { osExecutable = original })
+			makeLayout := func(name string) stealth.Layout {
+				opts.InstallDir = filepath.Join(filepath.Dir(installDir), name)
+				if err := os.MkdirAll(opts.InstallDir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				for _, file := range []string{"oboard-agent", "oboard-sb", "oboard-realm"} {
+					if err := os.WriteFile(filepath.Join(opts.InstallDir, file), []byte("binary"), 0o755); err != nil {
+						t.Fatal(err)
+					}
+				}
+				layout, err := RunStealthBootstrap(opts)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return layout
+			}
+			broken := makeLayout("stage-broken")
+			// Simulate the historical bug: a runtime writer replaced the
+			// encrypted envelope with a plaintext config.
+			brokenKey, err := stealth.LoadKey(broken.KeyPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			brokenCfg, err := LoadConfigWithKey(broken.ConfigPath, brokenKey)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := SaveConfig(broken.ConfigPath, brokenCfg); err != nil {
+				t.Fatal(err)
+			}
+			replacement := makeLayout("stage-new")
+			if err := cleanupPreviousAgentInstalls(opts, replacement.ConfigPath); err != nil {
+				t.Fatal(err)
+			}
+			for _, path := range []string{broken.AgentBinary, broken.ConfigPath, broken.KeyPath, broken.StateDir} {
+				if _, err := os.Stat(path); !os.IsNotExist(err) {
+					t.Fatalf("broken layout retained: %s (%v)", path, err)
+				}
+			}
+			for _, path := range []string{replacement.AgentBinary, replacement.ConfigPath, replacement.KeyPath} {
+				if _, err := os.Stat(path); err != nil {
+					t.Fatalf("replacement missing: %s (%v)", path, err)
+				}
+			}
+		})
+	}
+}
+
 func TestStealthReinstallStopFailurePreservesFiles(t *testing.T) {
 	fakeSwitchEnvironment(t, "systemd")
 	root := t.TempDir()
