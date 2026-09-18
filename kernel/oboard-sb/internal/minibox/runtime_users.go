@@ -201,10 +201,26 @@ func (r *RuntimeUsers) Restore() error {
 		r.tracker.usersBarrier.Lock()
 		defer r.tracker.usersBarrier.Unlock()
 	}
-	if err := r.validateSnapshot(snapshot); err != nil {
+	// Configuration restarts may remove runtime-managed listeners. Restore
+	// only their surviving scope, but retain the signed snapshot and revision
+	// unchanged for rollback and replay protection.
+	restored := *snapshot
+	restored.Scope = nil
+	restored.Entries = nil
+	for _, tag := range snapshot.Scope {
+		if _, declared := r.scope[tag]; declared {
+			restored.Scope = append(restored.Scope, tag)
+		}
+	}
+	for _, entry := range snapshot.Entries {
+		if containsString(restored.Scope, entry.InboundTag) {
+			restored.Entries = append(restored.Entries, entry)
+		}
+	}
+	if err := r.validateSnapshot(&restored); err != nil {
 		return err
 	}
-	if err := r.publishLocked(snapshot); err != nil {
+	if err := r.publishLocked(&restored); err != nil {
 		if r.tracker != nil {
 			r.tracker.usersFailed.Store(true)
 		}
@@ -262,6 +278,9 @@ func (r *RuntimeUsers) Install(req UserInstallRequest) (UsersStatus, error) {
 		}
 		if snapshot.Revision == r.current.Revision {
 			if snapshot.Digest == r.current.Digest && (r.tracker == nil || !r.tracker.usersFailed.Load()) {
+				if err := r.validateSnapshot(snapshot); err != nil {
+					return UsersStatus{}, err
+				}
 				return r.statusLocked(), nil
 			}
 			return UsersStatus{}, ErrUserInstallDigest

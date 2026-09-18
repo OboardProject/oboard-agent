@@ -1,14 +1,134 @@
 package minibox
 
 import (
+	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
+
+	box "github.com/sagernet/sing-box"
 )
+
+func TestRuntimeUsersRestoreAfterRemovingInbound(t *testing.T) {
+	for _, scope := range [][]string{{"in-1"}, {}} {
+		t.Run(fmt.Sprint(scope), func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "kernel-users.json")
+			start := func(scope []string) *RuntimeUsers {
+				t.Helper()
+				inbounds := []map[string]any{}
+				for _, tag := range scope {
+					in := map[string]any{"tag": tag, "listen": "127.0.0.1", "listen_port": 0, "users": []any{}}
+					if tag == "in-1" {
+						in["type"], in["version"], in["auth_mode"] = "snell", 6, "multi_psk"
+					} else {
+						in["type"], in["method"] = "shadowsocks", "aes-128-gcm"
+					}
+					inbounds = append(inbounds, in)
+				}
+				raw, err := json.Marshal(map[string]any{"inbounds": inbounds, "outbounds": []map[string]any{{"type": "direct", "tag": "direct"}}, "_oboard": map[string]any{"runtime_users": map[string]any{"inbounds": scope}}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				configPath := filepath.Join(t.TempDir(), "config.json")
+				if err := os.WriteFile(configPath, raw, 0600); err != nil {
+					t.Fatal(err)
+				}
+				opts, metadata, err := LoadConfig(configPath, nil, HY2Tuning{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				ctx := Context(context.Background())
+				b, err := box.New(box.Options{Context: ctx, Options: opts})
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = b.Close() })
+				tracker := AttachRuntimeTrackers(ctx, metadata)
+				if err := b.Start(); err != nil {
+					t.Fatal(err)
+				}
+				return NewRuntimeUsers(path, nil, b, tracker, scope)
+			}
+			oldScope := []string{"in-1", "in-56"}
+			old := start(oldScope)
+			ss := testUserEntry("in-56", "bob", "ss-key")
+			ss.Credential = UserCredential{Password: "test-password"}
+			entries := []UserInstallEntry{snellTestEntry("alice", "snell-key", "test-snell-psk-123456", 1), ss}
+			digest, err := UsersDigest(10, oldScope, entries)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req := UserInstallRequest{Scope: oldScope, UsersRevision: 10, UsersDigest: digest, Mode: "full", Entries: entries}
+			if _, err := old.Install(req); err != nil {
+				t.Fatal(err)
+			}
+			before, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			restarted := start(scope)
+			if err := restarted.Restore(); err != nil {
+				t.Fatalf("restart after removing Shadowsocks: %v", err)
+			}
+			after, err := os.ReadFile(path)
+			if err != nil || !bytes.Equal(before, after) {
+				t.Fatal("restore changed durable snapshot")
+			}
+			if restarted.current.Revision != 10 || restarted.current.Digest != digest {
+				t.Fatal("restore lost revision protection")
+			}
+			if restarted.tracker.stateForKey("user:bob") != nil {
+				t.Fatal("removed inbound user was restored")
+			}
+			if len(scope) > 0 && restarted.tracker.stateForKey("user:alice") == nil {
+				t.Fatal("Snell user was not restored")
+			}
+			if _, err := restarted.Install(req); !errors.Is(err, ErrUserInstallCapability) {
+				t.Fatalf("live replay accepted removed scope: %v", err)
+			}
+			stale := req
+			stale.UsersRevision = 9
+			stale.UsersDigest, _ = UsersDigest(9, oldScope, entries)
+			if _, err := restarted.Install(stale); !errors.Is(err, ErrUserInstallBase) {
+				t.Fatalf("older snapshot accepted: %v", err)
+			}
+			rollback := start(oldScope)
+			if err := rollback.Restore(); err != nil {
+				t.Fatalf("rollback: %v", err)
+			}
+			if rollback.tracker.stateForKey("user:bob") == nil {
+				t.Fatal("rollback lost old inbound user")
+			}
+			if len(scope) > 0 {
+				installSnellTest(t, restarted, 11, entries[:1])
+				if restarted.Status().UsersRevision != 11 {
+					t.Fatal("new full snapshot did not converge")
+				}
+			}
+			var corrupt persistedUsers
+			if err := json.Unmarshal(before, &corrupt); err != nil {
+				t.Fatal(err)
+			}
+			corrupt.Current.Digest = "invalid"
+			raw, err := json.Marshal(corrupt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, raw, 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := start(scope).Restore(); !errors.Is(err, ErrUserInstallDigest) {
+				t.Fatalf("removed scope bypassed integrity check: %v", err)
+			}
+		})
+	}
+}
 
 func testUserEntry(tag, user, key string) UserInstallEntry {
 	return UserInstallEntry{
