@@ -18,8 +18,8 @@ const (
 )
 
 type Policy struct {
-	Version int                         `json:"version"`
-	Mode    string                      `json:"mode"`
+	Version int                          `json:"version"`
+	Mode    string                       `json:"mode"`
 	Allow   model.RemoteAccessLocalAllow `json:"allow"`
 }
 
@@ -43,19 +43,14 @@ func (p Policy) Normalized() Policy {
 func (p Policy) Allows(feature string) bool {
 	p = p.Normalized()
 	switch feature {
-	case "scripts", "scripts_enabled":
-		return p.Allow.ScriptsEnabled
+	case "plugins", "plugins_enabled":
+		return p.Allow.PluginsEnabled
 	case "host_power", "host_power_enabled", "host-power":
 		return p.Allow.HostPowerEnabled
-	}
-	if p.Mode != model.RemoteAccessModeHardened {
-		return true
-	}
-	switch feature {
 	case "remote_terminal":
-		return p.Allow.RemoteTerminal
+		return p.Mode != model.RemoteAccessModeHardened || p.Allow.RemoteTerminal
 	case "mcp_remote_operations", "mcp_structured_exec", "mcp_raw_shell", "mcp_interactive_terminal", "mcp_interactive", "mcp_enabled":
-		return p.Allow.MCPEnabled
+		return p.Mode != model.RemoteAccessModeHardened || p.Allow.MCPEnabled
 	default:
 		return false
 	}
@@ -163,8 +158,8 @@ func (s *Store) SetAllow(feature string, allow bool) error {
 		policy.Allow.RemoteTerminal = allow
 	case "mcp-operations", "mcp_remote_operations", "mcp-exec", "mcp_structured_exec", "mcp-shell", "mcp_raw_shell", "mcp_interactive_terminal", "mcp_interactive", "mcp-interactive", "mcp_enabled", "mcp":
 		policy.Allow.MCPEnabled = allow
-	case "scripts", "scripts_enabled":
-		policy.Allow.ScriptsEnabled = allow
+	case "plugins", "plugins_enabled":
+		policy.Allow.PluginsEnabled = allow
 	case "host-power", "host_power", "host_power_enabled":
 		policy.Allow.HostPowerEnabled = allow
 	default:

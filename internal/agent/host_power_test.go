@@ -46,14 +46,15 @@ func TestHostPowerUsesStubAndRecordsIntent(t *testing.T) {
 	}
 	runner := New(cfg)
 	payload := model.HostPowerTaskPayload{
-		ProtocolVersion: model.HostPowerProtocolVersion,
-		OperationID:     "op_test",
-		Action:          model.HostPowerActionReboot,
-		ServerID:        9,
-		Source:          model.RemoteExecOriginScript,
-		IssuedAt:        time.Now().UTC(),
-		ExpiresAt:       time.Now().UTC().Add(time.Minute),
-		PayloadDigest:   "digest-1",
+		ProtocolVersion:  model.HostPowerProtocolVersion,
+		OperationID:      "op_test",
+		Action:           model.HostPowerActionReboot,
+		ServerID:         9,
+		Source:           model.RemoteExecOriginPlugin,
+		PluginRevisionID: 12,
+		IssuedAt:         time.Now().UTC(),
+		ExpiresAt:        time.Now().UTC().Add(time.Minute),
+		PayloadDigest:    "digest-1",
 	}
 	raw, _ := json.Marshal(payload)
 	status, result := runner.executeHostPowerTask(model.AgentTask{PayloadJSON: string(raw)})
@@ -81,7 +82,7 @@ func TestHostPowerLocalPolicyDeniesByDefault(t *testing.T) {
 		OperationID:     "op_denied",
 		Action:          model.HostPowerActionPoweroff,
 		ServerID:        9,
-		Source:          model.RemoteExecOriginScript,
+		Source:          model.RemoteExecOriginPlugin,
 		IssuedAt:        time.Now().UTC(),
 		ExpiresAt:       time.Now().UTC().Add(time.Minute),
 		PayloadDigest:   "digest-2",
@@ -90,6 +91,33 @@ func TestHostPowerLocalPolicyDeniesByDefault(t *testing.T) {
 	status, result := runner.executeHostPowerTask(model.AgentTask{PayloadJSON: string(raw)})
 	if status != "failed" || !strings.Contains(result, "permission_denied") {
 		t.Fatalf("expected local deny, got %s %s", status, result)
+	}
+}
+
+func TestHostPowerRejectsNonPluginOrigin(t *testing.T) {
+	stubHostPower(t, func(string) error {
+		t.Fatal("non-plugin origin must not invoke host power")
+		return nil
+	})
+	cfg := testAgentConfig(t.TempDir(), 9)
+	store := agentsecurity.NewStore(agentsecurity.PathForConfig(cfg.ConfigPath), nil)
+	if err := store.SetAllow("host-power", true); err != nil {
+		t.Fatal(err)
+	}
+	runner := New(cfg)
+	for _, origin := range []string{"script", "", model.RemoteExecOriginMCP, model.RemoteExecOriginPanel} {
+		t.Run(origin, func(t *testing.T) {
+			payload := model.HostPowerTaskPayload{
+				ProtocolVersion: model.HostPowerProtocolVersion,
+				OperationID:     "op_reject", ServerID: 9,
+				Action: model.HostPowerActionReboot, Source: origin,
+				ExpiresAt: time.Now().UTC().Add(time.Minute),
+			}
+			status, result := runner.executeHostPowerTask(model.AgentTask{PayloadJSON: string(mustJSON(payload))})
+			if status != "failed" || !strings.Contains(result, "permission_denied") {
+				t.Fatalf("origin=%q: %s %s", origin, status, result)
+			}
+		})
 	}
 }
 

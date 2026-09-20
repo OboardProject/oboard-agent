@@ -52,8 +52,8 @@ func (r *Runner) localGateAllows(feature string) bool {
 }
 
 func localGateFeatureForExec(origin, mode string) string {
-	if origin == model.RemoteExecOriginScript {
-		return "scripts"
+	if origin == model.RemoteExecOriginPlugin {
+		return "plugins"
 	}
 	return "mcp_enabled"
 }

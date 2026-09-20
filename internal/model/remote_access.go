@@ -14,9 +14,9 @@ const (
 
 	RemoteExecOriginMCP    = "mcp"
 	RemoteExecOriginPanel  = "panel"
-	RemoteExecOriginScript = "script"
-	RemoteExecModeArgv    = "argv"
-	RemoteExecModeShell   = "shell"
+	RemoteExecOriginPlugin = "plugin"
+	RemoteExecModeArgv     = "argv"
+	RemoteExecModeShell    = "shell"
 
 	PrivilegeRemoteOperations  = "remote_operations"
 	PrivilegeRemoteExec        = "remote_exec"
@@ -42,7 +42,7 @@ type RemoteAccessReport struct {
 type RemoteAccessLocalAllow struct {
 	RemoteTerminal   bool `json:"remote_terminal"`
 	MCPEnabled       bool `json:"mcp_enabled"`
-	ScriptsEnabled   bool `json:"scripts_enabled"`
+	PluginsEnabled   bool `json:"plugins_enabled"`
 	HostPowerEnabled bool `json:"host_power_enabled"`
 }
 

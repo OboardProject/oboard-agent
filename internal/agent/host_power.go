@@ -26,8 +26,8 @@ func (r *Runner) executeHostPowerTask(task model.AgentTask) (string, string) {
 	if payload.ServerID != r.serverID() {
 		return "failed", jsonMap(map[string]any{"error_code": "resource_out_of_scope", "error": "host power target does not match this agent"})
 	}
-	if payload.Source != model.RemoteExecOriginScript {
-		return "failed", jsonMap(map[string]any{"error_code": "permission_denied", "error": "host power requires a script origin"})
+	if payload.Source != model.RemoteExecOriginPlugin {
+		return "failed", jsonMap(map[string]any{"error_code": "permission_denied", "error": "host power requires a plugin origin"})
 	}
 	if payload.Action != model.HostPowerActionPoweroff && payload.Action != model.HostPowerActionReboot {
 		return "failed", jsonMap(map[string]any{"error_code": "invalid_input", "error": "action must be poweroff or reboot"})
