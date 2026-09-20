@@ -38,6 +38,7 @@ func TestDisabledConnectionAuditDoesNotPollCoreOrWriteState(t *testing.T) {
 
 func TestConnectionPresenceCombinesKernelAndSSHWithGlobalSequence(t *testing.T) {
 	runner := New(Config{StateDir: t.TempDir(), ServerID: 9, ConnectionAuditEnabled: true})
+	runner.connectionAudit.setCollectionPolicy(auditCollectionPolicy{Mode: "standard"})
 	runner.coreClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		switch req.URL.Path {
 		case "/version":
@@ -104,6 +105,7 @@ func TestConnectionAuditPolicyRetriesFailedCoreSync(t *testing.T) {
 
 func TestConnectionAuditPeakSpansDestinationBuckets(t *testing.T) {
 	audit := newConnectionAuditAccumulator(true)
+	audit.setCollectionPolicy(auditCollectionPolicy{Mode: "standard"})
 	first := audit.start(connectionAuditSnapshotItem{UserID: 7, SourceIP: "198.51.100.4", Destination: "one.example", DestinationPort: 443})
 	second := audit.start(connectionAuditSnapshotItem{UserID: 7, SourceIP: "198.51.100.4", Destination: "two.example", DestinationPort: 443})
 	items := audit.drain()
@@ -125,6 +127,7 @@ func TestConnectionAuditPeakSpansDestinationBuckets(t *testing.T) {
 
 func TestConnectionAuditPeakIsScopedToDevice(t *testing.T) {
 	audit := newConnectionAuditAccumulator(true)
+	audit.setCollectionPolicy(auditCollectionPolicy{Mode: "standard"})
 	first := audit.start(connectionAuditSnapshotItem{UserID: 7, DeviceIDHash: "device-a", SourceIP: "198.51.100.4", Destination: "one.example", DestinationPort: 443})
 	second := audit.start(connectionAuditSnapshotItem{UserID: 7, DeviceIDHash: "device-b", SourceIP: "198.51.100.5", Destination: "two.example", DestinationPort: 443})
 	items := audit.drain()
@@ -142,6 +145,7 @@ func TestConnectionAuditPeakIsScopedToDevice(t *testing.T) {
 
 func TestConnectionAuditDurationAndCoverageSurviveDrain(t *testing.T) {
 	audit := newConnectionAuditAccumulator(true)
+	audit.setCollectionPolicy(auditCollectionPolicy{Mode: "standard"})
 	finish := audit.start(connectionAuditSnapshotItem{UserID: 7, SourceIP: "198.51.100.4", Destination: "one.example", DestinationPort: 443})
 	finish()
 	items := audit.drain()
@@ -152,6 +156,7 @@ func TestConnectionAuditDurationAndCoverageSurviveDrain(t *testing.T) {
 
 func TestConnectionAuditOldCloseDoesNotAffectReenabledGeneration(t *testing.T) {
 	audit := newConnectionAuditAccumulator(true)
+	audit.setCollectionPolicy(auditCollectionPolicy{Mode: "standard"})
 	oldFinish := audit.start(connectionAuditSnapshotItem{UserID: 7, SourceIP: "198.51.100.4", Destination: "example.com", DestinationPort: 443})
 	audit.setEnabled(false)
 	audit.setEnabled(true)

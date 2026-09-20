@@ -198,11 +198,11 @@ type trafficStreamCheckpoint struct {
 type trafficReportResponse struct {
 	Authorization         *model.AuthorizationLease    `json:"authorization,omitempty"`
 	AuthorizationEnvelope *model.AuthorizationEnvelope `json:"authorization_envelope,omitempty"`
-	Accepted          []string                  `json:"accepted_report_ids"`
-	AcceptedReports   []trafficAcceptedReport   `json:"accepted_reports"`
-	StreamCheckpoints []trafficStreamCheckpoint `json:"stream_checkpoints"`
-	Policies          map[string]interface{}    `json:"policies"`
-	PolicyRevision    int64                     `json:"policy_revision"`
+	Accepted              []string                     `json:"accepted_report_ids"`
+	AcceptedReports       []trafficAcceptedReport      `json:"accepted_reports"`
+	StreamCheckpoints     []trafficStreamCheckpoint    `json:"stream_checkpoints"`
+	Policies              map[string]interface{}       `json:"policies"`
+	PolicyRevision        int64                        `json:"policy_revision"`
 }
 
 func (r *Runner) startTrafficLoop(ctx context.Context) {
@@ -217,7 +217,8 @@ func (r *Runner) startTrafficLoop(ctx context.Context) {
 			// spent, then refuses connections with nothing recorded anywhere.
 			r.noteTrafficReportOutcome(r.collectAndReportTraffic(loopCtx))
 			if r.Config().ConnectionAuditEnabled {
-				_ = r.collectAndReportConnectionAudits(loopCtx)
+				_ = r.collectAndReportAccountActivity(loopCtx)
+				r.collectDiagnosticActivity(loopCtx)
 			}
 			select {
 			case <-loopCtx.Done():
@@ -225,7 +226,8 @@ func (r *Runner) startTrafficLoop(ctx context.Context) {
 				_ = r.persistTrafficCheckpointBeforeRuntimeTransition(flushCtx)
 				_ = r.collectAndReportTraffic(flushCtx)
 				if r.Config().ConnectionAuditEnabled {
-					_ = r.collectAndReportConnectionAudits(flushCtx)
+					_ = r.collectAndReportAccountActivity(flushCtx)
+					r.collectDiagnosticActivity(flushCtx)
 				}
 				cancel()
 				return

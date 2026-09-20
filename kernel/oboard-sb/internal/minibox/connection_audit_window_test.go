@@ -40,6 +40,7 @@ func newAuditWindowTracker(t *testing.T, clock *stubClock) (*RateLimitTracker, *
 	}}})
 	tracker.now = clock.Now
 	tracker.SetConnectionAuditEnabled(true)
+	enableTestActivityDetails(tracker)
 	metadata := adapter.InboundContext{
 		Source:      M.Socksaddr{Addr: netip.MustParseAddr("198.51.100.10"), Port: 51000},
 		Destination: M.Socksaddr{Fqdn: "example.com", Port: 443},

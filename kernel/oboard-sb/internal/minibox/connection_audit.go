@@ -98,7 +98,7 @@ func (t *RateLimitTracker) FamilySelectorSelected(ctx context.Context, selectorT
 		return
 	}
 	metadata.Outbound = childTag
-	if !t.auditEnabled.Load() {
+	if !t.auditEnabled.Load() || !t.auditDiagnostics.Load() {
 		return
 	}
 	t.auditMu.Lock()
@@ -145,11 +145,11 @@ func (t *RateLimitTracker) FamilySelectorSelected(ctx context.Context, selectorT
 }
 
 func (t *RateLimitTracker) recordConnectionStart(state *runtimeState, metadata adapter.InboundContext, outbound adapter.Outbound, network string, admittedValue ...bool) string {
-	if t == nil || state == nil || !t.auditEnabled.Load() {
+	if t == nil || state == nil || !t.auditEnabled.Load() || !t.auditDiagnostics.Load() {
 		return ""
 	}
 	policy := state.currentConfig().policy
-	if policy.UserID <= 0 {
+	if policy.UserID <= 0 || !t.auditCollection.Load().Allows(policy.UserID, t.timeNow()) {
 		return ""
 	}
 	sourceAddr := metadata.Source.Addr.Unmap()
@@ -205,7 +205,7 @@ func (t *RateLimitTracker) recordConnectionStart(state *runtimeState, metadata a
 
 	t.auditMu.Lock()
 	defer t.auditMu.Unlock()
-	if !t.auditEnabled.Load() {
+	if !t.auditEnabled.Load() || !t.auditCollection.Load().Allows(policy.UserID, t.timeNow()) {
 		return ""
 	}
 	key := strconv.FormatUint(t.auditGeneration, 10) + "\x00" + baseKey
@@ -283,6 +283,9 @@ func (t *RateLimitTracker) recordConnectionPayload(handle string, upload, downlo
 		return
 	}
 	nowTime := t.timeNow().UTC()
+	if !t.auditCollection.Load().Allows(bucket.UserID, nowTime) {
+		return
+	}
 	now := nowTime.Format(time.RFC3339Nano)
 	if bucket.PayloadFirstAt == "" {
 		bucket.PayloadFirstAt = now

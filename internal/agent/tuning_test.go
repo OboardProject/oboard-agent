@@ -46,6 +46,28 @@ func TestEffectiveMemoryUsesCgroupLimit(t *testing.T) {
 	}
 }
 
+func TestResourceProfileByteBoundaries(t *testing.T) {
+	for _, container := range []bool{false, true} {
+		for _, memory := range []uint64{largeMemoryThreshold - 1, largeMemoryThreshold, largeMemoryThreshold + 1} {
+			want := ResourceProfileLarge
+			if memory < largeMemoryThreshold {
+				want = ResourceProfileSmall
+			}
+			if got := selectResourceProfile("auto", memory, container); got != want {
+				t.Fatalf("memory=%d container=%v: got %q want %q", memory, container, got, want)
+			}
+		}
+	}
+	for _, tc := range []struct{ host, cgroup, want uint64 }{
+		{0, 0, 0}, {0, 128 << 20, 128 << 20}, {2 << 30, 0, 2 << 30},
+		{2 << 30, 128 << 20, 128 << 20},
+	} {
+		if got := effectiveMemory(tc.host, tc.cgroup); got != tc.want {
+			t.Fatalf("effectiveMemory(%d, %d)=%d want %d", tc.host, tc.cgroup, got, tc.want)
+		}
+	}
+}
+
 func TestMemoryIntegerConversionsAreBounded(t *testing.T) {
 	if got := positiveInt64ToUint64(-1); got != 0 {
 		t.Fatalf("negative cgroup limit converted to %d", got)

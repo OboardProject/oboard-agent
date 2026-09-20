@@ -27,6 +27,7 @@ func TestConnectionAuditDoesNotAllocateUntilEnabled(t *testing.T) {
 		t.Fatalf("disabled audit allocated state: key=%q buckets=%#v", key, tracker.auditBuckets)
 	}
 	tracker.SetConnectionAuditEnabled(true)
+	enableTestActivityDetails(tracker)
 	started := time.Now()
 	key := tracker.recordConnectionStart(state, metadata, nil, "tcp")
 	if key == "" {
@@ -51,6 +52,7 @@ func TestFamilySelectorAuditUsesSuccessfulChildOutbound(t *testing.T) {
 		"alice": {UserID: 7, InboundID: 11, Billable: true},
 	}}})
 	tracker.SetConnectionAuditEnabled(true)
+	enableTestActivityDetails(tracker)
 	state := tracker.states["user:alice"]
 	metadata := adapter.InboundContext{
 		User:        "alice",
@@ -81,6 +83,7 @@ func TestConnectionAuditPeakSpansDestinationBuckets(t *testing.T) {
 		"alice": {UserID: 7, InboundID: 11, Billable: true},
 	}}})
 	tracker.SetConnectionAuditEnabled(true)
+	enableTestActivityDetails(tracker)
 	state := tracker.states["user:alice"]
 	metadata := adapter.InboundContext{
 		Source:      M.Socksaddr{Addr: netip.MustParseAddr("198.51.100.10"), Port: 51000},
@@ -117,6 +120,7 @@ func TestConnectionAuditPeakIsScopedToDevice(t *testing.T) {
 		"alice-b": {UserID: 7, InboundID: 11, DeviceIDHash: "device-b", CredentialEpoch: 1, Billable: true},
 	}}})
 	tracker.SetConnectionAuditEnabled(true)
+	enableTestActivityDetails(tracker)
 	metadata := adapter.InboundContext{Source: M.Socksaddr{Addr: netip.MustParseAddr("198.51.100.10"), Port: 51000}, Destination: M.Socksaddr{Fqdn: "example.com", Port: 443}, Network: "tcp"}
 	first := tracker.recordConnectionStart(tracker.states["user:alice-a"], metadata, nil, "tcp")
 	metadata.Source = M.Socksaddr{Addr: netip.MustParseAddr("198.51.100.11"), Port: 51001}
@@ -139,6 +143,7 @@ func TestConnectionAuditOldCloseDoesNotAffectReenabledGeneration(t *testing.T) {
 		"alice": {UserID: 7, InboundID: 11, Billable: true},
 	}}})
 	tracker.SetConnectionAuditEnabled(true)
+	enableTestActivityDetails(tracker)
 	state := tracker.states["user:alice"]
 	metadata := adapter.InboundContext{
 		Source:      M.Socksaddr{Addr: netip.MustParseAddr("198.51.100.10"), Port: 51000},
@@ -148,6 +153,7 @@ func TestConnectionAuditOldCloseDoesNotAffectReenabledGeneration(t *testing.T) {
 	oldKey := tracker.recordConnectionStart(state, metadata, nil, "tcp")
 	tracker.SetConnectionAuditEnabled(false)
 	tracker.SetConnectionAuditEnabled(true)
+	enableTestActivityDetails(tracker)
 	newKey := tracker.recordConnectionStart(state, metadata, nil, "tcp")
 	if oldKey == newKey {
 		t.Fatalf("audit key generation was reused: %q", oldKey)
@@ -182,6 +188,7 @@ func TestConnectionPresenceEmitsAuthenticationPayloadCloseAndRejection(t *testin
 		"alice": {UserID: 7, InboundID: 11, DeviceIDHash: "device-a", CredentialEpoch: 2, Billable: true},
 	}}})
 	tracker.SetConnectionAuditEnabled(true)
+	enableTestActivityDetails(tracker)
 	state := tracker.states["user:alice"]
 	metadata := adapter.InboundContext{
 		Source:      M.Socksaddr{Addr: netip.MustParseAddr("198.51.100.10"), Port: 51000},

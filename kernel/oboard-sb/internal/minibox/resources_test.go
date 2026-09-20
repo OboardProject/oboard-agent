@@ -106,6 +106,40 @@ func TestKernelRuntimeTuningFillsAvailableMemory(t *testing.T) {
 	}
 }
 
+func TestKernelBudgetByteBoundaries(t *testing.T) {
+	cases := []struct {
+		memory            uint64
+		before, at, after string
+		gc                [3]int
+	}{
+		{96 << 20, "micro", "micro", "micro", [3]int{50, 50, 70}},
+		{128 << 20, "micro", "micro", "compact", [3]int{70, 70, 70}},
+		{192 << 20, "compact", "compact", "compact", [3]int{70, 70, 80}},
+		{256 << 20, "compact", "compact", "small", [3]int{80, 80, 90}},
+		{512 << 20, "small", "standard", "standard", [3]int{90, 100, 100}},
+		{1 << 30, "standard", "performance", "performance", [3]int{100, 100, 100}},
+		{2 << 30, "performance", "performance", "performance", [3]int{100, 120, 120}},
+		{4 << 30, "performance", "high", "high", [3]int{120, 150, 150}},
+	}
+	for _, tc := range cases {
+		for i, want := range []string{tc.before, tc.at, tc.after} {
+			memory := tc.memory - 1 + uint64(i)
+			got := kernelRuntimeTuning(RuntimeTuning{Profile: selectResourceProfile(memory, false), EffectiveMemoryBytes: memory})
+			if got.MemoryClass != want || got.GCPercent != tc.gc[i] || got.MemoryLimitBytes <= 0 {
+				t.Fatalf("memory=%d tuning=%#v want class %q and positive budget", memory, got, want)
+			}
+		}
+	}
+	for _, tc := range []struct{ host, cgroup, want uint64 }{
+		{0, 0, 0}, {0, 128 << 20, 128 << 20}, {2 << 30, 0, 2 << 30},
+		{2 << 30, 128 << 20, 128 << 20},
+	} {
+		if got := effectiveMemory(tc.host, tc.cgroup); got != tc.want {
+			t.Fatalf("effectiveMemory(%d, %d)=%d want %d", tc.host, tc.cgroup, got, tc.want)
+		}
+	}
+}
+
 func TestFillableGoLimitUsesResidual(t *testing.T) {
 	if got := fillableGoLimit(128<<20, 40<<20, 72<<20); got != 64<<20 {
 		t.Fatalf("128 fill = %d", got)

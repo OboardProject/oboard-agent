@@ -15,6 +15,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/OboardProject/oboard-agent/internal/activity"
+	"github.com/OboardProject/oboard-agent/internal/auditwire"
 	"github.com/OboardProject/oboard-agent/internal/logging"
 )
 
@@ -114,6 +116,9 @@ type agentAuditBucket struct {
 }
 
 type connectionAuditAccumulator struct {
+	activity         activity.Collector
+	collection       atomic.Pointer[auditwire.CollectionPolicy]
+	activityNow      func() time.Time
 	mu               sync.Mutex
 	buckets          map[string]*agentAuditBucket
 	activeByIdentity map[string]int64
@@ -128,11 +133,13 @@ type connectionAuditAccumulator struct {
 }
 
 type connectionAuditSession struct {
-	audit       *connectionAuditAccumulator
-	key         string
-	presenceKey string
-	started     time.Time
-	once        sync.Once
+	activityOwner    *connectionAuditAccumulator
+	activityIdentity activity.Identity
+	audit            *connectionAuditAccumulator
+	key              string
+	presenceKey      string
+	started          time.Time
+	once             sync.Once
 }
 
 type agentConnectionPresenceState struct {
@@ -140,9 +147,13 @@ type agentConnectionPresenceState struct {
 	lastEmittedAt time.Time
 }
 
-func newConnectionAuditAccumulator(enabled bool) *connectionAuditAccumulator {
-	a := &connectionAuditAccumulator{}
+func newConnectionAuditAccumulator(enabled bool, clocks ...func() time.Time) *connectionAuditAccumulator {
+	a := &connectionAuditAccumulator{activityNow: time.Now}
+	if len(clocks) > 0 && clocks[0] != nil {
+		a.activityNow = clocks[0]
+	}
 	a.enabled.Store(enabled)
+	a.activity.SetEnabled(enabled)
 	if enabled {
 		a.windowStart = time.Now().UTC()
 	}
@@ -153,6 +164,7 @@ func (a *connectionAuditAccumulator) setEnabled(enabled bool) {
 	if a == nil {
 		return
 	}
+	a.activity.SetEnabled(enabled)
 	wasEnabled := a.enabled.Swap(enabled)
 	if enabled {
 		if !wasEnabled {
@@ -182,7 +194,13 @@ func (a *connectionAuditAccumulator) start(item connectionAuditSnapshotItem) fun
 
 func (a *connectionAuditAccumulator) startSession(item connectionAuditSnapshotItem) *connectionAuditSession {
 	session := &connectionAuditSession{}
-	if a == nil || !a.enabled.Load() || item.UserID <= 0 || strings.TrimSpace(item.SourceIP) == "" {
+	if a == nil || !a.enabled.Load() || item.UserID <= 0 {
+		return session
+	}
+	source, _ := netip.ParseAddr(item.SourceIP)
+	session.activityOwner = a
+	session.activityIdentity = activity.Bind(item.UserID, item.InboundID, item.PathID, source)
+	if !a.collection.Load().Allows(item.UserID, a.activityNow()) || strings.TrimSpace(item.SourceIP) == "" {
 		return session
 	}
 	item.Network = strings.ToLower(strings.TrimSpace(item.Network))
@@ -196,7 +214,7 @@ func (a *connectionAuditAccumulator) startSession(item connectionAuditSnapshotIt
 	started := time.Now().UTC()
 	now := started.Format(time.RFC3339Nano)
 	a.mu.Lock()
-	if !a.enabled.Load() {
+	if !a.enabled.Load() || !a.collection.Load().Allows(item.UserID, a.activityNow()) {
 		a.mu.Unlock()
 		return session
 	}
@@ -252,7 +270,16 @@ func (a *connectionAuditAccumulator) startSession(item connectionAuditSnapshotIt
 }
 
 func (s *connectionAuditSession) addTraffic(upload bool, bytes int64) {
-	if s == nil || s.audit == nil || s.key == "" || bytes <= 0 {
+	if s != nil && bytes > 0 && s.activityOwner != nil && s.activityOwner.enabled.Load() {
+		var up, down uint64
+		if upload {
+			up = uint64(bytes)
+		} else {
+			down = uint64(bytes)
+		}
+		s.activityOwner.activity.Record(s.activityIdentity, s.activityOwner.activityNow().Unix(), up, down)
+	}
+	if s == nil || s.audit == nil || s.key == "" || bytes <= 0 || !s.audit.collection.Load().Allows(s.activityIdentity.UserID, s.audit.activityNow()) {
 		return
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
@@ -327,7 +354,7 @@ func (a *connectionAuditAccumulator) endPresence(key string) {
 }
 
 func (a *connectionAuditAccumulator) recordCredentialRejected(item connectionAuditSnapshotItem) {
-	if a == nil || !a.enabled.Load() || item.UserID <= 0 || strings.TrimSpace(item.SourceIP) == "" {
+	if a == nil || !a.enabled.Load() || item.UserID <= 0 || strings.TrimSpace(item.SourceIP) == "" || !a.collection.Load().Allows(item.UserID, a.activityNow()) {
 		return
 	}
 	if item.Network == "" {
@@ -562,6 +589,7 @@ func (r *Runner) setConnectionAuditPolicy(enabled bool) {
 		r.connectionAuditState = connectionAuditLocalState{}
 		r.connectionAuditStateLoaded = false
 		_ = os.Remove(r.connectionAuditStatePath())
+		_ = r.clearAccountActivityPending()
 		r.connectionAuditMu.Unlock()
 	}
 }

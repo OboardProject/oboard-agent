@@ -75,6 +75,7 @@ func TestBadVPNGatewayRelaysUDPAndCountsPayload(t *testing.T) {
 	dialed := make(chan netip.AddrPort, 1)
 	counter := &sshInboundCounter{}
 	audit := newConnectionAuditAccumulator(true)
+	audit.setCollectionPolicy(auditCollectionPolicy{Mode: "standard"})
 	gateway := &badVPNGateway{
 		stream:          server,
 		counter:         counter,

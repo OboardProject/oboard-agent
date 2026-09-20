@@ -22,6 +22,8 @@ import (
 	"github.com/sagernet/sing/service"
 	"golang.org/x/time/rate"
 
+	"github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/activity"
+	"github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/auditwire"
 	"github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/authorization"
 	"github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/protocol/familyselector"
 	"github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/runtimeuser"
@@ -30,6 +32,7 @@ import (
 const rateLimitIOChunk = 64 * 1024
 
 type RateLimitTracker struct {
+	activity      activity.Collector
 	usersBarrier  sync.RWMutex
 	usersFailed   atomic.Bool
 	snellParents  map[*parentConn]struct{}
@@ -54,6 +57,8 @@ type RateLimitTracker struct {
 	auditDropped          int64
 	auditWindowStart      time.Time
 	auditEnabled          atomic.Bool
+	auditDiagnostics      atomic.Bool
+	auditCollection       atomic.Pointer[auditwire.CollectionPolicy]
 	auditPresenceSequence atomic.Uint64
 	presenceStates        map[string]*connectionPresenceState
 	presenceEvents        []ConnectionPresenceEvent
@@ -160,6 +165,7 @@ func newRateLimitTracker(metadata RuntimeMetadata, now func() time.Time) *RateLi
 	_ = tracker.authorization.Update(metadata.Authorization)
 	auditEnabled := metadata.ConnectionAudit != nil && metadata.ConnectionAudit.Enabled
 	tracker.auditEnabled.Store(auditEnabled)
+	tracker.activity.SetEnabled(auditEnabled)
 	if auditEnabled {
 		tracker.auditWindowStart = now().UTC()
 	}
@@ -205,6 +211,7 @@ func (t *RateLimitTracker) SetConnectionAuditEnabled(enabled bool) {
 	if t == nil {
 		return
 	}
+	t.activity.SetEnabled(enabled)
 	wasEnabled := t.auditEnabled.Swap(enabled)
 	if enabled {
 		if !wasEnabled {
@@ -610,7 +617,7 @@ func (t *RateLimitTracker) RoutedConnection(ctx context.Context, conn net.Conn, 
 		return conn
 	}
 	admitted := !state.denied()
-	tracked := &trackedConn{ExtendedConn: bufio.NewExtendedConn(conn), ctx: ctx, tracker: t, state: state, identity: state.identity(), admitted: admitted, auditKey: t.recordConnectionStart(state, metadata, outbound, "tcp", admitted)}
+	tracked := &trackedConn{ExtendedConn: bufio.NewExtendedConn(conn), ctx: ctx, tracker: t, state: state, identity: state.identity(), admitted: admitted, activityIdentity: activity.Bind(config.policy.UserID, config.policy.InboundID, config.policy.PathID, metadata.Source.Addr), auditKey: t.recordConnectionStart(state, metadata, outbound, "tcp", admitted)}
 	t.registerConn(state.key, tracked)
 	if tracked.deny() {
 		_ = tracked.Close()
@@ -631,7 +638,7 @@ func (t *RateLimitTracker) RoutedPacketConnection(ctx context.Context, conn N.Pa
 		return conn
 	}
 	admitted := !state.denied()
-	tracked := &trackedPacketConn{PacketConn: conn, ctx: ctx, tracker: t, state: state, identity: state.identity(), admitted: admitted, auditKey: t.recordConnectionStart(state, metadata, outbound, "udp", admitted)}
+	tracked := &trackedPacketConn{PacketConn: conn, ctx: ctx, tracker: t, state: state, identity: state.identity(), admitted: admitted, activityIdentity: activity.Bind(config.policy.UserID, config.policy.InboundID, config.policy.PathID, metadata.Source.Addr), auditKey: t.recordConnectionStart(state, metadata, outbound, "udp", admitted)}
 	t.registerPacketConn(state.key, tracked)
 	if tracked.deny() {
 		_ = tracked.Close()
@@ -681,6 +688,7 @@ func AttachRuntimeTrackers(ctx context.Context, metadata RuntimeMetadata) *RateL
 }
 
 type trackedConn struct {
+	activityIdentity activity.Identity
 	N.ExtendedConn
 	ctx      context.Context
 	tracker  *RateLimitTracker
@@ -840,6 +848,9 @@ func (c *trackedConn) addTraffic(upload, download int64) {
 	if c == nil || c.state == nil {
 		return
 	}
+	if c.tracker != nil && c.tracker.auditEnabled.Load() && c.admitted && c.state.currentConfig().policy.Billable && upload >= 0 && download >= 0 {
+		c.tracker.activity.Record(c.activityIdentity, c.tracker.timeNow().Unix(), uint64(upload), uint64(download))
+	}
 	c.state.addTraffic(upload, download)
 	if c.tracker != nil {
 		c.tracker.recordConnectionPayload(c.auditKey, upload, download)
@@ -894,6 +905,7 @@ func (c *trackedCounterConn) countDownload(n int64) {
 }
 
 type trackedPacketConn struct {
+	activityIdentity activity.Identity
 	N.PacketConn
 	ctx      context.Context
 	tracker  *RateLimitTracker
@@ -958,6 +970,9 @@ func (c *trackedPacketConn) Close() error {
 func (c *trackedPacketConn) addTraffic(upload, download int64) {
 	if c == nil || c.state == nil {
 		return
+	}
+	if c.tracker != nil && c.tracker.auditEnabled.Load() && c.admitted && c.state.currentConfig().policy.Billable && upload >= 0 && download >= 0 {
+		c.tracker.activity.Record(c.activityIdentity, c.tracker.timeNow().Unix(), uint64(upload), uint64(download))
 	}
 	c.state.addTraffic(upload, download)
 	if c.tracker != nil {

@@ -53,6 +53,39 @@ jobs:
           cache-dependency-path: |
             go.sum
             kernel/oboard-sb/go.sum
+      - name: Verify release source before signing
+        shell: bash
+        run: |
+          tools=$(mktemp -d "$RUNNER_TEMP/oboard-verify.XXXXXX")
+          cleanup() {
+            local status=$?
+            if ! chmod -R u+w "$tools" || ! rm -rf "$tools"; then
+              echo 'Failed to clean verification tools' >&2
+              if [ "$status" -eq 0 ]; then status=1; fi
+            fi
+            exit "$status"
+          }
+          trap cleanup EXIT
+          export CGO_ENABLED=0 GOWORK=off GOBIN="$tools/bin" GOCACHE="$tools/go" GOMODCACHE="$tools/mod" GOTMPDIR="$tools/tmp"
+          mkdir -p "$GOBIN" "$GOCACHE" "$GOMODCACHE" "$GOTMPDIR"
+          go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
+          export PATH="$GOBIN:$PATH" OBOARD_VERIFY_CACHE_ROOT="$tools/verify"
+          ./scripts/test-verify-release.sh
+          ./scripts/verify-release.sh
+      - name: Verify real kernel process recovery
+        shell: bash
+        run: |
+          scope=$(mktemp -d "$RUNNER_TEMP/oboard-process.XXXXXX")
+          cleanup() { result=$?; chmod -R u+w "$scope" && rm -rf "$scope" || result=1; exit "$result"; }
+          trap cleanup EXIT
+          export OBOARD_PROCESS_WORKSPACE="$scope"
+          export OBOARD_PROCESS_KERNEL="$scope/dist/process-fixtures/old/oboard-sb"
+          export OBOARD_PROCESS_KERNEL_NEXT="$scope/dist/process-fixtures/next/oboard-sb"
+          export OBOARD_PROCESS_MANIFEST="$scope/dist/process-fixtures/manifest.json"
+          export GOCACHE="$scope/go" GOMODCACHE="$scope/mod" GOTMPDIR="$scope/tmp" TMPDIR="$scope/tmp"
+          mkdir -p "$GOCACHE" "$GOMODCACHE" "$GOTMPDIR"
+          bash scripts/build-process-fixtures.sh
+          bash scripts/verify-process-faults.sh --all
       - name: Require Agent release signing key
         env:
           SIGNING_KEY: ${{ secrets.OBOARD_RELEASE_SIGNING_KEY }}

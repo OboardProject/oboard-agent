@@ -208,7 +208,7 @@ func New(cfg Config) *Runner {
 	if profile == StorageProfileAuto {
 		profile = detectStorageProfile(cfg.StateDir, StorageProfileAuto)
 	}
-	runner := &Runner{coreClient: unixHTTPClient(coreSocketOrDefault(cfg.CoreSocket)), lastForwardProbe: map[int64]time.Time{}, resources: resources, tuning: tuning, hostInfo: detectHostStaticInfo(), logDir: "/var/log", logMaintenanceEvery: logMaintenanceIntervalForProfile(profile), monitoringMode: "lightweight", metricReportWake: make(chan struct{}, 1), authorizationSyncWake: make(chan struct{}, 1), usersSyncWake: make(chan struct{}, 1), connectionAudit: newConnectionAuditAccumulator(cfg.ConnectionAuditEnabled), clock: clock}
+	runner := &Runner{coreClient: unixHTTPClient(coreSocketOrDefault(cfg.CoreSocket)), lastForwardProbe: map[int64]time.Time{}, resources: resources, tuning: tuning, hostInfo: detectHostStaticInfo(), logDir: "/var/log", logMaintenanceEvery: logMaintenanceIntervalForProfile(profile), monitoringMode: "lightweight", metricReportWake: make(chan struct{}, 1), authorizationSyncWake: make(chan struct{}, 1), usersSyncWake: make(chan struct{}, 1), connectionAudit: newConnectionAuditAccumulator(cfg.ConnectionAuditEnabled, clock.Now), clock: clock}
 	runner.client = &http.Client{Timeout: 20 * time.Second, Transport: runner.lowOverheadTransport()}
 	runner.storeConfig(cfg)
 	runner.refreshLogLevel()
@@ -1409,6 +1409,7 @@ func (r *Runner) runControlSession(ctx context.Context, conn controlConn) error 
 			RequestID              string                         `json:"request_id"`
 			SessionID              string                         `json:"session_id"`
 			ConnectionAuditEnabled bool                           `json:"connection_audit_enabled"`
+			AuditCollection        *auditCollectionPolicy         `json:"audit_collection"`
 			ControllerTime         time.Time                      `json:"ts"`
 		}
 		if err := json.Unmarshal(data, &typed); err != nil {
@@ -1425,6 +1426,7 @@ func (r *Runner) runControlSession(ctx context.Context, conn controlConn) error 
 			r.setMonitoringPolicy(typed.MonitoringMode)
 			r.applyControllerLatencyProbePlan(typed.LatencyProbePlan)
 			r.setConnectionAuditPolicy(typed.ConnectionAuditEnabled)
+			r.setAuditCollectionPolicy(typed.AuditCollection)
 			// A reconnect may have missed a revoke pushed while the link was
 			// down; the independent lane pulls the current snapshot now.
 			r.wakeAuthorizationSync()
@@ -1498,6 +1500,7 @@ func (r *Runner) runControlSession(ctx context.Context, conn controlConn) error 
 			r.setMonitoringPolicy(typed.MonitoringMode)
 			r.applyControllerLatencyProbePlan(typed.LatencyProbePlan)
 			r.setConnectionAuditPolicy(typed.ConnectionAuditEnabled)
+			r.setAuditCollectionPolicy(typed.AuditCollection)
 			_ = r.maybeRunPeriodicDNSBenchmark(ctx)
 			_ = r.maybeRunPeriodicForwardProbes(ctx)
 			_ = writeMessage(map[string]any{"type": "health_report", "health_report": r.Probe(false)}, false)
@@ -2179,6 +2182,7 @@ func (r *Runner) updateAgentConfig(patch Config, fields map[string]json.RawMessa
 		r.connectionAuditState = connectionAuditLocalState{}
 		r.connectionAuditStateLoaded = false
 		_ = os.Remove(r.connectionAuditStatePath())
+		_ = r.clearAccountActivityPending()
 		r.connectionAuditMu.Unlock()
 	}
 	if current.LogLevel != next.LogLevel || current.LogLevelExpiresAt != next.LogLevelExpiresAt {
@@ -3729,6 +3733,12 @@ func (r *Runner) agentCapabilities(kernelCapabilities []string) []string {
 		"runtime_users_snell_psk_control_v1",
 		model.AgentCapabilityHostPower,
 		model.AgentCapabilityStealth)
+	for _, capability := range kernelCapabilities {
+		if capability == "account_activity_local_v1" {
+			capabilities = append(capabilities, "account_activity_v1")
+			break
+		}
+	}
 	if r.stealthOn() {
 		capabilities = append(capabilities, model.AgentCapabilityStealthActive)
 	}
