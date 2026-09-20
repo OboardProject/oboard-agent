@@ -25,7 +25,7 @@ type HostPowerTaskPayload struct {
 	ServerID          int64           `json:"server_id"`
 	Source            string          `json:"source"`
 	RunID             string          `json:"run_id"`
-	ScriptRevisionID  int64           `json:"script_revision_id,omitempty"`
+	PluginRevisionID  int64           `json:"plugin_revision_id,omitempty"`
 	TriggerBindingID  int64           `json:"trigger_binding_id,omitempty"`
 	GrantID           int64           `json:"grant_id,omitempty"`
 	IssuedAt          time.Time       `json:"issued_at"`

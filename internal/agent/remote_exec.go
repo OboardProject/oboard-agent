@@ -77,6 +77,9 @@ func (r *Runner) executeRemoteExecTask(task model.AgentTask) (string, string) {
 }
 
 func (r *Runner) validateRemoteExecPayload(payload model.RemoteExecTaskPayload) error {
+	if payload.Origin != model.RemoteExecOriginMCP && payload.Origin != model.RemoteExecOriginPanel {
+		return errors.New("remote exec requires an MCP or panel origin")
+	}
 	if strings.TrimSpace(payload.RequestID) == "" {
 		return errors.New("request_id is required")
 	}
@@ -321,14 +324,21 @@ func (r *Runner) executeRemoteOperationTask(task model.AgentTask) (string, strin
 		return "failed", jsonResult(err.Error())
 	}
 	gate := "mcp_enabled"
-	if payload.Origin == model.RemoteExecOriginScript {
-		gate = "scripts"
+	switch payload.Origin {
+	case model.RemoteExecOriginPlugin:
+		gate = "plugins"
+	case model.RemoteExecOriginMCP, model.RemoteExecOriginPanel:
+	default:
+		return "failed", jsonMap(map[string]any{"error": "unsupported remote operation origin", "code": "invalid_input"})
 	}
 	if !r.localGateAllows(gate) {
 		return "failed", jsonMap(map[string]any{"error": "agent local security policy denied remote operations", "code": "agent_local_gate_denied"})
 	}
 	result, err := r.runRemoteOperation(payload)
 	if err != nil {
+		if result == nil {
+			result = map[string]any{}
+		}
 		result["error"] = err.Error()
 		return "failed", jsonMap(result)
 	}
