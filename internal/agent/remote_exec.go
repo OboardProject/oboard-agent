@@ -185,6 +185,13 @@ func (r *Runner) runRemoteExec(payload model.RemoteExecTaskPayload) (model.Remot
 	cmd.Dir = cwd
 	cmd.Env = remoteExecEnv()
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// The default cancel signals only the direct child, so a shell that forked
+	// leaves the real worker running. Signal the group the child leads instead,
+	// and bound the wait: a grandchild still holding the inherited output pipe
+	// would otherwise keep Wait parked for the command's full natural runtime,
+	// long past the deadline the caller asked for.
+	cmd.Cancel = func() error { return signalProcessGroup(cmd, syscall.SIGTERM) }
+	cmd.WaitDelay = remoteExecGrace
 	var stdout, stderr limitedBuffer
 	stdout.limit = stdoutLimit
 	stderr.limit = stderrLimit
@@ -238,23 +245,32 @@ func remoteExecEnv() []string {
 	}
 }
 
+func signalProcessGroup(cmd *exec.Cmd, signal syscall.Signal) error {
+	if cmd == nil || cmd.Process == nil {
+		return nil
+	}
+	return syscall.Kill(-cmd.Process.Pid, signal)
+}
+
+// killProcessGroup clears whatever survived the command itself. The leader is
+// already reaped by Wait, so group membership is probed with signal 0 rather
+// than waited on: a second Wait on the same process would race the one that
+// collected the exit status.
 func killProcessGroup(cmd *exec.Cmd) {
 	if cmd == nil || cmd.Process == nil {
 		return
 	}
-	pgid := cmd.Process.Pid
-	_ = syscall.Kill(-pgid, syscall.SIGTERM)
-	done := make(chan struct{})
-	go func() {
-		_, _ = cmd.Process.Wait()
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(remoteExecGrace):
-		_ = syscall.Kill(-pgid, syscall.SIGKILL)
-		_, _ = cmd.Process.Wait()
+	if signalProcessGroup(cmd, syscall.SIGTERM) != nil {
+		return
 	}
+	deadline := time.Now().Add(remoteExecGrace)
+	for time.Now().Before(deadline) {
+		if signalProcessGroup(cmd, 0) != nil {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	_ = signalProcessGroup(cmd, syscall.SIGKILL)
 }
 
 func (r *Runner) trackRemoteExec(requestID string, run *remoteExecRun) {
@@ -279,8 +295,9 @@ func (r *Runner) cancelRemoteExec(requestID string) string {
 	if run == nil {
 		return "already_finished"
 	}
+	// Cancel signals the whole group and the run's own goroutine reaps it; a
+	// kill from here would race the Wait that still owns the exit status.
 	run.cancel()
-	killProcessGroup(run.cmd)
 	return "cancelling"
 }
 

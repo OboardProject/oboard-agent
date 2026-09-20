@@ -575,6 +575,10 @@ func TestConnectAcknowledgesReportedTaskOnWebSocket(t *testing.T) {
 	}
 }
 
+// standardAuditCollection is the detail-collection policy a Controller in
+// standard mode publishes, and the only mode under which presence exists.
+var standardAuditCollection = auditCollectionPolicy{Mode: "standard"}
+
 func TestConnectSendsPresenceWhileTaskAcknowledgementIsInFlight(t *testing.T) {
 	t.Setenv("OBOARD_DISABLE_PUBLIC_IP_DETECT", "1")
 	token := "agent-token"
@@ -594,7 +598,7 @@ func TestConnectSendsPresenceWhileTaskAcknowledgementIsInFlight(t *testing.T) {
 			if conn.ReadJSON(&initial) != nil {
 				return
 			}
-			if conn.WriteJSON(map[string]any{"type": "hello", "server_id": task.ServerID, "connection_audit_enabled": true}) != nil || conn.WriteJSON(map[string]any{"type": "task_request", "task": task, "signature_version": 2, "signature": signature}) != nil {
+			if conn.WriteJSON(map[string]any{"type": "hello", "server_id": task.ServerID, "connection_audit_enabled": true, "audit_collection": standardAuditCollection}) != nil || conn.WriteJSON(map[string]any{"type": "task_request", "task": task, "signature_version": 2, "signature": signature}) != nil {
 				return
 			}
 			seen := map[string]bool{}
@@ -618,6 +622,11 @@ func TestConnectSendsPresenceWhileTaskAcknowledgementIsInFlight(t *testing.T) {
 	defer server.Close()
 
 	r := New(Config{ControllerURL: server.URL, AgentID: "agent-1", AgentToken: token, StateDir: t.TempDir(), ServerID: task.ServerID, ConnectionAuditEnabled: true})
+	// Presence events exist only while detail collection is allowed; the light
+	// default keeps a session accounting-only and emits nothing to deliver. The
+	// policy matches the one the hello carries, so the session started here
+	// survives the handshake instead of being discarded as a policy switch.
+	r.connectionAudit.setCollectionPolicy(standardAuditCollection)
 	session := r.connectionAudit.startSession(connectionAuditSnapshotItem{UserID: 7, InboundID: 11, SourceIP: "198.51.100.10", Network: "tcp"})
 	defer session.finish()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

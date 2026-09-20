@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -176,8 +178,12 @@ func TestRemoteExecTimeoutKillsProcessGroup(t *testing.T) {
 		RequestID: "req-timeout-1",
 		Origin:    model.RemoteExecOriginMCP,
 		Privilege: model.PrivilegeRemoteShell,
-		Command:   model.RemoteExecCommand{Mode: model.RemoteExecModeShell, Shell: "sleep 30"},
-		Limits:    model.RemoteExecLimits{TimeoutSeconds: 1, StdoutBytes: 1024, StderrBytes: 1024},
+		// The worker is a grandchild that outlives the shell's own exit and
+		// keeps the inherited output pipe open, which is what a real timed-out
+		// command looks like. Killing only the direct child leaves it running
+		// and parks the wait for the sleep's full duration.
+		Command: model.RemoteExecCommand{Mode: model.RemoteExecModeShell, Shell: "sleep 30 & echo $! > " + filepath.Join(dir, "worker.pid") + "; wait"},
+		Limits:  model.RemoteExecLimits{TimeoutSeconds: 1, StdoutBytes: 1024, StderrBytes: 1024},
 	})
 	started := time.Now()
 	status, raw := runner.executeRemoteExecTask(model.AgentTask{PayloadJSON: string(payload)})
@@ -188,6 +194,23 @@ func TestRemoteExecTimeoutKillsProcessGroup(t *testing.T) {
 	_ = json.Unmarshal([]byte(raw), &result)
 	if result.Error != "remote_exec_timeout" && status != "failed" {
 		t.Fatalf("status=%s result=%s", status, raw)
+	}
+	recorded, err := os.ReadFile(filepath.Join(dir, "worker.pid"))
+	if err != nil {
+		t.Fatalf("worker pid was not recorded: %v", err)
+	}
+	worker, err := strconv.Atoi(strings.TrimSpace(string(recorded)))
+	if err != nil {
+		t.Fatalf("worker pid %q: %v", recorded, err)
+	}
+	// The reparented worker is reaped by init a moment after it is signalled,
+	// so a short poll separates "still running" from "not yet collected".
+	for deadline := time.Now().Add(2 * time.Second); syscall.Kill(worker, 0) == nil; {
+		if time.Now().After(deadline) {
+			_ = syscall.Kill(worker, syscall.SIGKILL)
+			t.Fatalf("worker %d survived the timeout", worker)
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 
