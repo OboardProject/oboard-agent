@@ -1817,7 +1817,7 @@ The script embeds the Controller URL that served it. Panel-generated commands
 therefore only expose the operation and, for first install, the one-time token:
 
 ```bash
-curl -fsSL 'http://controller:2787/install/agent.sh' | OBOARD_ENROLL_TOKEN='...' OBOARD_INSTALL_BBR=1 sh
+curl -fsSL 'http://controller:2787/install/agent.sh' | OBOARD_ENROLL_TOKEN='...' OBOARD_INSTALL_BBR=1 OBOARD_INSTALL_TCP_TUNING=0 sh
 curl -fsSL 'http://controller:2787/install/agent.sh' | sh -s -- update
 curl -fsSL 'http://controller:2787/install/agent.sh' | sh -s -- uninstall
 ```
@@ -1833,6 +1833,7 @@ Important environment variables:
 - `OBOARD_CONTROLLER_URL`: optional Controller base URL override.
 - `OBOARD_ENROLL_TOKEN`: one-time enrollment token for install.
 - `OBOARD_INSTALL_BBR`: `1` enables fixed `BBR + fq` setup during first install; `0` skips it.
+- `OBOARD_INSTALL_TCP_TUNING`: `1` applies the fixed TCP tuning set during first install; `0` skips it.
 - `OBOARD_AGENT_CONFIG`: defaults to `/etc/oboard-agent/config.json`.
 - `OBOARD_AGENT_STATE`: defaults to `/var/lib/oboard-agent`.
 - `OBOARD_INSTALL_DIR` or `INSTALL_DIR`: optional normalized absolute binary directory; defaults to `/opt/oboard`.
@@ -1840,6 +1841,8 @@ Important environment variables:
 - `OBOARD_UPDATE_SOURCE`: defaults to `panel`; advanced callers may override it.
 
 The script installs both `oboard-agent` and `oboard-sb` and writes systemd or OpenRC services depending on the host. Fresh interactive installs ask for the binary directory through `/dev/tty`; the choice is stored in `/etc/oboard-agent/install.env` with mode `0600`, and update, uninstall, and self-update operations reuse it. When `OBOARD_INSTALL_BBR=1`, first install also enables the existing kernel's `tcp_bbr` support with `fq` and writes `/etc/sysctl.d/99-oboard-bbr.conf` using mode `0600`. The installer never downloads a BBR script, replaces the kernel, or reboots, and update/uninstall paths do not run the BBR setup.
+
+When `OBOARD_INSTALL_TCP_TUNING=1`, first install also applies a fixed TCP tuning set: file descriptor limit, TCP/UDP buffer sizes, window and SACK options, IPv4 and IPv6 forwarding, `route_localnet`, `net.core.default_qdisc = fq`, and `net.ipv4.tcp_congestion_control = bbr`. The list is not configurable. Each key is applied on its own through `/proc/sys`: a key the running kernel does not expose (for example `net.ipv4.tcp_fack` on 4.15+) or refuses to change (a restricted container such as some LXC, where `/proc/sys` is read-only) is skipped, reported on stdout, and left out of the persisted file. Only the keys that actually applied are written to `/etc/sysctl.d/99-oboard-tcp.conf` (`/etc/sysctl.d/99-net-params.conf` in security-process mode) with mode `0600`, so a reboot never replays an unsupported key. When nothing applies, the installer keeps going without writing a file. The setup never changes the kernel or reboots, and update/uninstall paths do not run it. It is independent of `OBOARD_INSTALL_BBR`: the tuning set contains `fq` + `bbr` on its own, and both switches write consistent values into their own files.
 
 ### `GET /install/agent-self-update.sh`
 
