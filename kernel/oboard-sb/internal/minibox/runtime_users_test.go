@@ -68,6 +68,32 @@ func TestRuntimeUsersRestoreAfterRemovingInbound(t *testing.T) {
 			if _, err := old.Install(req); err != nil {
 				t.Fatal(err)
 			}
+			refreshed := append([]UserInstallEntry(nil), entries...)
+			refreshed[0].Policy.UsedBaselineBytes = 1024
+			refreshed[0].Policy.LeaseBytes = 2048
+			refreshed[0].Policy.ResetLeaseBytes = 4096
+			refreshedDigest, err := UsersDigest(10, oldScope, refreshed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			refresh := UserInstallRequest{Scope: oldScope, UsersRevision: 10, UsersDigest: refreshedDigest, Mode: "full", Entries: refreshed}
+			if status, err := old.Install(refresh); err != nil || status.UsersDigest != refreshedDigest {
+				t.Fatalf("same-revision lease refresh failed: status=%+v err=%v", status, err)
+			}
+			conflict := append([]UserInstallEntry(nil), refreshed...)
+			conflict[0].Credential.PSK = "different-snell-psk-123456"
+			conflictDigest, err := UsersDigest(10, oldScope, conflict)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := old.Install(UserInstallRequest{Scope: oldScope, UsersRevision: 10, UsersDigest: conflictDigest, Mode: "full", Entries: conflict}); !errors.Is(err, ErrUserInstallDigest) {
+				t.Fatalf("same-revision credential conflict accepted: %v", err)
+			}
+			if old.Status().UsersDigest != refreshedDigest {
+				t.Fatal("credential conflict changed installed snapshot")
+			}
+			entries, digest = refreshed, refreshedDigest
+			req = refresh
 			before, err := os.ReadFile(path)
 			if err != nil {
 				t.Fatal(err)

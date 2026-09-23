@@ -283,7 +283,20 @@ func (r *RuntimeUsers) Install(req UserInstallRequest) (UsersStatus, error) {
 				}
 				return r.statusLocked(), nil
 			}
-			return UsersStatus{}, ErrUserInstallDigest
+			if req.Mode != "full" {
+				return UsersStatus{}, ErrUserInstallDigest
+			}
+			currentContent, err := userSnapshotContentDigest(r.current)
+			if err != nil {
+				return UsersStatus{}, err
+			}
+			incomingContent, err := userSnapshotContentDigest(snapshot)
+			if err != nil {
+				return UsersStatus{}, err
+			}
+			if currentContent != incomingContent {
+				return UsersStatus{}, ErrUserInstallDigest
+			}
 		}
 	}
 	if r.tracker != nil {
@@ -530,6 +543,17 @@ func UserSnapshotDigest(snapshot *UserSnapshot) (string, error) {
 		return "", ErrUserInstallIllegal
 	}
 	return UsersDigest(snapshot.Revision, snapshot.Scope, snapshot.Entries)
+}
+
+func userSnapshotContentDigest(snapshot *UserSnapshot) (string, error) {
+	stable := make([]UserInstallEntry, len(snapshot.Entries))
+	for i, entry := range snapshot.Entries {
+		entry.Policy.UsedBaselineBytes = 0
+		entry.Policy.LeaseBytes = 0
+		entry.Policy.ResetLeaseBytes = 0
+		stable[i] = entry
+	}
+	return UsersDigest(0, snapshot.Scope, stable)
 }
 
 // UsersDigest is the shared canonical identity of a user snapshot. Controller
