@@ -11,6 +11,16 @@ OUT_DIR=${OUT_DIR:-$AGENT_DIR/dist/release}
 PLATFORMS=${OBOARD_PLATFORMS:-"linux/amd64 linux/arm64 windows/amd64"}
 REPO=${OBOARD_AGENT_REPO:-OboardProject/oboard-agent}
 SIGNING_KEY=${OBOARD_RELEASE_SIGNING_KEY:-}
+# STAGE splits the release so CI can compile platforms on parallel runners
+# without handing them the signing key:
+#   build    compile PLATFORMS into OUT_DIR (binaries only, no manifest)
+#   package  sign a manifest over the PLATFORMS binaries already in OUT_DIR
+#   all      both, in one process (default; local builds)
+STAGE=${OBOARD_RELEASE_STAGE:-all}
+case "$STAGE" in
+  all|build|package) ;;
+  *) echo "OBOARD_RELEASE_STAGE must be all, build, or package" >&2; exit 2 ;;
+esac
 SING_BOX_MODULE_VERSION=$(go -C "$KERNEL_DIR" list -m -f '{{.Version}}' github.com/sagernet/sing-box)
 if [ -n "${SING_BOX_VERSION:-}" ] && [ "${SING_BOX_VERSION#v}" != "${SING_BOX_MODULE_VERSION#v}" ]; then
   echo "SING_BOX_VERSION does not match the actual module dependency" >&2
@@ -25,13 +35,28 @@ case "$SING_BOX_VERSION_VALUE" in
     ;;
 esac
 
-if [ -z "$SIGNING_KEY" ] && [[ "$VERSION_VALUE" != *dev* && "$BUILD_VALUE" != dev ]]; then
-  echo "OBOARD_RELEASE_SIGNING_KEY is required for production release builds" >&2
-  exit 1
-fi
-RELEASE_PUBLIC_KEY=""
+# A build stage never sees the signing key, so it takes the public key the
+# binaries embed from OBOARD_RELEASE_PUBLIC_KEY. Whenever the signing key is
+# present it is authoritative, and a supplied public key must match it: the
+# manifest would otherwise be signed by a key the shipped Agent does not trust.
+RELEASE_PUBLIC_KEY=${OBOARD_RELEASE_PUBLIC_KEY:-}
 if [ -n "$SIGNING_KEY" ]; then
-  RELEASE_PUBLIC_KEY=$(go -C "$AGENT_DIR" run ./scripts/print_release_public_key.go)
+  derived_public_key=$(go -C "$AGENT_DIR" run ./scripts/print_release_public_key.go)
+  if [ -n "$RELEASE_PUBLIC_KEY" ] && [ "$RELEASE_PUBLIC_KEY" != "$derived_public_key" ]; then
+    echo "OBOARD_RELEASE_PUBLIC_KEY does not match OBOARD_RELEASE_SIGNING_KEY" >&2
+    exit 1
+  fi
+  RELEASE_PUBLIC_KEY=$derived_public_key
+fi
+if [[ "$VERSION_VALUE" != *dev* && "$BUILD_VALUE" != dev ]]; then
+  if [ "$STAGE" != build ] && [ -z "$SIGNING_KEY" ]; then
+    echo "OBOARD_RELEASE_SIGNING_KEY is required for production release builds" >&2
+    exit 1
+  fi
+  if [ -z "$RELEASE_PUBLIC_KEY" ]; then
+    echo "OBOARD_RELEASE_PUBLIC_KEY is required to build production release binaries" >&2
+    exit 1
+  fi
 fi
 
 AGENT_LDFLAGS="-s -w -X github.com/OboardProject/oboard-agent/internal/version.Version=$VERSION_VALUE -X github.com/OboardProject/oboard-agent/internal/version.Build=$BUILD_VALUE -X github.com/OboardProject/oboard-agent/internal/version.Commit=$COMMIT_VALUE -X github.com/OboardProject/oboard-agent/internal/version.Date=$DATE_VALUE -X github.com/OboardProject/oboard-agent/internal/version.ReleasePublicKey=$RELEASE_PUBLIC_KEY"
@@ -51,7 +76,9 @@ require_kernel_tag() {
 require_kernel_tag with_utls
 require_kernel_tag with_gvisor
 
-rm -rf "$OUT_DIR"
+if [ "$STAGE" != package ]; then
+  rm -rf "$OUT_DIR"
+fi
 mkdir -p "$OUT_DIR/bin"
 files_json="[]"
 
@@ -72,9 +99,8 @@ PY
 )
 }
 
-for platform in $PLATFORMS; do
-  os=${platform%/*}
-  arch=${platform#*/}
+build_platform() {
+  local os=$1 arch=$2
   echo "==> Building oboard-agent $os/$arch"
   mkdir -p "$OUT_DIR/bin/$os-$arch"
   CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go -C "$AGENT_DIR" build -trimpath -ldflags "$AGENT_LDFLAGS" -o "$OUT_DIR/bin/$os-$arch/oboard-agent" ./cmd/agent
@@ -84,9 +110,29 @@ for platform in $PLATFORMS; do
   cp "$OUT_DIR/oboard-realm-$os-$arch" "$OUT_DIR/bin/$os-$arch/oboard-realm"
   cp "$OUT_DIR/bin/$os-$arch/oboard-agent" "$OUT_DIR/oboard-agent-$os-$arch"
   cp "$OUT_DIR/bin/$os-$arch/oboard-sb" "$OUT_DIR/oboard-sb-$os-$arch"
-  add_file_manifest "oboard-agent-$os-$arch" agent "$os" "$arch" "$OUT_DIR/oboard-agent-$os-$arch"
-  add_file_manifest "oboard-sb-$os-$arch" sb "$os" "$arch" "$OUT_DIR/oboard-sb-$os-$arch"
-  add_file_manifest "oboard-realm-$os-$arch" realm "$os" "$arch" "$OUT_DIR/oboard-realm-$os-$arch"
+}
+
+if [ "$STAGE" != package ]; then
+  for platform in $PLATFORMS; do
+    build_platform "${platform%/*}" "${platform#*/}"
+  done
+fi
+if [ "$STAGE" = build ]; then
+  echo "==> Agent release binaries written to $OUT_DIR (unsigned build stage)"
+  exit 0
+fi
+
+for platform in $PLATFORMS; do
+  os=${platform%/*}
+  arch=${platform#*/}
+  for component in agent sb realm; do
+    name="oboard-$component-$os-$arch"
+    if [ ! -f "$OUT_DIR/$name" ]; then
+      echo "Release binary $name is missing from $OUT_DIR" >&2
+      exit 1
+    fi
+    add_file_manifest "$name" "$component" "$os" "$arch" "$OUT_DIR/$name"
+  done
 done
 
 python3 - "$OUT_DIR/release-manifest.json" "$VERSION_VALUE" "$BUILD_VALUE" "$COMMIT_VALUE" "$DATE_VALUE" "$REPO" "$files_json" <<'PY'
