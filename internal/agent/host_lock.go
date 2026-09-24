@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -59,7 +58,7 @@ func (l *hostCoreLock) release() {
 	if l == nil || l.file == nil {
 		return
 	}
-	_ = syscall.Flock(int(l.file.Fd()), syscall.LOCK_UN)
+	unlockHostFile(l.file)
 	_ = l.file.Close()
 	l.file = nil
 }
@@ -86,11 +85,11 @@ func (r *Runner) acquireHostCoreLock(timeout time.Duration) (*hostCoreLock, erro
 	}
 	deadline := time.Now().Add(timeout)
 	for {
-		if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err == nil {
+		if err := tryLockHostFile(file); err == nil {
 			_ = file.Truncate(0)
 			_, _ = file.WriteAt([]byte(fmt.Sprintf("agent %d\n", os.Getpid())), 0)
 			return &hostCoreLock{file: file}, nil
-		} else if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EAGAIN) {
+		} else if !hostLockContended(err) {
 			// The filesystem does not support advisory locking. Proceed rather
 			// than block every deployment on a coordination aid.
 			_ = file.Close()
@@ -120,11 +119,11 @@ func (r *Runner) acquireStrictHostLock(timeout time.Duration) (*hostCoreLock, er
 	}
 	deadline := time.Now().Add(timeout)
 	for {
-		if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err == nil {
+		if err := tryLockHostFile(file); err == nil {
 			_ = file.Truncate(0)
 			_, _ = file.WriteAt([]byte(fmt.Sprintf("agent %d host-power\n", os.Getpid())), 0)
 			return &hostCoreLock{file: file}, nil
-		} else if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EAGAIN) {
+		} else if !hostLockContended(err) {
 			_ = file.Close()
 			return nil, err
 		}

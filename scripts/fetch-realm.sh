@@ -13,18 +13,25 @@ OUT_DIR=${1:?output directory is required}
 OS_VALUE=${2:?target os is required}
 ARCH_VALUE=${3:?target arch is required}
 
-if [ "$OS_VALUE" != linux ]; then
-  echo "realm is bundled for linux only, got $OS_VALUE" >&2
-  exit 2
-fi
+# Linux uses the static musl build. Windows uses the MinGW build, which links
+# only system DLLs; the MSVC build needs the Visual C++ runtime, which a fresh
+# Windows Server does not ship.
+case "$OS_VALUE" in
+  linux) TARGETS_KEY=targets ;;
+  windows) TARGETS_KEY=windows_targets ;;
+  *)
+    echo "realm is bundled for linux and windows only, got $OS_VALUE" >&2
+    exit 2
+    ;;
+esac
 
-read -r REALM_VERSION REALM_ASSET REALM_SHA256 REALM_LICENSE_SHA256 < <(python3 - "$MANIFEST" "$ARCH_VALUE" <<'PY'
+read -r REALM_VERSION REALM_ASSET REALM_SHA256 REALM_LICENSE_SHA256 < <(python3 - "$MANIFEST" "$TARGETS_KEY" "$ARCH_VALUE" <<'PY'
 import json, sys
 manifest = json.load(open(sys.argv[1]))
-arch = sys.argv[2]
-target = manifest.get("targets", {}).get(arch)
+key, arch = sys.argv[2], sys.argv[3]
+target = manifest.get(key, {}).get(arch)
 if not target:
-    sys.exit(f"realm-manifest.json does not pin an asset for {arch}")
+    sys.exit(f"realm-manifest.json does not pin a {key} asset for {arch}")
 print(manifest["version"], target["asset"], target["sha256"], manifest["license_sha256"])
 PY
 )
@@ -48,8 +55,9 @@ if [ "$actual" != "$REALM_SHA256" ]; then
   exit 1
 fi
 
-# Upstream ships a single stripped static binary named realm at the archive
-# root. Reject anything else rather than installing an unexpected payload.
+# Upstream ships a single stripped binary named realm at the archive root,
+# without an .exe suffix on Windows as well. Reject anything else rather than
+# installing an unexpected payload.
 contents=$(tar -tzf "$tmp/$REALM_ASSET")
 if [ "$contents" != "realm" ]; then
   echo "Unexpected layout in $REALM_ASSET:" >&2

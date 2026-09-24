@@ -100,7 +100,7 @@ func agentConfigPath(cfg Config) string {
 	if cfg.ConfigPath != "" {
 		return cfg.ConfigPath
 	}
-	return "/etc/oboard-agent/config.json"
+	return DefaultConfigPath()
 }
 
 // logMaintenanceInterval is the rotation sweep cadence for the current storage

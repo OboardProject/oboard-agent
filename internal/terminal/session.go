@@ -113,6 +113,9 @@ func BuildSession(req Request) (SessionSpec, error) {
 	if err != nil {
 		return SessionSpec{}, err
 	}
+	if spec, handled, err := buildPlatformSession(mode, req); handled {
+		return spec, err
+	}
 	files := req.Files.withDefaults()
 	account := req.Account
 	if account == nil {

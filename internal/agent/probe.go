@@ -8,7 +8,6 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -56,27 +55,24 @@ const firstCPUSampleWait = 250 * time.Millisecond
 
 func detectHostStaticInfo() hostStaticInfo {
 	info := hostStaticInfo{CPUName: runtime.GOARCH, CPUCores: runtime.NumCPU(), Kernel: kernel()}
-	if runtime.GOOS == "linux" {
-		name, cores := linuxCPUInfo()
-		if name != "" {
-			info.CPUName = name
-		}
-		if cores > 0 {
-			info.CPUCores = cores
-		}
-		info.Distro = detectDistroInfo()
+	if runtime.GOOS != "linux" {
+		return platformHostStaticInfo(info)
 	}
+	name, cores := linuxCPUInfo()
+	if name != "" {
+		info.CPUName = name
+	}
+	if cores > 0 {
+		info.CPUCores = cores
+	}
+	info.Distro = detectDistroInfo()
 	return info
 }
 
 func sampleSystemProbe(cpuName string, previousCPU procCPU) (systemProbe, procCPU) {
 	p := systemProbe{CPUName: firstNonEmpty(cpuName, runtime.GOARCH)}
 	if runtime.GOOS != "linux" {
-		var mem runtime.MemStats
-		runtime.ReadMemStats(&mem)
-		p.AgentMemoryBytes = mem.Sys
-		p.MemoryUsedBytes = mem.Sys
-		return p, procCPU{}
+		return samplePlatformSystemProbe(p, previousCPU)
 	}
 	if total, used := linuxMemory(); total > 0 {
 		p.MemoryTotalBytes = total
@@ -89,7 +85,7 @@ func sampleSystemProbe(cpuName string, previousCPU procCPU) (systemProbe, procCP
 		runtime.ReadMemStats(&mem)
 		p.AgentMemoryBytes = mem.Sys
 	}
-	if used, total := linuxDiskUsage("/"); total > 0 {
+	if used, total := hostDiskUsage(); total > 0 {
 		p.DiskUsedBytes = used
 		p.DiskTotalBytes = total
 	}
@@ -127,19 +123,6 @@ func clampCPUPercent(value float64) float64 {
 	}
 	// One decimal keeps UI stable without pretending sub-percent precision.
 	return float64(int(value*10+0.5)) / 10
-}
-
-func linuxDiskUsed(path string) uint64 {
-	used, _ := linuxDiskUsage(path)
-	return used
-}
-
-func linuxDiskUsage(path string) (used, total uint64) {
-	var st syscall.Statfs_t
-	if err := syscall.Statfs(path, &st); err != nil {
-		return 0, 0
-	}
-	return diskUsedBytes(st.Blocks, st.Bfree, int64(st.Bsize)), diskTotalBytes(st.Blocks, int64(st.Bsize))
 }
 
 func diskUsedBytes(blocks, free uint64, blockSize int64) uint64 {
@@ -455,7 +438,14 @@ func unquoteOSRelease(v string) string {
 	return v
 }
 
+// serviceManagerWindows names the Windows service control manager. Both the
+// Agent and the kernel run as SCM services there.
+const serviceManagerWindows = "windows-scm"
+
 func detectServiceManager() string {
+	if runtime.GOOS == "windows" {
+		return serviceManagerWindows
+	}
 	if runtime.GOOS != "linux" {
 		return "unsupported"
 	}

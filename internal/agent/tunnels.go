@@ -16,7 +16,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/OboardProject/oboard-agent/internal/core"
@@ -1284,7 +1283,7 @@ func sshTunnelProcessAlive(cmd *exec.Cmd) bool {
 	if cmd == nil || cmd.Process == nil {
 		return false
 	}
-	return syscall.Kill(cmd.Process.Pid, syscall.Signal(0)) == nil
+	return processAlive(cmd.Process.Pid)
 }
 
 func sshTunnelWaitExit(cmd *exec.Cmd, waitCh <-chan error) (error, bool) {

@@ -4,7 +4,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -55,19 +54,9 @@ func filesystemStats(path string) (StorageFilesystemStats, error) {
 	} else if !info.IsDir() {
 		check = filepath.Dir(check)
 	}
-	var st syscall.Statfs_t
-	if err := syscall.Statfs(check, &st); err != nil {
+	total, avail, used, err := filesystemUsage(check)
+	if err != nil {
 		return StorageFilesystemStats{}, err
-	}
-	bsize := int64(st.Bsize)
-	if bsize <= 0 {
-		bsize = 4096
-	}
-	total := uint64(st.Blocks) * uint64(bsize)
-	avail := uint64(st.Bavail) * uint64(bsize)
-	var used uint64
-	if st.Blocks > st.Bfree {
-		used = (st.Blocks - st.Bfree) * uint64(bsize)
 	}
 	var pct float64
 	if total > 0 {

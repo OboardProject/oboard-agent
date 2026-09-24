@@ -205,7 +205,9 @@ func (c *managementConsole) serviceAction(action string) {
 		fmt.Fprintf(c.out, "%s %s... ", labels[action], service)
 		var output string
 		var err error
-		if c.manager == "systemd" {
+		if c.manager == serviceManagerWindows {
+			err = windowsServiceAction(action, service)
+		} else if c.manager == "systemd" {
 			output, err = commandOutput(20*time.Second, "systemctl", action, service)
 		} else {
 			output, err = commandOutput(20*time.Second, "rc-service", service, action)
@@ -226,7 +228,12 @@ func (c *managementConsole) serviceAction(action string) {
 func (c *managementConsole) serviceStatus(service string) string {
 	var output string
 	var err error
-	if c.manager == "systemd" {
+	if c.manager == serviceManagerWindows {
+		output = "active"
+		if err = windowsServiceActive(service); err != nil {
+			output = "stopped"
+		}
+	} else if c.manager == "systemd" {
 		output, err = commandOutput(5*time.Second, "systemctl", "is-active", service)
 	} else {
 		output, err = commandOutput(5*time.Second, "rc-service", service, "status")
@@ -448,7 +455,7 @@ func loadManagementConfig(defaultPath, configPath, keyPath string) (string, Conf
 		}
 		key = loaded
 	}
-	candidates := []string{strings.TrimSpace(os.Getenv("OBOARD_AGENT_CONFIG")), strings.TrimSpace(configPath), "/etc/oboard-agent/config.json", defaultPath, "/root/.oboard-agent/config.json"}
+	candidates := []string{strings.TrimSpace(os.Getenv("OBOARD_AGENT_CONFIG")), strings.TrimSpace(configPath), DefaultConfigPath(), defaultPath, "/root/.oboard-agent/config.json"}
 	seen := map[string]bool{}
 	for _, path := range candidates {
 		path = strings.TrimSpace(path)
@@ -496,6 +503,8 @@ func friendlyManager(manager string) string {
 		return "systemd"
 	case "openrc":
 		return "OpenRC"
+	case serviceManagerWindows:
+		return "Windows 服务管理器"
 	default:
 		return "未识别"
 	}

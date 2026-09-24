@@ -88,3 +88,18 @@ func invokeHostPowerCommand(action string) error {
 		return errors.New("capability_unsupported")
 	}
 }
+
+// windowsServiceAction runs a local management console action on an SCM
+// service.
+func windowsServiceAction(action, service string) error {
+	switch action {
+	case "start":
+		return windowsServiceStart(service, 20*time.Second)
+	case "stop":
+		return windowsServiceStop(service, 20*time.Second)
+	case "restart":
+		return windowsServiceRestart(service, 20*time.Second)
+	default:
+		return errors.New("unsupported service action")
+	}
+}

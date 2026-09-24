@@ -208,7 +208,7 @@ func New(cfg Config) *Runner {
 	if profile == StorageProfileAuto {
 		profile = detectStorageProfile(cfg.StateDir, StorageProfileAuto)
 	}
-	runner := &Runner{coreClient: unixHTTPClient(coreSocketOrDefault(cfg.CoreSocket)), lastForwardProbe: map[int64]time.Time{}, resources: resources, tuning: tuning, hostInfo: detectHostStaticInfo(), logDir: "/var/log", logMaintenanceEvery: logMaintenanceIntervalForProfile(profile), monitoringMode: "lightweight", metricReportWake: make(chan struct{}, 1), authorizationSyncWake: make(chan struct{}, 1), usersSyncWake: make(chan struct{}, 1), connectionAudit: newConnectionAuditAccumulator(cfg.ConnectionAuditEnabled, clock.Now), clock: clock}
+	runner := &Runner{coreClient: unixHTTPClient(coreSocketOrDefault(cfg.CoreSocket)), lastForwardProbe: map[int64]time.Time{}, resources: resources, tuning: tuning, hostInfo: detectHostStaticInfo(), logDir: platformLogDir(), logMaintenanceEvery: logMaintenanceIntervalForProfile(profile), monitoringMode: "lightweight", metricReportWake: make(chan struct{}, 1), authorizationSyncWake: make(chan struct{}, 1), usersSyncWake: make(chan struct{}, 1), connectionAudit: newConnectionAuditAccumulator(cfg.ConnectionAuditEnabled, clock.Now), clock: clock}
 	runner.client = &http.Client{Timeout: 20 * time.Second, Transport: runner.lowOverheadTransport()}
 	runner.storeConfig(cfg)
 	runner.refreshLogLevel()
@@ -323,7 +323,7 @@ func (r *Runner) stateDir() string {
 	if stateDir := strings.TrimSpace(r.Config().StateDir); stateDir != "" {
 		return stateDir
 	}
-	return "/var/lib/oboard-agent"
+	return DefaultStateDir()
 }
 
 // stealthOn reports whether this runner was started with a stealth key and
@@ -497,14 +497,14 @@ func saveConfigBytes(path string, cfg Config, key []byte) error {
 func (r *Runner) saveAgentConfig(cfg Config) error {
 	path := strings.TrimSpace(cfg.ConfigPath)
 	if path == "" {
-		path = "/etc/oboard-agent/config.json"
+		path = DefaultConfigPath()
 	}
 	return saveConfigBytes(path, cfg, r.Config().StealthKey)
 }
 
 func normalizeConfig(cfg Config) Config {
 	if cfg.StateDir == "" {
-		cfg.StateDir = "/var/lib/oboard-agent"
+		cfg.StateDir = DefaultStateDir()
 	}
 	if cfg.ResourceProfile == "" {
 		cfg.ResourceProfile = string(ResourceProfileAuto)
@@ -651,7 +651,7 @@ func validateManagedPath(field, value string, opts ...map[string][]string) error
 		// sing-box alternative after the first stable release with enforced
 		// oldest direct-upgrade version. Stealth installations carry a
 		// generated name from their identity instead.
-		if base != "oboard-sb" && base != "sing-box" && !basenameAllowed(base) {
+		if name := executableBase(base); name != "oboard-sb" && name != "sing-box" && !basenameAllowed(base) {
 			return fmt.Errorf("core_binary base name must be oboard-sb or sing-box")
 		}
 		// The Agent executes this path as root, so a matching base name is not
@@ -667,7 +667,7 @@ func validateManagedPath(field, value string, opts ...map[string][]string) error
 		// the Agent binary, so a directory allowlist would add no protection
 		// while making the install and execution paths disagree. Stealth
 		// installations carry a generated name from their identity instead.
-		if filepath.Base(cleaned) != "oboard-realm" && !basenameAllowed(filepath.Base(cleaned)) {
+		if executableBase(cleaned) != "oboard-realm" && !basenameAllowed(filepath.Base(cleaned)) {
 			return fmt.Errorf("realm_binary base name must be oboard-realm")
 		}
 	}
@@ -682,7 +682,7 @@ func unsafeManagedPathRune(r rune) bool {
 	if r < 0x20 || r == 0x7f {
 		return true
 	}
-	return strings.ContainsRune("'\"`$\\;&|<>()*?[]{}!#~ \t\n\r", r)
+	return strings.ContainsRune(managedPathUnsafeChars, r)
 }
 
 // allowedCoreBinaryDir reports whether a directory is an acceptable location
@@ -695,6 +695,11 @@ func allowedCoreBinaryDir(dir string) bool {
 			return true
 		}
 		if allowed == "/opt/oboard" && strings.HasPrefix(dir, allowed+string(filepath.Separator)) {
+			return true
+		}
+	}
+	for _, allowed := range platformCoreBinaryDirs() {
+		if strings.EqualFold(dir, filepath.Clean(allowed)) {
 			return true
 		}
 	}
@@ -713,7 +718,7 @@ func InstalledCoreBinary(executablePath string) string {
 	if err != nil {
 		return ""
 	}
-	candidate := filepath.Join(filepath.Dir(absolute), "oboard-sb")
+	candidate := filepath.Join(filepath.Dir(absolute), executableName("oboard-sb"))
 	if validateManagedPath("core_binary", candidate) != nil {
 		return ""
 	}
@@ -735,7 +740,7 @@ func InstalledRealmBinary(executablePath string) string {
 	if err != nil {
 		return ""
 	}
-	candidate := filepath.Join(filepath.Dir(absolute), "oboard-realm")
+	candidate := filepath.Join(filepath.Dir(absolute), executableName("oboard-realm"))
 	if validateManagedPath("realm_binary", candidate) != nil {
 		return ""
 	}
@@ -1992,6 +1997,8 @@ func (r *Runner) scheduleAgentRestartWith(schedule func() error) error {
 func (r *Runner) scheduleAgentRestartCommand() error {
 	service := r.agentService()
 	switch detectServiceManager() {
+	case serviceManagerWindows:
+		return scheduleWindowsAgentRestart(service)
 	case "systemd":
 		unit := fmt.Sprintf("%s-restart-%d", service, os.Getpid())
 		return runCommand(10*time.Second, "systemd-run", "--quiet", "--collect", "--on-active=5s", "--unit", unit, "systemctl", "restart", service)
@@ -2142,7 +2149,7 @@ func (r *Runner) updateAgentConfig(patch Config, fields map[string]json.RawMessa
 	coreIdentityChanged := current.CoreBinary != next.CoreBinary || current.CoreService != next.CoreService
 	path := next.ConfigPath
 	if path == "" {
-		path = "/etc/oboard-agent/config.json"
+		path = DefaultConfigPath()
 	}
 	r.coreLifecycleMu.Lock()
 	stoppedPreviousService := false
@@ -2265,6 +2272,9 @@ func (r *Runner) runNetworkDiagnostics(payloadJSON string) map[string]any {
 		commands["openrc_status"] = diagnosticCommand("rc-status", "-s")
 		commands["oboard_sb_status"] = diagnosticCommand("rc-service", r.coreService(), "status")
 		commands["oboard_agent_status"] = diagnosticCommand("rc-service", agentService, "status")
+	case serviceManagerWindows:
+		commands["oboard_sb_status"] = windowsServiceDiagnostic(r.coreService())
+		commands["oboard_agent_status"] = windowsServiceDiagnostic(agentService)
 	}
 	result["commands"] = commands
 	resourceCtx, resourceCancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -2347,18 +2357,18 @@ func (r *Runner) configPath() string {
 	if configPath := strings.TrimSpace(r.Config().ConfigPath); configPath != "" {
 		return configPath
 	}
-	return "/etc/oboard-agent/config.json"
+	return DefaultConfigPath()
 }
 
 // agentLogPath returns the agent service log path. In stealth mode the log
 // file carries the generated service name.
 func (r *Runner) agentLogPath() string {
-	return filepath.Join("/var/log", r.agentService()+".log")
+	return filepath.Join(platformLogDir(), r.agentService()+".log")
 }
 
 // coreLogPath returns the kernel service log path.
 func (r *Runner) coreLogPath() string {
-	return filepath.Join("/var/log", r.coreService()+".log")
+	return filepath.Join(platformLogDir(), r.coreService()+".log")
 }
 
 func (r *Runner) collectLogs(payloadJSON string) map[string]any {
@@ -2430,6 +2440,11 @@ func (r *Runner) collectServiceLog(service string, lines int) map[string]any {
 		}
 		item["ok"] = true
 		return item
+	case serviceManagerWindows:
+		item["manager"] = serviceManagerWindows
+		item["status"] = windowsServiceDiagnostic(service)
+		item["ok"] = true
+		return item
 	case "openrc":
 		item["manager"] = "openrc"
 		item["status"] = diagnosticCommand("rc-service", service, "status")
@@ -2453,6 +2468,9 @@ func serviceManager() string {
 	if serviceManagerOverride != nil {
 		return serviceManagerOverride()
 	}
+	if runtime.GOOS == "windows" {
+		return serviceManagerWindows
+	}
 	if _, err := exec.LookPath("systemctl"); err == nil {
 		if st, statErr := os.Stat("/run/systemd/system"); statErr == nil && st.IsDir() {
 			return "systemd"
@@ -2473,6 +2491,21 @@ func commandText(timeout time.Duration, name string, args ...string) string {
 		return err.Error()
 	}
 	return scrubDiagnosticOutput(out)
+}
+
+// windowsServiceDiagnostic reports an SCM service state in the same shape as
+// diagnosticCommand, since Windows has no status command to capture.
+func windowsServiceDiagnostic(service string) map[string]any {
+	item := map[string]any{"command": "scm query " + service, "available": true}
+	if err := windowsServiceActive(service); err != nil {
+		item["ok"] = false
+		item["error"] = err.Error()
+		item["output"] = "inactive"
+		return item
+	}
+	item["ok"] = true
+	item["output"] = "active"
+	return item
 }
 
 func diagnosticCommand(name string, args ...string) map[string]any {
@@ -3141,7 +3174,7 @@ func (r *Runner) coreHotReloadSupported() bool {
 	if r.stealthOn() {
 		return false
 	}
-	binary := strings.ToLower(filepath.Base(strings.TrimSpace(r.coreBinary())))
+	binary := strings.ToLower(executableBase(strings.TrimSpace(r.coreBinary())))
 	service := strings.ToLower(strings.TrimSpace(r.coreService()))
 	return binary != "oboard-sb" && service != "oboard-sb"
 }
@@ -3155,6 +3188,8 @@ func (r *Runner) coreServiceActive() error {
 
 func managedServiceActive(manager, service string) error {
 	switch manager {
+	case serviceManagerWindows:
+		return windowsServiceActive(service)
 	case "systemd":
 		return runCommand(3*time.Second, "systemctl", "is-active", "--quiet", service)
 	case "openrc":
@@ -3165,6 +3200,9 @@ func managedServiceActive(manager, service string) error {
 }
 
 func startManagedService(manager, service string) error {
+	if manager == serviceManagerWindows {
+		return windowsServiceStart(service, 20*time.Second)
+	}
 	if manager == "systemd" {
 		return runCommand(20*time.Second, "systemctl", "start", service)
 	}
@@ -3313,6 +3351,8 @@ func (r *Runner) restartCore() error {
 	switch restartCommand {
 	case "", "auto":
 		switch detectServiceManager() {
+		case serviceManagerWindows:
+			return windowsServiceRestart(r.coreService(), r.commandTimeout())
 		case "systemd":
 			return runCommand(r.commandTimeout(), "systemctl", "restart", r.coreService())
 		case "openrc":
@@ -3396,7 +3436,7 @@ func (r *Runner) validateSingBox(binary, path string, timeout time.Duration) err
 		}
 		return runCommand(timeout, binary, args...)
 	}
-	if filepath.Base(binary) == "oboard-sb" {
+	if executableBase(binary) == "oboard-sb" {
 		return runCommand(timeout, binary, "-check", "-config", path)
 	}
 	return runCommand(timeout, binary, "check", "-c", path)
@@ -3539,7 +3579,7 @@ func (r *Runner) Probe(force bool) model.HealthReport {
 	} else {
 		var currentCPU procCPU
 		probe, currentCPU = sampleSystemProbe(r.hostInfo.CPUName, lastCPU)
-		networkProbe, currentNetwork := sampleLinuxNetwork(lastNetwork, now)
+		networkProbe, currentNetwork := sampleHostNetwork(lastNetwork, now)
 		if currentNetwork.Valid {
 			probe.NetworkUploadBPS = networkProbe.NetworkUploadBPS
 			probe.NetworkDownloadBPS = networkProbe.NetworkDownloadBPS
@@ -3982,7 +4022,7 @@ func singBoxIdentity(binary string, timeout time.Duration) (string, []string) {
 		binary = detectCoreBinary()
 	}
 	out, err := commandOutput(timeout, binary, "-version")
-	if err != nil && filepath.Base(binary) == "oboard-sb" {
+	if err != nil && executableBase(binary) == "oboard-sb" {
 		out, err = commandOutput(timeout, "sing-box", "version")
 	}
 	if err != nil {
@@ -4056,6 +4096,9 @@ func detectCoreBinary() string {
 }
 
 func kernel() string {
+	if runtime.GOOS == "windows" {
+		return platformKernelVersion()
+	}
 	if runtime.GOOS == "linux" {
 		if b, err := os.ReadFile("/proc/sys/kernel/osrelease"); err == nil {
 			if v := strings.TrimSpace(string(b)); v != "" {

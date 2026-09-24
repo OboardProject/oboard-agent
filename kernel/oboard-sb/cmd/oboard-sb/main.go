@@ -49,11 +49,15 @@ func main() {
 	hy2IgnoreClientBandwidth := flag.Bool("hy2-ignore-client-bandwidth", false, "force Hysteria2 server bandwidth settings instead of client-advertised bandwidth")
 	hy2BrutalDebug := flag.Bool("hy2-brutal-debug", false, "enable Hysteria2 brutal congestion debug logging")
 	showVersion := flag.Bool("version", false, "print version and supported protocols")
+	logFile := flag.String("log-file", "", "append process output to this file; used where no service manager captures stdout")
 	flag.Parse()
 
 	if *showVersion {
 		printVersion()
 		return
+	}
+	if err := redirectProcessOutput(*logFile); err != nil {
+		log.Fatal(err)
 	}
 	stealthKey, keyErr := loadStealthKey(*keyPath)
 	if keyErr != nil {
@@ -105,6 +109,8 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	ctx, serviceDone := runUnderServiceManager(ctx, "oboard-sb")
+	defer serviceDone()
 	memoryReclaimer := minibox.StartMemoryReclaimer(ctx, runtimeTuning)
 	runtimeClock := minibox.NewRuntimeClock()
 	boxCtx := minibox.Context(context.Background(), runtimeClock)
@@ -285,7 +291,7 @@ func serveHealth(ctx context.Context, listen string, instance *box.Box, tracker 
 	}
 	if socketPath != "" {
 		defer os.Remove(socketPath)
-		if err := os.Chmod(socketPath, 0o600); err != nil {
+		if err := restrictLocalSocket(socketPath); err != nil {
 			_ = ln.Close()
 			return err
 		}

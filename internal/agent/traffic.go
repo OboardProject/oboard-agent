@@ -20,7 +20,6 @@ import (
 )
 
 const (
-	coreAPISocket                  = "/run/oboard-sb.sock"
 	trafficReportBatchSize         = 200
 	trafficStateSchemaV2           = 2
 	trafficSourceCore              = "core"
@@ -35,6 +34,8 @@ const (
 	trafficStatusEpochConflict     = "epoch_conflict"
 	trafficLeaseStaleAfter         = 24 * time.Hour
 )
+
+var coreAPISocket = defaultCoreAPISocket()
 
 type trafficSnapshotItem struct {
 	Key          string `json:"key"`

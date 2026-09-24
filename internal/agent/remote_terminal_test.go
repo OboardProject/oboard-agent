@@ -1,3 +1,5 @@
+//go:build !windows
+
 package agent
 
 import (
@@ -19,14 +21,13 @@ import (
 )
 
 func TestStartInteractivePTYDoesNotSetPgid(t *testing.T) {
-	ptmx, cmd, spec, err := startInteractivePTY(80, 24, terminal.ModeMinimal)
+	session, spec, err := startInteractivePTY(80, 24, terminal.ModeMinimal)
 	if err != nil {
 		t.Fatalf("start interactive pty: %v", err)
 	}
-	defer func() {
-		_ = ptmx.Close()
-		killProcessGroup(cmd)
-	}()
+	defer session.Close()
+	ptmx := session.(interface{ File() *os.File }).File()
+	cmd := session.(interface{ Command() *exec.Cmd }).Command()
 	if spec.Mode != terminal.ModeMinimal {
 		t.Fatalf("mode = %q", spec.Mode)
 	}

@@ -11,8 +11,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/OboardProject/oboard-agent/internal/model"
@@ -178,19 +178,22 @@ func (r *Runner) runRemoteExec(payload model.RemoteExecTaskPayload) (model.Remot
 	var cmd *exec.Cmd
 	switch payload.Command.Mode {
 	case model.RemoteExecModeShell:
+		if runtime.GOOS == "windows" {
+			return model.RemoteExecResult{}, errors.New("shell mode remote exec is not supported on Windows Agents yet; use argv mode")
+		}
 		cmd = exec.CommandContext(ctx, "/bin/sh", "-c", payload.Command.Shell)
 	default:
 		cmd = exec.CommandContext(ctx, payload.Command.Argv[0], payload.Command.Argv[1:]...)
 	}
 	cmd.Dir = cwd
 	cmd.Env = remoteExecEnv()
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.SysProcAttr = processGroupAttr()
 	// The default cancel signals only the direct child, so a shell that forked
 	// leaves the real worker running. Signal the group the child leads instead,
 	// and bound the wait: a grandchild still holding the inherited output pipe
 	// would otherwise keep Wait parked for the command's full natural runtime,
 	// long past the deadline the caller asked for.
-	cmd.Cancel = func() error { return signalProcessGroup(cmd, syscall.SIGTERM) }
+	cmd.Cancel = func() error { return terminateProcessGroup(cmd) }
 	cmd.WaitDelay = remoteExecGrace
 	var stdout, stderr limitedBuffer
 	stdout.limit = stdoutLimit
@@ -243,34 +246,6 @@ func remoteExecEnv() []string {
 		"LANG=C.UTF-8",
 		"LC_ALL=C.UTF-8",
 	}
-}
-
-func signalProcessGroup(cmd *exec.Cmd, signal syscall.Signal) error {
-	if cmd == nil || cmd.Process == nil {
-		return nil
-	}
-	return syscall.Kill(-cmd.Process.Pid, signal)
-}
-
-// killProcessGroup clears whatever survived the command itself. The leader is
-// already reaped by Wait, so group membership is probed with signal 0 rather
-// than waited on: a second Wait on the same process would race the one that
-// collected the exit status.
-func killProcessGroup(cmd *exec.Cmd) {
-	if cmd == nil || cmd.Process == nil {
-		return
-	}
-	if signalProcessGroup(cmd, syscall.SIGTERM) != nil {
-		return
-	}
-	deadline := time.Now().Add(remoteExecGrace)
-	for time.Now().Before(deadline) {
-		if signalProcessGroup(cmd, 0) != nil {
-			return
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	_ = signalProcessGroup(cmd, syscall.SIGKILL)
 }
 
 func (r *Runner) trackRemoteExec(requestID string, run *remoteExecRun) {
@@ -419,7 +394,7 @@ func (r *Runner) captureCommandOutput(name string, args ...string) (map[string]a
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, name, args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.SysProcAttr = processGroupAttr()
 	cmd.Env = remoteExecEnv()
 	out, err := cmd.Output()
 	result := map[string]any{"stdout": strings.TrimSpace(string(out))}

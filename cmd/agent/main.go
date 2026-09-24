@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 
@@ -81,7 +82,7 @@ func main() {
 	keyPath := flag.String("key", "", "stealth key file; decrypts the encrypted agent config and state")
 	controllerURL := flag.String("controller", "", "controller URL")
 	enrollOnly := flag.Bool("enroll-only", false, "enroll, save config, and exit")
-	stateDir := flag.String("state-dir", "/var/lib/oboard-agent", "agent state directory")
+	stateDir := flag.String("state-dir", agent.DefaultStateDir(), "agent state directory")
 	coreBinary := flag.String("core-binary", "", "proxy core binary; defaults to the oboard-sb binary installed beside the Agent")
 	coreService := flag.String("core-service", "", "system service to restart; defaults to oboard-sb")
 	resourceProfile := flag.String("resource-profile", "", "resource profile: auto, small, or large; default auto-detects memory and containers")
@@ -101,12 +102,16 @@ func main() {
 	verifyArch := flag.String("verify-arch", "", "release architecture")
 	verifyCoreRuntime := flag.Bool("verify-core-runtime", false, "verify that the running kernel serves the deployed configuration and the installed build, then exit")
 	install := flag.Bool("install", false, "print a systemd unit template")
+	logFile := flag.String("log-file", "", "append Agent output to this file; used where no service manager captures stdout")
 	flag.Parse()
 	enrollToken := consumeEnrollToken()
 	provided := providedFlags()
 	if *showVersion {
 		fmt.Println("OBoard Agent", version.String())
 		return
+	}
+	if err := redirectProcessOutput(*logFile); err != nil {
+		log.Fatal(err)
 	}
 	if *install {
 		printSystemd(*configPath)
@@ -193,6 +198,8 @@ func main() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	ctx, serviceDone := runUnderServiceManager(ctx, runner.Config().AgentService)
+	defer serviceDone()
 	if enrollToken != "" {
 		if cfg.ControllerURL == "" && (cfg.Stealth == nil || cfg.Stealth.ControllerAddr == "") {
 			log.Fatal("-controller is required when OBOARD_ENROLL_TOKEN is set")
@@ -243,6 +250,9 @@ func isManagementCommand(args []string) bool {
 }
 
 func defaultConfig() string {
+	if runtime.GOOS == "windows" {
+		return agent.DefaultConfigPath()
+	}
 	home, _ := os.UserHomeDir()
 	if home == "" {
 		return "/etc/oboard-agent/config.json"

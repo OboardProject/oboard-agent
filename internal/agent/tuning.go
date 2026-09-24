@@ -48,7 +48,7 @@ func validResourceProfile(profile string) bool {
 
 func DetectResourceInfo(requested string) ResourceInfo {
 	// The profile is based on capacity rather than current usage.
-	systemMemory, _ := linuxMemory()
+	systemMemory, _ := hostMemory()
 	cgroupLimit := positiveInt64ToUint64(detectedCgroupMemoryLimit())
 	virtualization, container := detectVirtualization()
 	effective := effectiveMemory(systemMemory, cgroupLimit)

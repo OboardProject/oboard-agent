@@ -36,7 +36,7 @@ func (r *Runner) uninstallAgent(payloadJSON string) (map[string]any, error) {
 	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
 		return map[string]any{"message": "agent uninstall failed"}, err
 	}
-	if os.Geteuid() != 0 {
+	if !runningElevated() {
 		return map[string]any{"message": "agent uninstall requires root"}, fmt.Errorf("remote uninstall requires root")
 	}
 	paths, err := r.uninstallPaths()
@@ -68,14 +68,14 @@ func (r *Runner) uninstallPaths() (uninstallPaths, error) {
 	installDir := filepath.Dir(agentPath)
 	configPath := strings.TrimSpace(r.Config().ConfigPath)
 	if configPath == "" {
-		configPath = "/etc/oboard-agent/config.json"
+		configPath = DefaultConfigPath()
 	}
 	profileDir := strings.TrimSpace(os.Getenv("OBOARD_PROFILE_DIR"))
 	if profileDir == "" {
 		profileDir = "/etc/profile.d"
 	}
 	manager := serviceManager()
-	if manager != "systemd" && manager != "openrc" {
+	if manager != "systemd" && manager != "openrc" && manager != serviceManagerWindows {
 		return uninstallPaths{}, fmt.Errorf("supported service manager is unavailable")
 	}
 	paths := uninstallPaths{
@@ -130,6 +130,9 @@ func (r *Runner) finalizeAgentUninstall() error {
 }
 
 func scheduleAgentUninstallFinalizer(paths uninstallPaths) error {
+	if paths.ServiceManager == serviceManagerWindows {
+		return runDetachedPowerShell(uninstallFinalizerPowerShell(paths))
+	}
 	command := uninstallFinalizerCommand(paths)
 	switch paths.ServiceManager {
 	case "systemd":
@@ -193,7 +196,44 @@ func uninstallFinalizerCommand(paths uninstallPaths) string {
 	return strings.Join(parts, "; ")
 }
 
+// uninstallFinalizerPowerShell renders the Windows finalizer. It runs detached
+// after the task result is acknowledged, stops and deletes both services, and
+// removes the installation. Every binary, configuration, state, and log path
+// lives below one installation root on Windows, so a standard layout removes
+// that root as a whole.
+func uninstallFinalizerPowerShell(paths uninstallPaths) string {
+	quote := func(value string) string { return "'" + strings.ReplaceAll(value, "'", "''") + "'" }
+	lines := []string{
+		"$ErrorActionPreference = 'SilentlyContinue'",
+		"Start-Sleep -Seconds 5",
+	}
+	for _, service := range []string{paths.CoreService, paths.AgentService} {
+		lines = append(lines,
+			"Stop-Service -Name "+quote(service)+" -Force",
+			"& \"$env:SystemRoot\\System32\\sc.exe\" delete "+quote(service)+" | Out-Null",
+		)
+	}
+	lines = append(lines, "Start-Sleep -Seconds 2")
+	files := []string{paths.AgentPath, paths.CorePath, paths.RealmPath, paths.AgentLog, paths.CoreLog, paths.CoreSocket}
+	for _, file := range files {
+		if strings.TrimSpace(file) != "" {
+			lines = append(lines, "Remove-Item -LiteralPath "+quote(file)+" -Force")
+		}
+	}
+	lines = append(lines,
+		"Remove-Item -LiteralPath "+quote(paths.ConfigDir)+" -Recurse -Force",
+		"Remove-Item -LiteralPath "+quote(paths.StateDir)+" -Recurse -Force",
+	)
+	if root := filepath.Dir(paths.InstallDir); strings.EqualFold(filepath.Base(paths.InstallDir), "bin") && root != paths.InstallDir {
+		lines = append(lines, "Remove-Item -LiteralPath "+quote(root)+" -Recurse -Force")
+	}
+	return strings.Join(lines, "\r\n")
+}
+
 func stopManagedService(manager, service string) error {
+	if manager == serviceManagerWindows {
+		return windowsServiceStop(service, 20*time.Second)
+	}
 	if manager == "systemd" {
 		return runCommand(20*time.Second, "systemctl", "stop", service)
 	}

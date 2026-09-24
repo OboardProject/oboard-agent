@@ -405,7 +405,7 @@ func (r *Runner) detectForwardCapabilities() map[string]bool {
 	return map[string]bool{
 		"realm": executableFileExists(r.realmBinary()),
 		"linux": runtime.GOOS == "linux",
-		"root":  runningAsRoot(),
+		"root":  runningElevated(),
 	}
 }
 
@@ -417,7 +417,7 @@ func executableFileExists(path string) bool {
 	if err != nil || !info.Mode().IsRegular() {
 		return false
 	}
-	return info.Mode().Perm()&0o111 != 0
+	return fileIsExecutable(path, info)
 }
 
 func (r *Runner) setForwardProbeRules(rules []forwardRule) {
@@ -647,6 +647,7 @@ func (r *Runner) applyRealmForwards(rules []forwardRule) error {
 	}
 	// #nosec G204 -- realmPath is the bundled binary validated above and configPath is a separate argv entry.
 	cmd := exec.Command(realmPath, "-c", configPath)
+	cmd.SysProcAttr = backgroundProcessAttr()
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	if err := cmd.Start(); err != nil {
@@ -729,13 +730,15 @@ func managedProcessMatches(pid int, expected, startToken string) bool {
 		return startToken != ""
 	}
 	cmdline := ""
-	if b, err := readProcPIDFile(pid, "cmdline"); err == nil {
+	if image, ok := platformProcessImage(pid); ok {
+		cmdline = image
+	} else if b, err := readProcPIDFile(pid, "cmdline"); err == nil {
 		cmdline = strings.ReplaceAll(string(b), "\x00", " ")
 	} else if out, err := commandOutput(2*time.Second, "ps", "-p", fmt.Sprint(pid), "-o", "command="); err == nil {
 		cmdline = out
 	}
 	for _, field := range strings.Fields(cmdline) {
-		if filepath.Base(field) == expected || strings.HasSuffix(field, "/"+expected) {
+		if filepath.Base(field) == expected || executableBase(field) == expected || strings.HasSuffix(field, "/"+expected) {
 			return true
 		}
 	}
@@ -743,6 +746,9 @@ func managedProcessMatches(pid int, expected, startToken string) bool {
 }
 
 func processStartToken(pid int) string {
+	if token, ok := platformProcessStartToken(pid); ok {
+		return token
+	}
 	if b, err := readProcPIDFile(pid, "stat"); err == nil {
 		line := string(b)
 		if close := strings.LastIndex(line, ")"); close >= 0 {

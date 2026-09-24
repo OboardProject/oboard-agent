@@ -104,9 +104,9 @@ func (r *Runner) signedReleaseTargets() (signedReleaseTargets, error) {
 	// identity; an update must replace them in place so the layout survives.
 	// In standard mode only the fixed names are accepted.
 	stealthIdentity := r.Config().Stealth
-	agentName := "oboard-agent"
-	coreName := "oboard-sb"
-	realmName := realmProcessName
+	agentName := executableName("oboard-agent")
+	coreName := executableName("oboard-sb")
+	realmName := executableName(realmProcessName)
 	if r.stealthOn() && stealthIdentity != nil {
 		agentName = stealthIdentity.Identity.AgentName
 		coreName = stealthIdentity.Identity.CoreName
@@ -230,20 +230,32 @@ func (r *Runner) downloadAndInstallSignedRelease(ctx context.Context, baseClient
 	if err := checkUpdateDiskBudget(targets, agentFile.Size, coreFile.Size, realmFile.Size); err != nil {
 		return outcome, err
 	}
+	stagedAgent, err := stagedExecutable(tmpDir, agentName)
+	if err != nil {
+		return outcome, err
+	}
+	stagedCore, err := stagedExecutable(tmpDir, coreName)
+	if err != nil {
+		return outcome, err
+	}
+	stagedRealm, err := stagedExecutable(tmpDir, realmName)
+	if err != nil {
+		return outcome, err
+	}
 	// The downloaded kernel is validated against the configuration this node is
 	// serving right now, while nothing on disk has been replaced yet. Doing it
 	// after installation is what leaves a node running its old working kernel
 	// with an incompatible executable staged for the next restart.
-	state, note, err := r.preflightStagedCore(filepath.Join(tmpDir, coreName), targets.ActiveConfig, coreCheckTimeout)
+	state, note, err := r.preflightStagedCore(stagedCore, targets.ActiveConfig, coreCheckTimeout)
 	outcome.CorePreflight = state
 	outcome.CorePreflightNote = note
 	if err != nil {
 		return outcome, err
 	}
 	if err := r.installVerifiedReleaseFiles(stagingPrefix, []stagedReleaseFile{
-		{source: filepath.Join(tmpDir, agentName), target: targets.Agent},
-		{source: filepath.Join(tmpDir, coreName), target: targets.Core},
-		{source: filepath.Join(tmpDir, realmName), target: targets.Realm},
+		{source: stagedAgent, target: targets.Agent},
+		{source: stagedCore, target: targets.Core},
+		{source: stagedRealm, target: targets.Realm},
 	}); err != nil {
 		return outcome, err
 	}
@@ -690,6 +702,19 @@ func (r *Runner) installVerifiedReleaseFiles(stagingPrefix string, items []stage
 	return nil
 }
 
+// stagedExecutable gives a verified download the platform executable suffix
+// so it can be run before installation. Release asset names carry no suffix.
+func stagedExecutable(dir, name string) (string, error) {
+	path := filepath.Join(dir, name)
+	if executableSuffix == "" {
+		return path, nil
+	}
+	if err := os.Rename(path, path+executableSuffix); err != nil {
+		return "", err
+	}
+	return path + executableSuffix, nil
+}
+
 func preserveExistingReleaseFile(item *stagedReleaseFile, stagingPrefix string) error {
 	if _, err := os.Stat(item.target); errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -702,6 +727,12 @@ func preserveExistingReleaseFile(item *stagedReleaseFile, stagingPrefix string) 
 	}
 	item.backup = backup
 	item.hadOld = true
+	// A running Windows image can be renamed but never replaced, so a hard
+	// link would leave commit renaming onto a busy file. Windows always takes
+	// the rename path below.
+	if runtime.GOOS == "windows" {
+		return nil
+	}
 	if err := os.Link(item.target, backup); err == nil {
 		item.linked = true
 		return nil

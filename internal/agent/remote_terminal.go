@@ -5,13 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"os"
-	"os/exec"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/creack/pty"
 	"github.com/gorilla/websocket"
 
 	"github.com/OboardProject/oboard-agent/internal/logging"
@@ -42,8 +39,7 @@ const (
 
 type terminalSession struct {
 	id          string
-	ptmx        *os.File
-	cmd         *exec.Cmd
+	pty         terminal.Session
 	conn        *websocket.Conn
 	spec        terminal.SessionSpec
 	created     time.Time
@@ -214,13 +210,13 @@ func (r *Runner) reportInteractiveReady(sessionID string) {
 	})
 }
 
-func startInteractivePTY(cols, rows int, mode terminal.Mode) (*os.File, *exec.Cmd, terminal.SessionSpec, error) {
+func startInteractivePTY(cols, rows int, mode terminal.Mode) (terminal.Session, terminal.SessionSpec, error) {
 	spec, err := terminal.BuildSession(terminal.Request{Mode: mode, Cols: cols, Rows: rows, TERM: terminal.DefaultTERM, COLORTERM: terminal.DefaultCOLORTERM})
 	if err != nil {
-		return nil, nil, spec, err
+		return nil, spec, err
 	}
-	ptmx, cmd, err := terminal.Spawn(spec)
-	return ptmx, cmd, spec, err
+	session, err := terminal.Start(spec)
+	return session, spec, err
 }
 
 func (r *Runner) runTerminalSession(env model.InteractivePrepareEnvelope, cols, rows int, mode terminal.Mode, secret string) {
@@ -235,7 +231,7 @@ func (r *Runner) runTerminalSession(env model.InteractivePrepareEnvelope, cols, 
 	}
 	r.interactiveMu.Unlock()
 
-	ptmx, cmd, spec, err := startInteractivePTY(cols, rows, mode)
+	ptmx, spec, err := startInteractivePTY(cols, rows, mode)
 	if err != nil {
 		reason := interactiveReasonPTYStartFailed
 		if terminal.IsLoginDisabled(err) {
@@ -251,7 +247,6 @@ func (r *Runner) runTerminalSession(env model.InteractivePrepareEnvelope, cols, 
 	wsURL, err := security.ControllerInteractiveWebSocketURL(r.Config().ControllerURL, env.SessionID, version.IsDev(), r.Config().AllowInsecureController)
 	if err != nil {
 		_ = ptmx.Close()
-		killProcessGroup(cmd)
 		r.reportInteractiveFailed(env.SessionID, interactiveReasonURLFailed, err.Error())
 		return
 	}
@@ -264,12 +259,11 @@ func (r *Runner) runTerminalSession(env model.InteractivePrepareEnvelope, cols, 
 	conn, _, err := dialer.Dial(wsURL, header)
 	if err != nil {
 		_ = ptmx.Close()
-		killProcessGroup(cmd)
 		r.reportInteractiveFailed(env.SessionID, interactiveReasonWebsocketDialFailed, err.Error())
 		return
 	}
 	conn.SetReadLimit(interactiveMaxMessage)
-	session := &terminalSession{id: env.SessionID, ptmx: ptmx, cmd: cmd, spec: spec, conn: conn, created: time.Now(), last: time.Now(), stop: make(chan struct{})}
+	session := &terminalSession{id: env.SessionID, pty: ptmx, spec: spec, conn: conn, created: time.Now(), last: time.Now(), stop: make(chan struct{})}
 	r.interactiveMu.Lock()
 	r.terminalSessions[env.SessionID] = session
 	r.interactiveMu.Unlock()
@@ -330,7 +324,7 @@ func (r *Runner) runTerminalSession(env model.InteractivePrepareEnvelope, cols, 
 			switch msg.Type {
 			case "resize":
 				if msg.Cols > 0 && msg.Rows > 0 && msg.Cols <= interactiveMaxCols && msg.Rows <= interactiveMaxRows {
-					_ = pty.Setsize(ptmx, &pty.Winsize{Cols: uint16(msg.Cols), Rows: uint16(msg.Rows)})
+					_ = ptmx.Resize(msg.Cols, msg.Rows)
 				}
 			case "close":
 				return
@@ -363,13 +357,10 @@ func (r *Runner) closeTerminalSession(sessionID, reason string) {
 		_ = session.conn.WriteJSON(map[string]any{"type": "closed", "reason": reason})
 		_ = session.conn.Close()
 	}
-	if session.ptmx != nil {
-		_ = session.ptmx.Close()
-	}
-	killProcessGroup(session.cmd)
 	exitCode := -1
-	if session.cmd != nil && session.cmd.ProcessState != nil {
-		exitCode = session.cmd.ProcessState.ExitCode()
+	if session.pty != nil {
+		_ = session.pty.Close()
+		exitCode = session.pty.ExitCode()
 	}
 	logging.Infof("interactive session closed session=%s reason=%s uid=%d username=%s shell=%s mode=%s cwd=%s exit_code=%d",
 		sessionID, reason, session.spec.UID, session.spec.Username, session.spec.Shell, session.spec.Mode, session.spec.WorkDir, exitCode)

@@ -12,5 +12,11 @@
       "asset": "realm-aarch64-unknown-linux-musl.tar.gz",
       "sha256": "f4c0318dd86854da483dcb7645b4f39cae2cc3f91c688fef969d53220b949488"
     }
+  },
+  "windows_targets": {
+    "amd64": {
+      "asset": "realm-x86_64-pc-windows-gnu.tar.gz",
+      "sha256": "bc958ae0b66690f5d06a9e8a09dfe4373b1b00201b9e16536bcf2422ff91f09c"
+    }
   }
 }
