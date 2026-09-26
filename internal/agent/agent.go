@@ -183,6 +183,9 @@ type Runner struct {
 	controlSessionLink     *agentlink.Session
 	stealthSwitchMu        sync.Mutex
 	stealthSwitchPending   *stealthSwitchFinalizer
+
+	// coreClockPID is the kernel process last given the logical clock; guarded by coreLifecycleMu.
+	coreClockPID int
 }
 
 const (

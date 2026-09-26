@@ -51,12 +51,15 @@ type fakeCoreKernel struct {
 	// authorization_control_v1 (wrapped body + status read-back).
 	authorizationControl  bool
 	authorizationSequence int64
-	authorizationDigest    string
-	authorizationDenied    []string
-	runtimeUsers           bool
-	usersRevision          int64
-	usersDigest            string
-	usersBootID            string
+	authorizationDigest   string
+	authorizationDenied   []string
+	runtimeUsers          bool
+	usersRevision         int64
+	usersDigest           string
+	usersBootID           string
+	// pid is the process id /runtime/status reports; zero means 4242.
+	pid         int
+	clockPushes int
 }
 
 func (k *fakeCoreKernel) deniedKeys() []string {
@@ -129,7 +132,7 @@ func newFakeCoreKernel(t *testing.T, configPath string, runtimeSupported bool) *
 		payload := map[string]any{
 			"operational_config_sha256": kernel.loadedDigest,
 			"started_at":                "2026-09-02T00:00:00Z",
-			"pid":                       4242,
+			"pid":                       kernel.reportedPID(),
 			"generation":                kernel.generation,
 		}
 		if kernel.loadedBuild != "" {
@@ -137,6 +140,12 @@ func newFakeCoreKernel(t *testing.T, configPath string, runtimeSupported bool) *
 			payload["build"] = kernel.loadedBuild
 		}
 		_ = json.NewEncoder(w).Encode(payload)
+	})
+	mux.HandleFunc("/clock/config", func(w http.ResponseWriter, _ *http.Request) {
+		kernel.mu.Lock()
+		kernel.clockPushes++
+		kernel.mu.Unlock()
+		w.WriteHeader(http.StatusOK)
 	})
 	mux.HandleFunc("/traffic/snapshot", func(w http.ResponseWriter, _ *http.Request) {
 		kernel.bootIfArmed()
@@ -279,6 +288,28 @@ func (k *fakeCoreKernel) reportDigest(digest string) {
 	defer k.mu.Unlock()
 	k.loadedDigest = digest
 	k.pinnedDigest = true
+}
+
+func (k *fakeCoreKernel) reportedPID() int {
+	if k.pid == 0 {
+		return 4242
+	}
+	return k.pid
+}
+
+// respawn stands for a service manager replacing the process between two
+// watchdog checks: same configuration, new process.
+func (k *fakeCoreKernel) respawn(pid int) {
+	k.mu.Lock()
+	k.pid = pid
+	k.mu.Unlock()
+	k.boot()
+}
+
+func (k *fakeCoreKernel) clockPushCount() int {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return k.clockPushes
 }
 
 func (k *fakeCoreKernel) digest() string {

@@ -165,8 +165,15 @@ func (r *Runner) runCoreWatchdogCheck(ctx context.Context, status *coreWatchdogS
 			status.Consecutive = 0
 			status.NextAttemptAt = time.Time{}
 		}
-		if !wasRunning {
-			_ = r.configureCoreClock(ctx)
+		// A kernel process starts on the host clock. One restarted between two
+		// checks (a crash systemd revived, an install script holding the host
+		// lock) never looked stopped here, so a new PID is also a new process
+		// that has not received the logical clock yet.
+		restarted := check.verified() && check.PID > 0 && check.PID != r.coreClockPID
+		if !wasRunning || restarted {
+			if err := r.configureCoreClock(ctx); err == nil && check.verified() {
+				r.coreClockPID = check.PID
+			}
 		}
 		r.writeCoreWatchdogStatus(*status)
 		return
