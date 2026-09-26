@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/OboardProject/oboard-agent/internal/authorization"
 	"github.com/OboardProject/oboard-agent/internal/logging"
 )
 
@@ -85,15 +86,37 @@ func (r *Runner) noteAuthorizationAvailability() {
 	if r.clock != nil {
 		now = r.clock.Now()
 	}
-	valid := 0
-	for key := range lease.Grants {
-		if lease.Allows(key, now) {
+	valid, lapsed := 0, 0
+	for key, raw := range lease.Grants {
+		switch {
+		case lease.Allows(key, now):
 			valid++
+		case !grantEndedOnSchedule(lease, raw, now):
+			lapsed++
 		}
 	}
-	if valid < len(lease.Grants) {
-		r.noteSyncOutcome("authorization_validity", "expired", lease.Revision, len(lease.Grants)-valid, errors.New("authorization expired; affected proxy connections are denied and closed"))
+	if lapsed > 0 {
+		r.noteSyncOutcome("authorization_validity", "expired", lease.Revision, lapsed, errors.New("authorization expired; affected proxy connections are denied and closed"))
 	} else {
 		r.noteSyncOutcome("authorization_validity", "valid", lease.Revision, valid, nil)
 	}
+}
+
+// grantEndedOnSchedule reports whether a grant stopped admitting at a business
+// boundary the Controller set (a plan, exception, or device transition ending
+// before the lease does) while the lease itself is still current. That grant is
+// denied on purpose until the next renewal drops it; it is not a renewal lapse.
+func grantEndedOnSchedule(lease *authorization.Lease, raw string, now time.Time) bool {
+	issued, err := time.Parse(time.RFC3339Nano, lease.IssuedAt)
+	if err != nil {
+		return false
+	}
+	expires := issued.Add(authorization.MaxLifetime)
+	if lease.ExpiresAt != "" {
+		if expires, err = time.Parse(time.RFC3339Nano, lease.ExpiresAt); err != nil {
+			return false
+		}
+	}
+	end, err := time.Parse(time.RFC3339Nano, raw)
+	return err == nil && now.Before(expires) && end.Before(expires) && !now.Before(end)
 }

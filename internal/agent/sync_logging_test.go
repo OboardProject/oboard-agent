@@ -44,7 +44,8 @@ func TestAuthorizationExpiryAndRecoveryLogsOmitGrantKeys(t *testing.T) {
 	output := captureSyncLogs(t)
 	r := New(Config{StateDir: t.TempDir()})
 	now := time.Now().UTC()
-	old := &authorization.Lease{Revision: 1, IssuedAt: now.Add(-time.Minute).Format(time.RFC3339Nano), Grants: map[string]string{"private-grant-key": now.Add(-time.Second).Format(time.RFC3339Nano)}}
+	lapsedAt := now.Add(-time.Second).Format(time.RFC3339Nano)
+	old := &authorization.Lease{Revision: 1, IssuedAt: now.Add(-authorization.MaxLifetime - time.Second).Format(time.RFC3339Nano), ExpiresAt: lapsedAt, Grants: map[string]string{"private-grant-key": lapsedAt}}
 	if err := r.authorizationState().Update(old); err != nil {
 		t.Fatal(err)
 	}
@@ -57,6 +58,24 @@ func TestAuthorizationExpiryAndRecoveryLogsOmitGrantKeys(t *testing.T) {
 	got := output.String()
 	if !strings.Contains(got, "stage=expired") || !strings.Contains(got, "recovered=true") || strings.Contains(got, "private-grant-key") {
 		t.Fatalf("incorrect authorization log: %s", got)
+	}
+}
+
+func TestAuthorizationGrantEndingAtBusinessBoundaryIsNotReportedAsExpired(t *testing.T) {
+	output := captureSyncLogs(t)
+	r := New(Config{StateDir: t.TempDir()})
+	now := time.Now().UTC()
+	lease := &authorization.Lease{Revision: 1, IssuedAt: now.Add(-time.Minute).Format(time.RFC3339Nano), ExpiresAt: now.Add(4 * time.Minute).Format(time.RFC3339Nano), Grants: map[string]string{
+		"plan-ended": now.Add(-time.Second).Format(time.RFC3339Nano),
+		"renewed":    now.Add(4 * time.Minute).Format(time.RFC3339Nano),
+	}}
+	if err := r.authorizationState().Update(lease); err != nil {
+		t.Fatal(err)
+	}
+	r.noteAuthorizationAvailability()
+	got := output.String()
+	if strings.Contains(got, "stage=expired") || !strings.Contains(got, "stage=valid") || !strings.Contains(got, "entries=1") {
+		t.Fatalf("scheduled grant end reported as a renewal lapse: %s", got)
 	}
 }
 
