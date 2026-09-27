@@ -52,6 +52,19 @@ func TestDNSBenchmarkPlanKeyIncludesEveryRevision(t *testing.T) {
 	}
 }
 
+// A plain-DNS-only policy whose bootstrap group is the server's custom
+// intranet resolver must pass plan validation; rejecting it would fail the task
+// before any result reaches Controller and leave the policy waiting forever.
+func TestDNSBenchmarkPlanAcceptsPlainOnlyIntranetResolver(t *testing.T) {
+	plan := model.DNSBenchmarkPlan{
+		Version: 1, ServerID: 7, PolicyRevision: 3, BootstrapListID: 9, BootstrapListRevision: 1, Mode: model.DNSAutoTestAlways,
+		BootstrapCandidates: []model.DNSCandidate{{Tag: "custom-1", Transport: model.DNSTransportUDP, Server: "10.10.10.10", Port: 53}},
+	}
+	if err := validateDNSBenchmarkPlan(plan); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestDNSBenchmarkNeverClearsPeriodicState(t *testing.T) {
 	runner := New(Config{StateDir: t.TempDir(), ResourceProfile: "large"})
 	periodic := testDNSBenchmarkPlan()
