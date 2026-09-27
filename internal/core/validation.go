@@ -94,7 +94,7 @@ func validateDNSCandidate(candidate model.DNSCandidate) error {
 	if err := ValidateSafeHost(candidate.Server); err != nil {
 		return fmt.Errorf("dns server: %w", err)
 	}
-	if err := rejectPrivateDNSHost(candidate.Server); err != nil {
+	if err := rejectUnroutableDNSHost(candidate.Server); err != nil {
 		return err
 	}
 	if candidate.Port != 0 {
@@ -125,18 +125,14 @@ func validateDNSCandidate(candidate model.DNSCandidate) error {
 	return nil
 }
 
-func rejectPrivateDNSHost(host string) error {
+// rejectUnroutableDNSHost rejects only addresses no resolver can answer from.
+// Controller owns the address policy: shared lists stay public, while a
+// server's custom resolvers may be the intranet or loopback resolvers that
+// server reaches, and the signed plan does not say which group is which.
+func rejectUnroutableDNSHost(host string) error {
 	ip := net.ParseIP(strings.Trim(strings.TrimSpace(host), "[]"))
-	if ip == nil {
-		return nil
-	}
-	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast() {
-		return errors.New("dns server must not be a private or loopback address")
-	}
-	if ip4 := ip.To4(); ip4 != nil {
-		if ip4[0] == 169 && ip4[1] == 254 || ip4[0] == 100 && ip4[1] >= 64 && ip4[1] <= 127 {
-			return errors.New("dns server must not be a private or loopback address")
-		}
+	if ip != nil && (ip.IsUnspecified() || ip.IsMulticast() || ip.IsLinkLocalMulticast()) {
+		return errors.New("dns server must be a unicast address")
 	}
 	return nil
 }

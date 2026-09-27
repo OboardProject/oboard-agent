@@ -26,10 +26,17 @@ func TestValidateSafeHostAndInterface(t *testing.T) {
 	}
 }
 
-func TestValidateDNSCandidatesRejectsPrivateAddress(t *testing.T) {
-	err := ValidateDNSCandidates([]model.DNSCandidate{{Transport: model.DNSTransportDoH, Server: "127.0.0.1", Port: 443, Path: "/dns-query"}})
-	if err == nil || !strings.Contains(err.Error(), "private or loopback") {
-		t.Fatalf("error = %v", err)
+func TestValidateDNSCandidatesAcceptsCustomIntranetResolvers(t *testing.T) {
+	for _, server := range []string{"10.10.10.10", "127.0.0.53", "100.100.2.136", "fd00::53"} {
+		if err := ValidateDNSCandidates([]model.DNSCandidate{{Transport: model.DNSTransportUDP, Server: server, Port: 53}}); err != nil {
+			t.Fatalf("%s: %v", server, err)
+		}
+	}
+	for _, server := range []string{"0.0.0.0", "::", "224.0.0.251"} {
+		err := ValidateDNSCandidates([]model.DNSCandidate{{Transport: model.DNSTransportUDP, Server: server, Port: 53}})
+		if err == nil || !strings.Contains(err.Error(), "unicast") {
+			t.Fatalf("%s: error = %v", server, err)
+		}
 	}
 }
 
