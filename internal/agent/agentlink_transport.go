@@ -264,7 +264,7 @@ func (r *Runner) liveStealthSession() *agentlink.Session {
 // in bounded chunks with resume, replacing the HTTP download path in stealth
 // mode. Integrity stays end-to-end: the caller still verifies the signed
 // manifest after assembly, exactly as with HTTP downloads.
-func (r *Runner) transportDownload(ctx context.Context, session *agentlink.Session, name, destination string, expectedSize int64) error {
+func (r *Runner) transportDownload(ctx context.Context, session *agentlink.Session, name, destination string, expectedSize, maxBytes int64) error {
 	if expectedSize > 0 {
 		if info, err := os.Stat(destination); err == nil && info.Size() == expectedSize {
 			return nil // already complete from a previous attempt
@@ -286,27 +286,6 @@ func (r *Runner) transportDownload(ctx context.Context, session *agentlink.Sessi
 			return err
 		}
 	}
-	// The request/response channel carries chunk reads; data frames arrive
-	// on the same session.
-	chunks := make(chan []byte, 4)
-	done := make(chan error, 1)
-	go func() {
-		done <- session.RunData(func(header agentlink.DataHeader, payload []byte) error {
-			if header.Stream != name {
-				return nil // a different stream; ignore (single-stream use)
-			}
-			select {
-			case chunks <- payload:
-				return nil
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-		})
-	}()
-	defer func() {
-		session.Close()
-		<-done
-	}()
 	const chunkSize = 512 << 10
 	for {
 		want := int64(chunkSize)
@@ -333,6 +312,9 @@ func (r *Runner) transportDownload(ctx context.Context, session *agentlink.Sessi
 		if len(chunk) == 0 {
 			return nil // EOF
 		}
+		if offset+int64(len(chunk)) > maxBytes || (expectedSize > 0 && offset+int64(len(chunk)) > expectedSize) {
+			return fmt.Errorf("transport download %s exceeded the signed size limit", name)
+		}
 		if _, err := file.Write(chunk); err != nil {
 			return err
 		}
@@ -349,6 +331,8 @@ func (r *Runner) transportDownload(ctx context.Context, session *agentlink.Sessi
 // with the HTTP path.
 func (r *Runner) downloadAndInstallSignedReleaseOverTransport(ctx context.Context, repo, expectedBuild string, targets signedReleaseTargets, stagingPrefix string) (releaseInstallOutcome, error) {
 	var outcome releaseInstallOutcome
+	ctx, cancel := context.WithTimeout(ctx, releaseUpdateTimeout)
+	defer cancel()
 	cfg := r.Config()
 	session, err := agentlink.Dial(ctx, agentlink.ClientConfig{
 		Address:    cfg.Stealth.ControllerAddr,
@@ -369,10 +353,10 @@ func (r *Runner) downloadAndInstallSignedReleaseOverTransport(ctx context.Contex
 	// Fetch and verify the manifest exactly as the HTTP path does.
 	manifestPath := filepath.Join(tmpDir, "release-manifest.json")
 	signaturePath := filepath.Join(tmpDir, "release-manifest.json.sig")
-	if err := r.transportDownload(ctx, session, "release-manifest.json", manifestPath, 0); err != nil {
+	if err := r.transportDownload(ctx, session, "release-manifest.json", manifestPath, 0, maxReleaseManifestBytes); err != nil {
 		return outcome, err
 	}
-	if err := r.transportDownload(ctx, session, "release-manifest.json.sig", signaturePath, 0); err != nil {
+	if err := r.transportDownload(ctx, session, "release-manifest.json.sig", signaturePath, 0, maxReleaseSignatureBytes); err != nil {
 		return outcome, err
 	}
 	manifest, err := verifyDownloadedManifest(manifestPath, signaturePath, strings.TrimSpace(repo), strings.TrimSpace(expectedBuild))
@@ -395,7 +379,7 @@ func (r *Runner) downloadAndInstallSignedReleaseOverTransport(ctx context.Contex
 		return outcome, err
 	}
 	for _, file := range []security.ReleaseManifestFile{agentFile, coreFile, realmFile} {
-		if err := r.transportDownload(ctx, session, file.Name, filepath.Join(tmpDir, file.Name), file.Size); err != nil {
+		if err := r.transportDownload(ctx, session, file.Name, filepath.Join(tmpDir, file.Name), file.Size, maxReleaseBinaryBytes); err != nil {
 			return outcome, err
 		}
 	}
