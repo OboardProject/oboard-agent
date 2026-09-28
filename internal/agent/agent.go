@@ -1903,7 +1903,11 @@ func (r *Runner) updateAgentBinary(payloadJSON string) (map[string]any, error) {
 		outcome, err := r.downloadAndInstallSignedReleaseOverTransport(context.Background(), repo, payload.ExpectedBuild, targets, r.updateStagingPrefix())
 		return r.updateAgentResult(err, outcome, source, controllerURL, payload, targets, beforeAgent, beforeCore)
 	}
-	outcome, err := r.downloadAndInstallSignedRelease(context.Background(), r.client, releaseBaseURL, repo, payload.ExpectedBuild, targets, r.updateStagingPrefix())
+	policy := defaultReleaseDownloadPolicy
+	if !payload.AutoUpdate {
+		policy.attempts = 1
+	}
+	outcome, err := r.downloadAndInstallSignedReleaseWithPolicy(context.Background(), r.client, releaseBaseURL, repo, payload.ExpectedBuild, targets, r.updateStagingPrefix(), policy)
 	return r.updateAgentResult(err, outcome, source, controllerURL, payload, targets, beforeAgent, beforeCore)
 }
 

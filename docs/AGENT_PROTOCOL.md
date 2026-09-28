@@ -1205,17 +1205,23 @@ Payload:
   "controller_url": "https://panel.example.com",
   "expected_build": "20260708005400",
   "source": "panel",
-  "github_repo": "OboardProject/oboard-agent"
+  "github_repo": "OboardProject/oboard-agent",
+  "auto_update": false
 }
 ```
 
+`auto_update=true` marks a Controller-scheduled task. A manual task uses
+`false`, is attempted once, and does not consume the automatic retry budget.
+The budget resets only after Controller receives a strictly newer Agent build
+in a health or enrollment report.
+
 `source` values:
 
-- `auto`: Agent chooses from local config and build type.
-- `panel`: download from Controller `/install/agent-self-update.sh` and `/downloads/*`. Release Agents reject this unless `allow_panel_update=true` or the Agent build is dev.
-- `github`: run the GitHub update script from `github_repo`.
+- `auto`: Controller resolves it to `panel` when creating a managed task; an incoming `auto` uses the Agent's local update source.
+- `panel`: download signed release assets from Controller `/downloads/*`. Release Agents reject this unless `allow_panel_update=true` or the Agent build is dev.
+- `github`: download the signed release through Controller `/downloads/github/*` for the requested repository.
 
-Every manifest and binary transfer gets at most three attempts. A binary transfer interrupted after receiving bytes resumes from the verified target file's current size when the origin honors HTTP Range; an origin that ignores Range is restarted safely from byte zero. Permanent HTTP errors, local filesystem errors, and verification failures are not treated as connection retries, and no downloaded binary is installed until the signed manifest size and SHA-256 checks pass. Installation stages each verified binary beside the live path, preserves the previous inode with a same-directory hard link (or a rename if links are unavailable), then atomically replaces the live path. It never clones the running binary as a spare copy, and it removes leftover `.oboard-update-new.*` / `.oboard-update-backup.*` files first.
+Automatic manifest and binary transfers get at most three attempts; manual tasks make one request per asset and source. A binary transfer interrupted after receiving bytes resumes from the verified target file's current size when the origin honors HTTP Range; an origin that ignores Range is restarted safely from byte zero. Permanent HTTP errors, local filesystem errors, and verification failures are not treated as connection retries, and no downloaded binary is installed until the signed manifest size and SHA-256 checks pass. Installation stages each verified binary beside the live path, preserves the previous inode with a same-directory hard link (or a rename if links are unavailable), then atomically replaces the live path. It never clones the running binary as a spare copy, and it removes leftover `.oboard-update-new.*` / `.oboard-update-backup.*` files first.
 
 Installation and kernel activation share one lifecycle lock. After a verified
 release is installed, Agent validates the deployed configuration with the

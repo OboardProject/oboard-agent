@@ -154,6 +154,10 @@ func (r *Runner) updateStagingPrefix() string {
 }
 
 func (r *Runner) downloadAndInstallSignedRelease(ctx context.Context, baseClient *http.Client, baseURL, repo, expectedBuild string, targets signedReleaseTargets, stagingPrefix string) (releaseInstallOutcome, error) {
+	return r.downloadAndInstallSignedReleaseWithPolicy(ctx, baseClient, baseURL, repo, expectedBuild, targets, stagingPrefix, defaultReleaseDownloadPolicy)
+}
+
+func (r *Runner) downloadAndInstallSignedReleaseWithPolicy(ctx context.Context, baseClient *http.Client, baseURL, repo, expectedBuild string, targets signedReleaseTargets, stagingPrefix string, policy releaseDownloadPolicy) (releaseInstallOutcome, error) {
 	var outcome releaseInstallOutcome
 	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	u, err := url.Parse(baseURL)
@@ -187,10 +191,10 @@ func (r *Runner) downloadAndInstallSignedRelease(ctx context.Context, baseClient
 
 	manifestPath := filepath.Join(tmpDir, "release-manifest.json")
 	signaturePath := filepath.Join(tmpDir, "release-manifest.json.sig")
-	if err := downloadReleaseAsset(ctx, client, baseURL+"/release-manifest.json", manifestPath, maxReleaseManifestBytes, nil); err != nil {
+	if err := downloadReleaseAssetUsingPolicy(ctx, client, baseURL+"/release-manifest.json", manifestPath, maxReleaseManifestBytes, nil, policy); err != nil {
 		return outcome, err
 	}
-	if err := downloadReleaseAsset(ctx, client, baseURL+"/release-manifest.json.sig", signaturePath, maxReleaseSignatureBytes, nil); err != nil {
+	if err := downloadReleaseAssetUsingPolicy(ctx, client, baseURL+"/release-manifest.json.sig", signaturePath, maxReleaseSignatureBytes, nil, policy); err != nil {
 		return outcome, err
 	}
 	manifest, err := verifyDownloadedManifest(manifestPath, signaturePath, strings.TrimSpace(repo), strings.TrimSpace(expectedBuild))
@@ -213,7 +217,7 @@ func (r *Runner) downloadAndInstallSignedRelease(ctx context.Context, baseClient
 		return outcome, err
 	}
 	for _, file := range []security.ReleaseManifestFile{agentFile, coreFile, realmFile} {
-		if err := downloadReleaseAsset(ctx, client, baseURL+"/"+file.Name, filepath.Join(tmpDir, file.Name), maxReleaseBinaryBytes, &file); err != nil {
+		if err := downloadReleaseAssetUsingPolicy(ctx, client, baseURL+"/"+file.Name, filepath.Join(tmpDir, file.Name), maxReleaseBinaryBytes, &file, policy); err != nil {
 			return outcome, err
 		}
 	}
@@ -423,7 +427,11 @@ func releaseHTTPClient(base *http.Client, requireHTTPS bool) *http.Client {
 }
 
 func downloadReleaseAsset(ctx context.Context, client *http.Client, rawURL, path string, maxBytes int64, expected *security.ReleaseManifestFile) error {
-	err := downloadReleaseAssetWithPolicy(ctx, client, rawURL, path, maxBytes, expected, defaultReleaseDownloadPolicy)
+	return downloadReleaseAssetUsingPolicy(ctx, client, rawURL, path, maxBytes, expected, defaultReleaseDownloadPolicy)
+}
+
+func downloadReleaseAssetUsingPolicy(ctx context.Context, client *http.Client, rawURL, path string, maxBytes int64, expected *security.ReleaseManifestFile, policy releaseDownloadPolicy) error {
+	err := downloadReleaseAssetWithPolicy(ctx, client, rawURL, path, maxBytes, expected, policy)
 	if err == nil || expected == nil || ctx.Err() != nil {
 		return err
 	}
@@ -435,7 +443,7 @@ func downloadReleaseAsset(ctx context.Context, client *http.Client, rawURL, path
 	query.Set("source", "controller")
 	u.RawQuery = query.Encode()
 	_ = os.Remove(path)
-	return downloadReleaseAssetWithPolicy(ctx, client, u.String(), path, maxBytes, expected, defaultReleaseDownloadPolicy)
+	return downloadReleaseAssetWithPolicy(ctx, client, u.String(), path, maxBytes, expected, policy)
 }
 
 func downloadReleaseAssetWithPolicy(ctx context.Context, client *http.Client, rawURL, path string, maxBytes int64, expected *security.ReleaseManifestFile, policy releaseDownloadPolicy) error {

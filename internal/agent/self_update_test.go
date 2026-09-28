@@ -187,6 +187,20 @@ func TestDownloadReleaseAssetReportsExhaustedRetries(t *testing.T) {
 	}
 }
 
+func TestManualReleaseDownloadStopsAfterOneRequest(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		http.Error(w, "temporary", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+	path := filepath.Join(t.TempDir(), "release-manifest.json")
+	err := downloadReleaseAssetUsingPolicy(context.Background(), server.Client(), server.URL, path, maxReleaseManifestBytes, nil, releaseDownloadPolicy{attempts: 1})
+	if err == nil || requests.Load() != 1 {
+		t.Fatalf("manual download error = %v, requests = %d", err, requests.Load())
+	}
+}
+
 func TestDownloadReleaseAssetLimitsChunkedResponseToSignedSize(t *testing.T) {
 	expectedData := []byte("signed")
 	expected := security.ReleaseManifestFile{SHA256: sha256Hex(expectedData), Size: int64(len(expectedData))}
