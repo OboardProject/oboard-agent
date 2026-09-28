@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -15,6 +16,7 @@ import (
 	"github.com/OboardProject/oboard-agent/internal/agent"
 	"github.com/OboardProject/oboard-agent/internal/logging"
 	"github.com/OboardProject/oboard-agent/internal/model"
+	"github.com/OboardProject/oboard-agent/internal/stealth"
 	"github.com/OboardProject/oboard-agent/internal/version"
 )
 
@@ -329,6 +331,7 @@ func runStealthBootstrap(args []string) int {
 	stateParent := fs.String("state-parent", "/var/lib", "parent directory for the generated state directory")
 	controllerAddr := fs.String("controller-addr", "", "dedicated stealth transport listener (host:port)")
 	controllerPin := fs.String("controller-pin", "", "SHA-256 pin of the stealth transport certificate")
+	identityJSON := fs.String("identity-json", "", "Controller-issued security-process identity")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -338,6 +341,15 @@ func runStealthBootstrap(args []string) int {
 			return 1
 		}
 		return 0
+	}
+	if *identityJSON == "" {
+		fmt.Fprintln(os.Stderr, "Controller-issued security-process identity is required")
+		return 2
+	}
+	identity := new(stealth.Identity)
+	if err := json.Unmarshal([]byte(*identityJSON), identity); err != nil {
+		fmt.Fprintf(os.Stderr, "invalid stealth identity: %v\n", err)
+		return 2
 	}
 	layout, err := agent.RunStealthBootstrap(agent.StealthBootstrapOptions{
 		InstallDir:           *installDir,
@@ -350,6 +362,7 @@ func runStealthBootstrap(args []string) int {
 		StateParent:          *stateParent,
 		ControllerAddr:       *controllerAddr,
 		ControllerCertSHA256: *controllerPin,
+		Identity:             identity,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "stealth bootstrap failed: %v\n", err)

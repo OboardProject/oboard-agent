@@ -25,8 +25,8 @@ import (
 //
 // The hidden layout is fully described by one encrypted config plus one key
 // file; every state file name is HMAC-derived from the key, so nothing on
-// disk records the mapping. A switch never destroys the old layout before the
-// new one is running: files are copied (not moved), the new units are
+// the Agent disk records the mapping. A switch never destroys the old layout
+// before the new one is running: files are copied (not moved), the new units are
 // verified, and only the process that starts after the switch removes the
 // previous layout.
 
@@ -45,6 +45,7 @@ type stealthBootstrapOptions struct {
 	UnitDir          string
 	LogDir           string
 	RunDir           string
+	Identity         *stealth.Identity
 	// ControllerAddr is the dedicated binary-transport listener (host:port).
 	// When set, the generated config routes the control channel and every
 	// callback through it instead of the panel's HTTP surface.
@@ -78,8 +79,9 @@ func (o stealthBootstrapOptions) withDefaults() stealthBootstrapOptions {
 
 // RunStealthBootstrap converts a freshly downloaded standard install (the
 // three oboard-named binaries in InstallDir) into a hidden layout: it
-// generates the identity and key, moves the binaries into a randomly named
-// installation directory beside InstallDir, writes the encrypted config,
+// accepts the Controller-issued identity and generates the key, then moves
+// the binaries into a randomly named installation directory beside InstallDir,
+// writes the encrypted config,
 // and installs the service units. It does not start anything; the caller
 // enrolls and starts the agent service afterwards.
 func RunStealthBootstrap(opts stealthBootstrapOptions) (stealth.Layout, error) {
@@ -100,22 +102,54 @@ func RunStealthBootstrap(opts stealthBootstrapOptions) (stealth.Layout, error) {
 	if installParent == "/" || installDir == "/" {
 		return stealth.Layout{}, fmt.Errorf("install dir %s must be nested below a parent directory so the hidden layout can randomize it", installDir)
 	}
-	identity, err := stealth.GenerateIdentity(stealth.CollisionCheck{
-		InstallDir:    installDir,
-		InstallParent: installParent,
-		ConfigParent:  opts.ConfigParent,
-		StateParent:   opts.StateParent,
-		LogDir:        opts.LogDir,
-		RunDir:        opts.RunDir,
-		SystemdUnits:  unitDirIf(opts.Manager == "systemd", opts.UnitDir),
-		InitDir:       unitDirIf(opts.Manager == "openrc", opts.UnitDir),
-	})
-	if err != nil {
-		return stealth.Layout{}, err
+	var identity stealth.Identity
+	if opts.Identity != nil {
+		if err := opts.Identity.Validate(); err != nil {
+			return stealth.Layout{}, err
+		}
+		identity = *opts.Identity
+	} else {
+		var err error
+		identity, err = stealth.GenerateIdentity(stealth.CollisionCheck{
+			InstallDir:    installDir,
+			InstallParent: installParent,
+			ConfigParent:  opts.ConfigParent,
+			StateParent:   opts.StateParent,
+			LogDir:        opts.LogDir,
+			RunDir:        opts.RunDir,
+			SystemdUnits:  unitDirIf(opts.Manager == "systemd", opts.UnitDir),
+			InitDir:       unitDirIf(opts.Manager == "openrc", opts.UnitDir),
+		})
+		if err != nil {
+			return stealth.Layout{}, err
+		}
 	}
 	hiddenInstallDir := filepath.Join(installParent, identity.InstallDirName)
 	if _, statErr := os.Lstat(hiddenInstallDir); statErr == nil {
 		return stealth.Layout{}, fmt.Errorf("refusing to reuse existing directory %s", hiddenInstallDir)
+	} else if !os.IsNotExist(statErr) {
+		return stealth.Layout{}, statErr
+	}
+	if opts.Identity != nil {
+		unitSuffix := ".service"
+		if opts.Manager == "openrc" {
+			unitSuffix = ""
+		}
+		for _, path := range []string{
+			filepath.Join(opts.ConfigParent, identity.ConfigDirName),
+			filepath.Join(opts.StateParent, identity.StateDirName),
+			filepath.Join(opts.UnitDir, identity.AgentName+unitSuffix),
+			filepath.Join(opts.UnitDir, identity.CoreName+unitSuffix),
+			filepath.Join(opts.LogDir, identity.AgentLogName+".log"),
+			filepath.Join(opts.LogDir, identity.CoreLogName+".log"),
+			filepath.Join(opts.RunDir, identity.SocketName+".sock"),
+		} {
+			if _, err := os.Lstat(path); err == nil {
+				return stealth.Layout{}, fmt.Errorf("security-process layout path already exists: %s", path)
+			} else if !os.IsNotExist(err) {
+				return stealth.Layout{}, err
+			}
+		}
 	}
 	if err := os.Mkdir(hiddenInstallDir, 0o755); err != nil {
 		return stealth.Layout{}, err

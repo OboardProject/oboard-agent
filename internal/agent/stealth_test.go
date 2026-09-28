@@ -111,6 +111,10 @@ func TestStealthBootstrapCreatesHiddenLayout(t *testing.T) {
 	unitDir := filepath.Join(configParent, "units")
 	logDir := filepath.Join(configParent, "log")
 	runDir := filepath.Join(configParent, "run")
+	identity, err := stealth.GenerateIdentity(stealth.CollisionCheck{})
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	layout, err := RunStealthBootstrap(stealthBootstrapOptions{
 		InstallDir:    installDir,
@@ -121,9 +125,13 @@ func TestStealthBootstrapCreatesHiddenLayout(t *testing.T) {
 		UnitDir:       unitDir,
 		LogDir:        logDir,
 		RunDir:        runDir,
+		Identity:      &identity,
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if filepath.Base(filepath.Dir(layout.AgentBinary)) != identity.InstallDirName || filepath.Base(layout.AgentBinary) != identity.AgentName {
+		t.Fatal("bootstrap ignored the Controller-issued layout")
 	}
 	// The oboard-named binaries must be gone; the identity-named ones live
 	// in a randomly named sibling directory, and the fixed staging
