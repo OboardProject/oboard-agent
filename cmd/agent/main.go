@@ -323,6 +323,7 @@ func runStealthBootstrap(args []string) int {
 	manager := fs.String("manager", "", "service manager: systemd or openrc")
 	cleanupExisting := fs.Bool("cleanup-existing", false, "remove previous managed installations after replacement is running")
 	listExisting := fs.Bool("list-existing", false, "list verified previous managed services before starting the replacement")
+	reuseExisting := fs.Bool("reuse-existing", false, "verify and reuse the Controller-issued security-process layout")
 	keepConfig := fs.String("keep-config", "", "configuration of the replacement installation to preserve")
 	controllerURL := fs.String("controller-url", "", "Controller base URL recorded in the encrypted config")
 	updateSource := fs.String("update-source", "panel", "agent update source: panel or github")
@@ -363,6 +364,15 @@ func runStealthBootstrap(args []string) int {
 		fmt.Fprintf(os.Stderr, "invalid stealth identity: %v\n", err)
 		return 2
 	}
+	if *reuseExisting {
+		layout, err := agent.InspectExistingStealthInstall(agent.StealthBootstrapOptions{InstallDir: *installDir, Manager: *manager, ConfigParent: *configParent, StateParent: *stateParent}, *identity)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "existing stealth layout verification failed: %v\n", err)
+			return 1
+		}
+		printStealthBootstrapLayout(layout)
+		return 0
+	}
 	layout, err := agent.RunStealthBootstrap(agent.StealthBootstrapOptions{
 		InstallDir:           *installDir,
 		Manager:              *manager,
@@ -380,6 +390,11 @@ func runStealthBootstrap(args []string) int {
 		fmt.Fprintf(os.Stderr, "stealth bootstrap failed: %v\n", err)
 		return 1
 	}
+	printStealthBootstrapLayout(layout)
+	return 0
+}
+
+func printStealthBootstrapLayout(layout stealth.Layout) {
 	// Shell-sourceable output for the installer script. Paths are validated
 	// generated names without quotes or expansions.
 	fmt.Printf("STEALTH_AGENT_BIN=%s\n", layout.AgentBinary)
@@ -388,5 +403,4 @@ func runStealthBootstrap(args []string) int {
 	fmt.Printf("STEALTH_KEY_PATH=%s\n", layout.KeyPath)
 	fmt.Printf("STEALTH_AGENT_SERVICE=%s\n", layout.AgentService)
 	fmt.Printf("STEALTH_CORE_SERVICE=%s\n", layout.CoreService)
-	return 0
 }

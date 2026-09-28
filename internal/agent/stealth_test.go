@@ -167,6 +167,17 @@ func TestStealthBootstrapCreatesHiddenLayout(t *testing.T) {
 	if cfg.ControllerURL != "https://controller.example.com" || cfg.AgentService != layout.AgentService || cfg.Stealth == nil {
 		t.Fatalf("decrypted config = %+v", cfg)
 	}
+	reused, err := InspectExistingStealthInstall(stealthBootstrapOptions{InstallDir: installDir, Manager: "systemd", ConfigParent: configParent, StateParent: stateParent, UnitDir: unitDir, LogDir: logDir, RunDir: runDir}, identity)
+	if err != nil || reused.AgentBinary != layout.AgentBinary {
+		t.Fatalf("existing partial installation was not safely recognized: %v", err)
+	}
+	other, err := stealth.GenerateIdentity(stealth.CollisionCheck{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InspectExistingStealthInstall(stealthBootstrapOptions{InstallDir: installDir, Manager: "systemd", ConfigParent: configParent, StateParent: stateParent, UnitDir: unitDir, LogDir: logDir, RunDir: runDir}, other); err == nil {
+		t.Fatal("different Controller identity reused an unrelated installation")
+	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("stealth config invalid: %v", err)
 	}

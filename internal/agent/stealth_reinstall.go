@@ -128,6 +128,59 @@ func listPreviousAgentServices(opts stealthBootstrapOptions, keepConfig string) 
 	return append(orderedAgents, orderedCores...), nil
 }
 
+// InspectExistingStealthInstall verifies the Controller-issued layout and
+// managed units before a reinstall replaces binaries in place.
+func InspectExistingStealthInstall(opts stealthBootstrapOptions, identity stealth.Identity) (stealth.Layout, error) {
+	opts = opts.withDefaults()
+	if err := identity.Validate(); err != nil {
+		return stealth.Layout{}, err
+	}
+	installDir, err := stealth.NormalizeInstallDir(opts.InstallDir)
+	if err != nil {
+		return stealth.Layout{}, err
+	}
+	layout := stealth.ResolveLayout(identity, filepath.Join(filepath.Dir(installDir), identity.InstallDirName), opts.ConfigParent, opts.StateParent)
+	layout.AgentLog = filepath.Join(opts.LogDir, identity.AgentLogName+".log")
+	layout.CoreLog = filepath.Join(opts.LogDir, identity.CoreLogName+".log")
+	layout.CoreSocket = filepath.Join(opts.RunDir, identity.SocketName+".sock")
+	directory, err := os.Lstat(filepath.Dir(layout.AgentBinary))
+	if err != nil || !directory.IsDir() || directory.Mode()&os.ModeSymlink != 0 {
+		return stealth.Layout{}, fmt.Errorf("existing layout installation directory is missing or redirected")
+	}
+	key, err := stealth.LoadKey(layout.KeyPath)
+	if err != nil {
+		return stealth.Layout{}, fmt.Errorf("existing layout key: %w", err)
+	}
+	cfg, err := LoadConfigWithKey(layout.ConfigPath, key)
+	if err != nil {
+		return stealth.Layout{}, fmt.Errorf("existing layout config: %w", err)
+	}
+	if cfg.Stealth == nil || cfg.Stealth.Identity != identity || cfg.Stealth.KeyPath != layout.KeyPath || cfg.CoreBinary != layout.CoreBinary || cfg.StateDir != layout.StateDir || cfg.AgentService != layout.AgentService || cfg.CoreService != layout.CoreService || cfg.CoreSocket != layout.CoreSocket {
+		return stealth.Layout{}, fmt.Errorf("existing installation does not match the Controller-issued layout")
+	}
+	for _, path := range []string{layout.AgentBinary, layout.CoreBinary, layout.RealmBinary} {
+		info, err := os.Lstat(path)
+		if err != nil || !info.Mode().IsRegular() || info.Mode()&0o111 == 0 {
+			return stealth.Layout{}, fmt.Errorf("existing layout binary is missing: %s", path)
+		}
+	}
+	unitSuffix := ".service"
+	agentBinding := "ExecStart=" + layout.AgentBinary + " -config " + layout.ConfigPath + " -key " + layout.KeyPath
+	coreBinding := "ExecStart=" + layout.CoreBinary + " -config " + stealthCoreConfigPath(layout.StateDir, key) + " -key " + layout.KeyPath
+	if opts.Manager == "openrc" {
+		unitSuffix = ""
+		agentBinding = "command=" + layout.AgentBinary
+		coreBinding = "command=" + layout.CoreBinary
+	}
+	for _, unit := range []struct{ name, binding string }{{layout.AgentService, agentBinding}, {layout.CoreService, coreBinding}} {
+		data, err := os.ReadFile(filepath.Join(opts.UnitDir, unit.name+unitSuffix))
+		if err != nil || !strings.Contains("\n"+string(data), "\n"+unit.binding) || !strings.Contains(string(data), " -key "+layout.KeyPath) {
+			return stealth.Layout{}, fmt.Errorf("existing managed unit is missing or changed: %s", unit.name)
+		}
+	}
+	return layout, nil
+}
+
 // CleanupPreviousAgentInstalls is an installer-only operation. The replacement
 // must already be enrolled and running before its installer invokes it.
 func CleanupPreviousAgentInstalls(manager, keepConfig string) error {
