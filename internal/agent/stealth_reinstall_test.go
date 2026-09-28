@@ -85,6 +85,27 @@ func TestStealthReinstallCleansPreviousLayouts(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(opts.UnitDir, "unrelated"+suffix), []byte("unrelated service"), 0600); err != nil {
 				t.Fatal(err)
 			}
+			previous, err := listPreviousAgentServices(opts, replacement.ConfigPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			listed := map[string]bool{}
+			position := map[string]int{}
+			for index, service := range previous {
+				listed[service] = true
+				position[service] = index
+			}
+			for _, service := range []string{randomOld.AgentService, randomOld.CoreService, old.AgentService, old.CoreService, "oboard-agent"} {
+				if !listed[service] {
+					t.Fatalf("previous service %s was not discovered: %v", service, previous)
+				}
+			}
+			if listed[replacement.AgentService] || listed[replacement.CoreService] || listed["unrelated"] {
+				t.Fatalf("replacement or unrelated service was selected: %v", previous)
+			}
+			if position[old.AgentService] > position[old.CoreService] || position[randomOld.AgentService] > position[randomOld.CoreService] {
+				t.Fatalf("old Agent must stop before its kernel: %v", previous)
+			}
 			if err := cleanupPreviousAgentInstalls(opts, replacement.ConfigPath); err != nil {
 				t.Fatal(err)
 			}

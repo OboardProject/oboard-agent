@@ -322,6 +322,7 @@ func runStealthBootstrap(args []string) int {
 	installDir := fs.String("install-dir", "/usr/local/bin", "directory holding the downloaded oboard-agent, oboard-sb, and oboard-realm binaries")
 	manager := fs.String("manager", "", "service manager: systemd or openrc")
 	cleanupExisting := fs.Bool("cleanup-existing", false, "remove previous managed installations after replacement is running")
+	listExisting := fs.Bool("list-existing", false, "list verified previous managed services before starting the replacement")
 	keepConfig := fs.String("keep-config", "", "configuration of the replacement installation to preserve")
 	controllerURL := fs.String("controller-url", "", "Controller base URL recorded in the encrypted config")
 	updateSource := fs.String("update-source", "panel", "agent update source: panel or github")
@@ -339,6 +340,17 @@ func runStealthBootstrap(args []string) int {
 		if err := agent.CleanupPreviousAgentInstalls(*manager, *keepConfig); err != nil {
 			fmt.Fprintf(os.Stderr, "previous Agent cleanup failed: %v\n", err)
 			return 1
+		}
+		return 0
+	}
+	if *listExisting {
+		services, err := agent.ListPreviousAgentServices(*manager, *keepConfig)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "previous Agent service discovery failed: %v\n", err)
+			return 1
+		}
+		for _, service := range services {
+			fmt.Println(service)
 		}
 		return 0
 	}
