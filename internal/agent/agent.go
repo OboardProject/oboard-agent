@@ -1711,6 +1711,8 @@ func (r *Runner) executeAgentTask(task model.AgentTask) (string, string) {
 			return "failed", jsonMap(result)
 		}
 		return "succeeded", jsonMap(result)
+	case model.AgentTaskTypeNetworkPing, model.AgentTaskTypeNetworkTrace, model.AgentTaskTypeNetworkTCP, model.AgentTaskTypeNetworkDNS, model.AgentTaskTypeNetworkHTTP:
+		return r.executeNetworkDiagnosticTask(task)
 	case model.AgentTaskTypeDiagnoseNetwork:
 		result := r.runNetworkDiagnostics(task.PayloadJSON)
 		return "succeeded", jsonMap(result)
@@ -1826,8 +1828,6 @@ func (r *Runner) executeAgentTask(task model.AgentTask) (string, string) {
 		return r.executeRemoteExecTask(task)
 	case model.AgentTaskTypeRemoteOperation:
 		return r.executeRemoteOperationTask(task)
-	case model.AgentTaskTypeHostPowerAction:
-		return r.executeHostPowerTask(task)
 	default:
 		return "failed", jsonResult("unknown task type")
 	}
@@ -3778,8 +3778,8 @@ func (r *Runner) agentCapabilities(kernelCapabilities []string) []string {
 		model.AgentCapabilityAuthorizationControl,
 		model.AgentCapabilityRuntimeUsers,
 		"runtime_users_snell_psk_control_v1",
-		model.AgentCapabilityHostPower,
 		model.AgentCapabilityStealth)
+	capabilities = append(capabilities, networkDiagnosticCapabilities()...)
 	for _, capability := range kernelCapabilities {
 		if capability == "account_activity_local_v1" {
 			capabilities = append(capabilities, "account_activity_v1")

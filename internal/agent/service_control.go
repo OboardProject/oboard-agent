@@ -69,26 +69,6 @@ func inspectManagedService(manager, name string) (string, error) {
 	return "active", nil
 }
 
-func invokeHostPowerCommand(action string) error {
-	manager := detectServiceManager()
-	switch action {
-	case "poweroff", "reboot":
-	default:
-		return errors.New("unsupported host power action")
-	}
-	switch manager {
-	case "systemd":
-		return runCommand(15*time.Second, "systemctl", action)
-	case "openrc":
-		if action == "poweroff" {
-			return runCommand(15*time.Second, "poweroff")
-		}
-		return runCommand(15*time.Second, "reboot")
-	default:
-		return errors.New("capability_unsupported")
-	}
-}
-
 // windowsServiceAction runs a local management console action on an SCM
 // service.
 func windowsServiceAction(action, service string) error {

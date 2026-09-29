@@ -29,9 +29,6 @@ func TestPluginLocalPolicyRequiresExplicitGrant(t *testing.T) {
 						t.Fatalf("feature=%s grant=%v policy=%+v", feature, allow, policy)
 					}
 				}
-				if policy.Allows("host-power") {
-					t.Fatal("plugin grant must not grant host power")
-				}
 				raw, err := json.Marshal(policy)
 				if err != nil || !strings.Contains(string(raw), `"plugins_enabled":`) || strings.Contains(string(raw), "scripts_enabled") {
 					t.Fatalf("policy JSON: %s, %v", raw, err)

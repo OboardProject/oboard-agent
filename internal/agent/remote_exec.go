@@ -317,8 +317,6 @@ func (r *Runner) executeRemoteOperationTask(task model.AgentTask) (string, strin
 	}
 	gate := "mcp_enabled"
 	switch payload.Origin {
-	case model.RemoteExecOriginPlugin:
-		gate = "plugins"
 	case model.RemoteExecOriginMCP, model.RemoteExecOriginPanel:
 	default:
 		return "failed", jsonMap(map[string]any{"error": "unsupported remote operation origin", "code": "invalid_input"})

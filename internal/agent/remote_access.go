@@ -40,7 +40,6 @@ func (r *Runner) remoteAccessReport() model.RemoteAccessReport {
 			model.RemoteAccessCapabilityExec,
 			model.RemoteAccessCapabilityInteractiveMCP,
 			model.RemoteAccessCapabilityLocalGate,
-			model.AgentCapabilityHostPower,
 		},
 		LocalMode:  policy.Mode,
 		LocalAllow: policy.Allow,
@@ -52,8 +51,5 @@ func (r *Runner) localGateAllows(feature string) bool {
 }
 
 func localGateFeatureForExec(origin, mode string) string {
-	if origin == model.RemoteExecOriginPlugin {
-		return "plugins"
-	}
 	return "mcp_enabled"
 }

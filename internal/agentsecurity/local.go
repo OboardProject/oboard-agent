@@ -45,8 +45,6 @@ func (p Policy) Allows(feature string) bool {
 	switch feature {
 	case "plugins", "plugins_enabled":
 		return p.Allow.PluginsEnabled
-	case "host_power", "host_power_enabled", "host-power":
-		return p.Allow.HostPowerEnabled
 	case "remote_terminal":
 		return p.Mode != model.RemoteAccessModeHardened || p.Allow.RemoteTerminal
 	case "mcp_remote_operations", "mcp_structured_exec", "mcp_raw_shell", "mcp_interactive_terminal", "mcp_interactive", "mcp_enabled":
@@ -160,8 +158,6 @@ func (s *Store) SetAllow(feature string, allow bool) error {
 		policy.Allow.MCPEnabled = allow
 	case "plugins", "plugins_enabled":
 		policy.Allow.PluginsEnabled = allow
-	case "host-power", "host_power", "host_power_enabled":
-		policy.Allow.HostPowerEnabled = allow
 	default:
 		return errors.New("unknown remote-access feature")
 	}
