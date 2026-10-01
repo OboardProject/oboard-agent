@@ -13,7 +13,6 @@ const (
 	CapabilityVLESS            = "vless"
 	CapabilityHysteria2        = "hysteria2"
 	CapabilityShadowsocksMulti = "shadowsocks-multi"
-	CapabilitySnellMulti       = "snell-multi"
 	CapabilitySnellPSK         = "snell-psk"
 )
 

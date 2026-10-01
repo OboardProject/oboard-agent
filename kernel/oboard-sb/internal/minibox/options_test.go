@@ -1,6 +1,7 @@
 package minibox
 
 import (
+	"fmt"
 	"github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/protocol/snell"
 	"os"
 	"path/filepath"
@@ -260,7 +261,7 @@ func TestLoadConfigAcceptsSnellOptions(t *testing.T) {
 			"listen":"0.0.0.0",
 			"listen_port":6160,
 			"version":5,
-			"psk":"server-psk",
+			"auth_mode":"multi_psk","users":[{"name":"alice","psk":"server-psk"}],
 			"obfs_mode":"http"
 		}],
 		"outbounds":[{
@@ -283,7 +284,7 @@ func TestLoadConfigAcceptsSnellOptions(t *testing.T) {
 		t.Fatal(err)
 	}
 	inboundOptions, ok := opts.Inbounds[0].Options.(*snell.InboundOptions)
-	if !ok || inboundOptions.Version != 5 || inboundOptions.PSK != "server-psk" || inboundOptions.Mode != "" {
+	if !ok || inboundOptions.Version != 5 || inboundOptions.AuthMode != "multi_psk" || inboundOptions.PSK != "" || inboundOptions.Mode != "" {
 		t.Fatalf("snell inbound options not decoded: %#v", opts.Inbounds[0].Options)
 	}
 	outboundOptions, ok := opts.Outbounds[0].Options.(*option.SnellOutboundOptions)
@@ -292,57 +293,20 @@ func TestLoadConfigAcceptsSnellOptions(t *testing.T) {
 	}
 }
 
-// OBoard projects one Snell inbound into one single-user listener per user, so
-// the generated config carries no `users` table. Keeping Users empty is what
-// keeps sing-box on the single-user service, which authenticates with the PSK
-// alone and therefore accepts Surge and every other client that has no userkey
-// field.
-func TestLoadConfigKeepsGeneratedSnellListenersSingleUser(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.json")
-	raw := `{
-		"inbounds":[{
-			"type":"snell",
-			"tag":"in-2-u1",
-			"listen":"0.0.0.0",
-			"listen_port":40017,
-			"version":5,
-			"psk":"df37W6_0LElKKQ7WNC9TBW3iPmo4-VrNmYbBtG871uM"
-		},{
-			"type":"snell",
-			"tag":"in-2-u2",
-			"listen":"0.0.0.0",
-			"listen_port":40023,
-			"version":6,
-			"psk":"9aGT2FGIOaeWJu7iB65gNU3GXM0hR70HfQuB3c1mNDA",
-			"mode":"unshaped"
-		}],
-		"outbounds":[{"type":"direct","tag":"direct"}],
-		"route":{"final":"direct"}
-	}`
-	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	opts, _, err := LoadConfig(path, nil, HY2Tuning{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(opts.Inbounds) != 2 {
-		t.Fatalf("want 2 generated snell listeners, got %d", len(opts.Inbounds))
-	}
-	for index, want := range []struct {
-		tag     string
-		version int
-		port    uint16
-	}{{"in-2-u1", 5, 40017}, {"in-2-u2", 6, 40023}} {
-		listener, ok := opts.Inbounds[index].Options.(*snell.InboundOptions)
-		if !ok {
-			t.Fatalf("snell listener %d not decoded: %#v", index, opts.Inbounds[index].Options)
+func TestLoadConfigKeepsGeneratedSnellSharedListeners(t *testing.T) {
+	for _, version := range []int{5, 6} {
+		path := filepath.Join(t.TempDir(), "config.json")
+		raw := fmt.Sprintf(`{"inbounds":[{"type":"snell","tag":"in-2","listen":"0.0.0.0","listen_port":6160,"version":%d,"auth_mode":"multi_psk","users":[]}],"outbounds":[{"type":"direct","tag":"direct"}],"route":{"final":"direct"}}`, version)
+		if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+			t.Fatal(err)
 		}
-		if opts.Inbounds[index].Tag != want.tag || listener.Version != want.version || listener.ListenPort != want.port {
-			t.Fatalf("snell listener %d = tag %q version %d port %d", index, opts.Inbounds[index].Tag, listener.Version, listener.ListenPort)
+		opts, _, err := LoadConfig(path, nil, HY2Tuning{})
+		if err != nil {
+			t.Fatal(err)
 		}
-		if len(listener.Users) != 0 {
-			t.Fatalf("snell listener %d must stay single-user, got users %#v", index, listener.Users)
+		listener, ok := opts.Inbounds[0].Options.(*snell.InboundOptions)
+		if !ok || listener.AuthMode != "multi_psk" || listener.PSK != "" || listener.ListenPort != 6160 || len(listener.Users) != 0 {
+			t.Fatalf("shared Snell listener corrupted: %#v", listener)
 		}
 	}
 }
@@ -356,7 +320,7 @@ func TestLoadConfigAcceptsSnellV6Options(t *testing.T) {
 			"listen":"0.0.0.0",
 			"listen_port":7177,
 			"version":6,
-			"psk":"v6-psk",
+			"auth_mode":"multi_psk","users":[{"name":"alice","psk":"v6-psk-123456"}],
 			"mode":"unshaped"
 		}],
 		"outbounds":[{

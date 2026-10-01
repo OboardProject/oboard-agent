@@ -5,8 +5,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"github.com/sagernet/sing-box/option"
 	"io"
+
+	"github.com/sagernet/sing-box/option"
 )
 
 type User struct {
@@ -36,27 +37,20 @@ func (o *InboundOptions) UnmarshalJSON(data []byte) error {
 		return fmt.Errorf("invalid snell options")
 	}
 	*o = InboundOptions(candidate)
-	if o.AuthMode != "" && o.AuthMode != "multi_psk" {
+	if o.AuthMode != "multi_psk" {
 		return fmt.Errorf("unknown snell auth_mode")
 	}
-	if o.AuthMode == "multi_psk" {
-		if o.PSK != "" {
-			return fmt.Errorf("multi_psk forbids a global psk")
-		}
-		if o.Mode == "unsafe-raw" {
-			return fmt.Errorf("snell_unsafe_mode_not_allowed")
-		}
-		for _, u := range o.Users {
-			if u.PSK == "" || u.UserKey != "" || u.Name == "" {
-				return fmt.Errorf("snell runtime user requires name and psk")
-			}
-		}
-	} else {
-		for _, u := range o.Users {
-			if u.PSK != "" {
-				return fmt.Errorf("psk users require multi_psk")
-			}
+	if o.PSK != "" {
+		return fmt.Errorf("multi_psk forbids a global psk")
+	}
+	if o.Mode == "unsafe-raw" {
+		return fmt.Errorf("snell_unsafe_mode_not_allowed")
+	}
+	for _, u := range o.Users {
+		if u.PSK == "" || u.UserKey != "" || u.Name == "" {
+			return fmt.Errorf("snell runtime user requires name and psk")
 		}
 	}
+
 	return nil
 }

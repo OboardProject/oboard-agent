@@ -30,8 +30,11 @@ func validateSnellCoreConfig(raw []byte) error {
 		return err
 	}
 	for _, in := range config.Inbounds {
-		if in.Type != "snell" || in.AuthMode != "multi_psk" {
+		if in.Type != "snell" {
 			continue
+		}
+		if in.AuthMode != "multi_psk" {
+			return fmt.Errorf("snell inbound requires multi_psk")
 		}
 		if in.Mode == "unsafe-raw" {
 			return fmt.Errorf("snell_unsafe_mode_not_allowed")
