@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -15,23 +14,40 @@ import (
 	box "github.com/sagernet/sing-box"
 )
 
-func TestRuntimeUsersRestoreAfterRemovingInbound(t *testing.T) {
-	for _, scope := range [][]string{{"in-1"}, {}} {
-		t.Run(fmt.Sprint(scope), func(t *testing.T) {
+func TestRuntimeUsersRestoreAfterTopologyChange(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		scope       []string
+		convert     bool
+		removeRoute bool
+	}{
+		{"remove inbound", []string{"in-1"}, false, false},
+		{"remove all", nil, false, false},
+		{"change protocol", []string{"in-1", "in-56"}, true, false},
+		{"remove route", []string{"in-1", "in-56"}, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			scope := tc.scope
 			path := filepath.Join(t.TempDir(), "kernel-users.json")
+			converted := false
+			routeRemoved := false
 			start := func(scope []string) *RuntimeUsers {
 				t.Helper()
 				inbounds := []map[string]any{}
 				for _, tag := range scope {
 					in := map[string]any{"tag": tag, "listen": "127.0.0.1", "listen_port": 0, "users": []any{}}
-					if tag == "in-1" {
+					if tag == "in-1" || converted {
 						in["type"], in["version"], in["auth_mode"] = "snell", 6, "multi_psk"
 					} else {
 						in["type"], in["method"] = "shadowsocks", "aes-128-gcm"
 					}
 					inbounds = append(inbounds, in)
 				}
-				raw, err := json.Marshal(map[string]any{"inbounds": inbounds, "outbounds": []map[string]any{{"type": "direct", "tag": "direct"}}, "_oboard": map[string]any{"runtime_users": map[string]any{"inbounds": scope}}})
+				outbounds := []map[string]any{{"type": "direct", "tag": "direct"}}
+				if !routeRemoved {
+					outbounds = append(outbounds, map[string]any{"type": "direct", "tag": "old-route"})
+				}
+				raw, err := json.Marshal(map[string]any{"inbounds": inbounds, "outbounds": outbounds, "_oboard": map[string]any{"runtime_users": map[string]any{"inbounds": scope}}})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -59,6 +75,7 @@ func TestRuntimeUsersRestoreAfterRemovingInbound(t *testing.T) {
 			old := start(oldScope)
 			ss := testUserEntry("in-56", "bob", "ss-key")
 			ss.Credential = UserCredential{Password: "test-password"}
+			ss.RouteOutbound = "old-route"
 			entries := []UserInstallEntry{snellTestEntry("alice", "snell-key", "test-snell-psk-123456", 1), ss}
 			digest, err := UsersDigest(10, oldScope, entries)
 			if err != nil {
@@ -98,6 +115,8 @@ func TestRuntimeUsersRestoreAfterRemovingInbound(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			converted = tc.convert
+			routeRemoved = tc.removeRoute
 			restarted := start(scope)
 			if err := restarted.Restore(); err != nil {
 				t.Fatalf("restart after removing Shadowsocks: %v", err)
@@ -115,7 +134,11 @@ func TestRuntimeUsersRestoreAfterRemovingInbound(t *testing.T) {
 			if len(scope) > 0 && restarted.tracker.stateForKey("user:alice") == nil {
 				t.Fatal("Snell user was not restored")
 			}
-			if _, err := restarted.Install(req); !errors.Is(err, ErrUserInstallCapability) {
+			wantReplayError := ErrUserInstallCapability
+			if len(scope) == 2 {
+				wantReplayError = ErrUserInstallIllegal
+			}
+			if _, err := restarted.Install(req); !errors.Is(err, wantReplayError) {
 				t.Fatalf("live replay accepted removed scope: %v", err)
 			}
 			stale := req
@@ -124,6 +147,8 @@ func TestRuntimeUsersRestoreAfterRemovingInbound(t *testing.T) {
 			if _, err := restarted.Install(stale); !errors.Is(err, ErrUserInstallBase) {
 				t.Fatalf("older snapshot accepted: %v", err)
 			}
+			converted = false
+			routeRemoved = false
 			rollback := start(oldScope)
 			if err := rollback.Restore(); err != nil {
 				t.Fatalf("rollback: %v", err)

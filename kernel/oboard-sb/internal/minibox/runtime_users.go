@@ -213,7 +213,7 @@ func (r *RuntimeUsers) Restore() error {
 		}
 	}
 	for _, entry := range snapshot.Entries {
-		if containsString(restored.Scope, entry.InboundTag) {
+		if containsString(restored.Scope, entry.InboundTag) && r.canRestoreUser(entry) {
 			restored.Entries = append(restored.Entries, entry)
 		}
 	}
@@ -234,6 +234,28 @@ func (r *RuntimeUsers) Restore() error {
 		return r.persist(persistedUsers{Current: snapshot, Commit: "current"})
 	}
 	return nil
+}
+
+// Stable inbound tags can name a new protocol, and topology edits can remove
+// routes. Retain the snapshot for rollback without installing obsolete users.
+func (r *RuntimeUsers) canRestoreUser(entry UserInstallEntry) bool {
+	if r.instance == nil {
+		return false
+	}
+	if _, ok := r.instance.Outbound().Outbound(entry.RouteOutbound); !ok {
+		return false
+	}
+	c := entry.Credential
+	switch r.inboundCapability(entry.InboundTag) {
+	case runtimeuser.CapabilitySnellPSK:
+		return c.PSK != "" && c.Password == "" && c.UUID == "" && c.UserKey == "" && c.Flow == ""
+	case runtimeuser.CapabilityVLESS:
+		return c.UUID != "" && c.Password == "" && c.PSK == "" && c.UserKey == ""
+	case runtimeuser.CapabilityHysteria2, runtimeuser.CapabilityShadowsocksMulti:
+		return c.Password != "" && c.UUID == "" && c.PSK == "" && c.UserKey == "" && c.Flow == ""
+	default:
+		return false
+	}
 }
 
 func (r *RuntimeUsers) Status() UsersStatus {
