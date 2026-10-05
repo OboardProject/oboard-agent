@@ -4,6 +4,7 @@ package snell
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -51,6 +52,7 @@ type Inbound struct {
 	gate       runtimeuser.AdmissionGate
 	ctx        context.Context
 	lastError  atomic.Int64
+	lastBudget atomic.Int64
 	closed     atomic.Bool
 }
 
@@ -185,6 +187,12 @@ func (h *Inbound) NewConnection(ctx context.Context, conn net.Conn, metadata ada
 	err := h.service.NewConnection(adapter.WithContext(ctx, &metadata), conn, metadata.Source, closeParent)
 	if err != nil {
 		N.CloseOnHandshakeFailure(conn, onClose, err)
+		if errors.Is(err, multipsk.ErrBudget) {
+			if now := time.Now().Unix(); h.lastBudget.Swap(now) != now {
+				h.logger.WarnContext(ctx, "snell authentication capacity exhausted")
+			}
+			return
+		}
 		if now := time.Now().Unix(); h.lastError.Swap(now) != now {
 			h.logger.DebugContext(ctx, "snell authentication rejected")
 		}

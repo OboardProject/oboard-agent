@@ -22,8 +22,8 @@ import (
 const (
 	MaxCredentials     = 64
 	HandshakeTimeout   = 5 * time.Second
-	MaxPending         = 128
-	MaxListenerPending = 16
+	MaxPending         = 512
+	MaxListenerPending = 256
 	MaxFirstHeader     = 16 + 128 + 128 + snell.HeaderCipherLen
 )
 
@@ -65,31 +65,10 @@ type hint struct {
 	ids     [][32]byte
 	expires time.Time
 }
-type bucket struct {
-	tokens float64
-	last   time.Time
-}
-
-func (b *bucket) take(now time.Time, rate, burst float64) bool {
-	if b.last.IsZero() {
-		b.tokens = burst
-	} else {
-		b.tokens = min(burst, b.tokens+now.Sub(b.last).Seconds()*rate)
-	}
-	b.last = now
-	if b.tokens < 1 {
-		return false
-	}
-	b.tokens--
-	return true
-}
-
 type scheduler struct {
 	pending chan struct{}
 	work    chan struct{}
 	once    sync.Once
-	mu      sync.Mutex
-	rate    bucket
 }
 
 // Go 1.26's default GOMAXPROCS follows the effective cgroup CPU quota.
@@ -103,17 +82,14 @@ type Manager struct {
 	snapshot  atomic.Pointer[Snapshot]
 	mu        sync.Mutex
 	hints     map[string]hint
-	sources   map[string]bucket
-	rate      bucket
 	pending   chan struct{}
-	derive    chan struct{}
 	admit     AdmitFunc
 	namespace string
 	Metrics   Metrics
 }
 
 func New(namespace string, admit AdmitFunc) *Manager {
-	m := &Manager{namespace: namespace, admit: admit, hints: map[string]hint{}, sources: map[string]bucket{}, pending: make(chan struct{}, MaxListenerPending), derive: make(chan struct{}, 1)}
+	m := &Manager{namespace: namespace, admit: admit, hints: map[string]hint{}, pending: make(chan struct{}, MaxListenerPending)}
 	m.snapshot.Store(&Snapshot{})
 	return m
 }
@@ -147,6 +123,9 @@ func (m *Manager) Current(c *Credential) bool {
 	return false
 }
 func (m *Manager) Admit(ctx context.Context, c *Credential, conn net.Conn) (context.Context, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if !m.Current(c) {
 		return nil, ErrCredential
 	}
@@ -221,7 +200,10 @@ func (m *Manager) Remember(source string, c *Credential) {
 	}
 	m.hints[source] = hint{ids: ids, expires: time.Now().Add(5 * time.Minute)}
 }
-func (m *Manager) Begin(ctx context.Context, conn net.Conn, source string) (context.Context, func(bool), error) {
+func (m *Manager) Begin(ctx context.Context, conn net.Conn) (context.Context, func(bool), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
 	reject := func() (context.Context, func(bool), error) {
 		m.Metrics.BudgetRejected.Add(1)
 		return nil, nil, ErrBudget
@@ -237,25 +219,6 @@ func (m *Manager) Begin(ctx context.Context, conn net.Conn, source string) (cont
 		<-process.pending
 		return reject()
 	}
-	m.mu.Lock()
-	b := m.sources[source]
-	allowed := b.take(time.Now(), 8, 16)
-	if len(m.sources) < 1024 || !b.last.IsZero() && m.sources[source].last != (time.Time{}) {
-		m.sources[source] = b
-	} else {
-		allowed = false
-	}
-	for k, v := range m.sources {
-		if time.Since(v.last) > time.Minute {
-			delete(m.sources, k)
-		}
-	}
-	m.mu.Unlock()
-	if !allowed {
-		<-m.pending
-		<-process.pending
-		return reject()
-	}
 	ctx, cancel := context.WithTimeout(ctx, HandshakeTimeout)
 	deadline, _ := ctx.Deadline()
 	if err := conn.SetDeadline(deadline); err != nil {
@@ -264,6 +227,12 @@ func (m *Manager) Begin(ctx context.Context, conn net.Conn, source string) (cont
 		<-process.pending
 		return nil, nil, err
 	}
+	// Interrupt socket reads on parent cancellation as well as on the deadline.
+	interrupted := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() {
+		_ = conn.SetDeadline(time.Now())
+		close(interrupted)
+	})
 	m.Metrics.Pending.Add(1)
 	var once sync.Once
 	return ctx, func(success bool) {
@@ -275,6 +244,9 @@ func (m *Manager) Begin(ctx context.Context, conn net.Conn, source string) (cont
 			} else {
 				m.Metrics.Failure.Add(1)
 			}
+			if !stop() {
+				<-interrupted
+			}
 			cancel()
 			_ = conn.SetDeadline(time.Time{})
 			m.Metrics.Pending.Add(-1)
@@ -284,42 +256,11 @@ func (m *Manager) Begin(ctx context.Context, conn net.Conn, source string) (cont
 	}, nil
 }
 func (m *Manager) Derive(ctx context.Context, c *Credential, salt []byte) (cipher.AEAD, error) {
-	process.once.Do(func() { process.work = make(chan struct{}, max(1, min(2, runtime.GOMAXPROCS(0)))) })
+	// Only complete candidate headers reach this queue. Pending handshake slots
+	// bound its size; idle sockets never hold a CPU slot. Yield between candidates
+	// so a cold 64-PSK search cannot monopolize a worker.
+	process.once.Do(func() { process.work = make(chan struct{}, max(1, min(8, runtime.GOMAXPROCS(0)))) })
 	start := time.Now()
-	select {
-	case m.derive <- struct{}{}:
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
-	defer func() { <-m.derive }()
-	waitBudget := func(mu *sync.Mutex, b *bucket, rate, burst float64) error {
-		for {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			mu.Lock()
-			allowed := b.take(time.Now(), rate, burst)
-			mu.Unlock()
-			if allowed {
-				return nil
-			}
-			timer := time.NewTimer(time.Duration(float64(time.Second) / rate))
-			select {
-			case <-timer.C:
-			case <-ctx.Done():
-				timer.Stop()
-				return ctx.Err()
-			}
-		}
-	}
-	if err := waitBudget(&m.mu, &m.rate, 1000, 64); err != nil {
-		m.Metrics.BudgetRejected.Add(1)
-		return nil, err
-	}
-	if err := waitBudget(&process.mu, &process.rate, 4000, 128); err != nil {
-		m.Metrics.BudgetRejected.Add(1)
-		return nil, err
-	}
 	select {
 	case process.work <- struct{}{}:
 	case <-ctx.Done():
@@ -331,7 +272,11 @@ func (m *Manager) Derive(ctx context.Context, c *Credential, salt []byte) (ciphe
 	}
 	m.Metrics.QueueNanos.Add(uint64(time.Since(start)))
 	m.Metrics.Attempts.Add(1)
-	return snell.NewAEAD(snell.DeriveKey(c.PSK, salt))
+	key := snell.DeriveKey(c.PSK, salt)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return snell.NewAEAD(key)
 }
 func CheckReplay(c *Credential, salt []byte) error {
 	key := sha256.Sum256(append(append([]byte(nil), c.ID[:]...), salt...))

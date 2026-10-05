@@ -109,14 +109,14 @@ func TestAuthenticationPendingCapacityCancellationAndDeadline(t *testing.T) {
 	var closers []func()
 	for i := 0; i < MaxListenerPending; i++ {
 		a, b := net.Pipe()
-		_, finish, err := m.Begin(context.Background(), b, fmt.Sprint(i))
+		_, finish, err := m.Begin(context.Background(), b)
 		if err != nil {
 			t.Fatal(err)
 		}
 		closers = append(closers, func() { finish(false); a.Close(); b.Close() })
 	}
 	a, b := net.Pipe()
-	if _, _, err := m.Begin(context.Background(), b, "overflow"); !errors.Is(err, ErrBudget) {
+	if _, _, err := m.Begin(context.Background(), b); !errors.Is(err, ErrBudget) {
 		t.Fatal("unbounded pending handshakes")
 	}
 	a.Close()
@@ -132,7 +132,7 @@ func TestAuthenticationPendingCapacityCancellationAndDeadline(t *testing.T) {
 	defer b.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
 	defer cancel()
-	handshake, finish, err := m.Begin(ctx, b, "deadline")
+	handshake, finish, err := m.Begin(ctx, b)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,5 +147,121 @@ func TestAuthenticationPendingCapacityCancellationAndDeadline(t *testing.T) {
 	finish(false)
 	if m.Metrics.Pending.Load() != 0 {
 		t.Fatal("timeout resources leaked")
+	}
+}
+
+func TestGlobalPendingBudgetAndRecovery(t *testing.T) {
+	var finishes []func(bool)
+	defer func() {
+		for _, finish := range finishes {
+			finish(false)
+		}
+	}()
+	for listener := 0; listener < MaxPending/MaxListenerPending; listener++ {
+		m := New(fmt.Sprint(listener), nil)
+		for i := 0; i < MaxListenerPending; i++ {
+			a, b := net.Pipe()
+			t.Cleanup(func() { a.Close(); b.Close() })
+			_, finish, err := m.Begin(context.Background(), b)
+			if err != nil {
+				t.Fatal(err)
+			}
+			finishes = append(finishes, finish)
+		}
+	}
+	m := New("overflow", nil)
+	a, b := net.Pipe()
+	defer a.Close()
+	defer b.Close()
+	if _, _, err := m.Begin(context.Background(), b); !errors.Is(err, ErrBudget) {
+		t.Fatalf("global limit: %v", err)
+	}
+	finishes[0](false)
+	_, finish, err := m.Begin(context.Background(), b)
+	if err != nil {
+		t.Fatalf("released global slot not reusable: %v", err)
+	}
+	finish(true)
+}
+
+func TestCancelInterruptsFirstHeaderAndFinishClearsDeadline(t *testing.T) {
+	m := New(t.Name(), nil)
+	a, b := net.Pipe()
+	defer a.Close()
+	defer b.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	_, finish, err := m.Begin(ctx, b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer finish(false)
+	done := make(chan error, 1)
+	go func() { _, err := b.Read(make([]byte, 1)); done <- err }()
+	cancel()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("cancelled read succeeded")
+		}
+	case <-time.After(time.Second):
+		b.Close()
+		<-done
+		t.Fatal("cancel did not interrupt read")
+	}
+	finish(false)
+	go func() { _, err := a.Write([]byte{1}); done <- err }()
+	if _, err := b.Read(make([]byte, 1)); err != nil {
+		t.Fatal("stale cancellation deadline:", err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if m.Metrics.Pending.Load() != 0 {
+		t.Fatal("cancel leaked pending slot")
+	}
+}
+
+func TestDeriveQueuesUntilWorkerAvailableAndCancels(t *testing.T) {
+	m := New(t.Name(), nil)
+	c := &Credential{User: User{Name: "a", PSK: []byte("independent-key")}}
+	salt := make([]byte, 16)
+	if _, err := m.Derive(context.Background(), c, salt); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < cap(process.work); i++ {
+		process.work <- struct{}{}
+	}
+	occupied := cap(process.work)
+	defer func() {
+		for i := 0; i < occupied; i++ {
+			<-process.work
+		}
+	}()
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() { _, err := m.Derive(ctx, c, salt); result <- err }()
+	cancel()
+	if err := <-result; !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled queue: %v", err)
+	}
+	go func() { _, err := m.Derive(context.Background(), c, salt); result <- err }()
+	select {
+	case err := <-result:
+		t.Fatalf("busy worker did not queue: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	<-process.work
+	occupied--
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatal("queued authentication rejected:", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("released worker did not wake waiter")
+	}
+	if m.Metrics.Attempts.Load() != 2 {
+		t.Fatal("cancelled request performed KDF")
 	}
 }

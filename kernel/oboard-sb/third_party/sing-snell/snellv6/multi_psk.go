@@ -26,7 +26,7 @@ type PSKService struct {
 
 func (s *PSKService) Metrics() *multipsk.Metrics { return &s.manager.Metrics }
 func (s *PSKService) NewConnection(ctx context.Context, conn net.Conn, source M.Socksaddr, onClose N.CloseHandlerFunc) error {
-	handshake, finish, err := s.manager.Begin(ctx, conn, source.Addr.String())
+	handshake, finish, err := s.manager.Begin(ctx, conn)
 	if err != nil {
 		return err
 	}
