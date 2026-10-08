@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -328,13 +329,15 @@ func (u stealthUnits) enable() error {
 
 func (u stealthUnits) disable() error {
 	if u.Manager == "systemd" {
-		_ = runCommand(15*time.Second, "systemctl", "disable", u.Layout.AgentService, u.Layout.CoreService)
-		_ = runCommand(15*time.Second, "systemctl", "daemon-reload")
-		return nil
+		if err := stealthCommandRunner(15*time.Second, "systemctl", "disable", u.Layout.AgentService, u.Layout.CoreService); err != nil {
+			return err
+		}
+		return stealthCommandRunner(15*time.Second, "systemctl", "daemon-reload")
 	}
-	_ = runCommand(15*time.Second, "rc-update", "del", u.Layout.AgentService, "default")
-	_ = runCommand(15*time.Second, "rc-update", "del", u.Layout.CoreService, "default")
-	return nil
+	if err := stealthCommandRunner(15*time.Second, "rc-update", "del", u.Layout.AgentService, "default"); err != nil {
+		return err
+	}
+	return stealthCommandRunner(15*time.Second, "rc-update", "del", u.Layout.CoreService, "default")
 }
 
 // coreConfigPath derives the kernel config path inside the stealth state
@@ -723,7 +726,7 @@ func (r *Runner) enableStealthLocked(manager string) (map[string]any, error) {
 }
 
 // disableStealthLocked restores the standard layout from a hidden one.
-func (r *Runner) disableStealthLocked(manager string) (map[string]any, error) {
+func (r *Runner) disableStealthLocked(manager string) (result map[string]any, switchErr error) {
 	cfg := r.Config()
 	if !r.stealthOn() || cfg.Stealth == nil {
 		return map[string]any{"message": "not running in the security-process layout", "stealth_enabled": false, "idempotent_replay": true}, nil
@@ -760,10 +763,45 @@ func (r *Runner) disableStealthLocked(manager string) (map[string]any, error) {
 			originRealmBinary = origin.RealmBinary
 		}
 	}
+	// A failed handoff may have started the replacement. Verify its origin
+	// before stopping it, and never resume the old core alongside it.
+	if restored, err := LoadConfig(configPath); err == nil && restored.Stealth != nil && restored.Stealth.Previous != nil {
+		if restored.Stealth.Previous.ConfigPath != cfg.ConfigPath || restored.Stealth.Identity != cfg.Stealth.Identity {
+			return map[string]any{"message": "stealth switch failed"}, errors.New("restored layout belongs to another installation")
+		}
+		if err := stealthServiceAction(manager, "oboard-sb", "stop"); err != nil {
+			return map[string]any{"message": "stealth switch failed"}, err
+		}
+	}
+	_ = r.persistTrafficCheckpointBeforeRuntimeTransition(context.Background())
+	if err := stealthServiceAction(manager, cfg.CoreService, "stop"); err != nil {
+		return map[string]any{"message": "stealth switch failed"}, fmt.Errorf("stop previous core: %w", err)
+	}
+	unitsChanged := false
+	defer func() {
+		if switchErr == nil {
+			return
+		}
+		if r.coreService() != cfg.CoreService {
+			stopErr := stealthServiceAction(manager, "oboard-sb", "stop")
+			r.storeConfig(cfg)
+			if stopErr != nil {
+				switchErr = errors.Join(switchErr, fmt.Errorf("rollback refused to restart previous core: %w", stopErr))
+				return
+			}
+		}
+		if unitsChanged {
+			standard := stealthUnits{Manager: manager, Layout: stealth.Layout{AgentService: "oboard-agent", CoreService: "oboard-sb"}}
+			previous := stealthUnits{Manager: manager, Layout: stealth.Layout{AgentService: cfg.AgentService, CoreService: cfg.CoreService}}
+			switchErr = errors.Join(switchErr, standard.disable(), previous.enable())
+		}
+		if deployed, err := r.stateRead(singBoxConfigFile); err == nil && len(deployed) > 0 {
+			switchErr = errors.Join(switchErr, stealthServiceAction(manager, cfg.CoreService, "start"))
+		}
+	}()
 	if err := r.stopStealthManagedProcesses(); err != nil {
 		return map[string]any{"message": "stealth switch failed"}, err
 	}
-	_ = r.persistTrafficCheckpointBeforeRuntimeTransition(context.Background())
 	// The origin install directory may have been removed by the post-enable
 	// cleanup; recreate it before the binaries are restored into it.
 	if err := os.MkdirAll(filepath.Dir(originAgentBinary), 0o755); err != nil {
@@ -777,10 +815,7 @@ func (r *Runner) disableStealthLocked(manager string) (map[string]any, error) {
 		if pair.from == "" {
 			continue
 		}
-		if _, statErr := os.Lstat(pair.to); statErr == nil {
-			return map[string]any{"message": "stealth switch failed"}, fmt.Errorf("refusing to overwrite existing file %s", pair.to)
-		}
-		if err := copyFileMode(pair.from, pair.to, 0o755); err != nil {
+		if err := copyStealthRestoreBinary(pair.from, pair.to); err != nil {
 			return map[string]any{"message": "stealth switch failed"}, err
 		}
 	}
@@ -842,17 +877,20 @@ func (r *Runner) disableStealthLocked(manager string) (map[string]any, error) {
 	if err := writeStandardUnits(manager, filepath.Dir(originAgentBinary), configPath, stateDir, originAgentBinary, originCoreBinary); err != nil {
 		return map[string]any{"message": "stealth switch failed"}, err
 	}
+	unitsChanged = true
 	if err := enableStandardUnits(manager); err != nil {
 		return map[string]any{"message": "stealth switch failed"}, err
 	}
 	r.storeConfig(next)
-	coreSwitch := r.switchCoreService(manager, r.coreService(), "oboard-sb", stealth.Layout{CoreSocket: coreAPISocket, StateDir: stateDir})
+	coreSwitch := r.switchCoreService(manager, cfg.CoreService, "oboard-sb", stealth.Layout{CoreSocket: coreAPISocket, StateDir: stateDir})
 	if coreSwitch != nil {
 		return map[string]any{"message": "stealth switch failed"}, coreSwitch
 	}
 	stealthIdentity := cfg.Stealth.Identity
-	units := stealthUnits{Layout: stealth.ResolveLayout(stealthIdentity, installDir, filepath.Dir(cfg.ConfigPath), filepath.Dir(r.stateDir())), Identity: stealthIdentity, Manager: manager, UnitDir: unitDirForManager(manager), KeyPath: cfg.Stealth.KeyPath, key: key}
-	_ = units.disable()
+	units := stealthUnits{Layout: stealth.ResolveLayout(stealthIdentity, installDir, filepath.Dir(cfg.ConfigPath), filepath.Dir(cfg.StateDir)), Identity: stealthIdentity, Manager: manager, UnitDir: unitDirForManager(manager), KeyPath: cfg.Stealth.KeyPath, key: key}
+	if err := units.disable(); err != nil {
+		return map[string]any{"message": "stealth switch failed"}, err
+	}
 	r.armStealthSwitchFinalizer(cfg.AgentService, "oboard-agent", manager)
 	logging.Infof("stealth layout disabled; standard layout restored")
 	return map[string]any{
@@ -869,13 +907,81 @@ func (r *Runner) disableStealthLocked(manager string) (map[string]any, error) {
 // their state files stop moving while the tree is copied. The desired state
 // is preserved; the restarted agent restores them.
 func (r *Runner) stopStealthManagedProcesses() error {
-	_ = stopManagedProcess(r.statePath(realmPIDFile))
+	if err := stopManagedProcess(r.statePath(realmPIDFile)); err != nil {
+		return err
+	}
 	dir := r.stateDirPath(tunnelsDir)
 	result := tunnelApplyResult{Capabilities: detectTunnelCapabilities(), Tunnels: map[string]string{}, Warnings: []string{}}
 	if err := r.stopManagedTunnels(dir, &result); err != nil {
 		return err
 	}
 	return nil
+}
+
+// copyStealthRestoreBinary publishes a complete copy without overwriting an
+// unrelated file. An identical regular file is a completed step of a retry.
+func copyStealthRestoreBinary(from, to string) error {
+	if info, err := os.Lstat(to); err == nil {
+		if !info.Mode().IsRegular() || info.Mode().Perm() != 0o755 {
+			return fmt.Errorf("refusing to overwrite existing file %s", to)
+		}
+		source, err := stealthFileDigest(from)
+		if err != nil {
+			return err
+		}
+		target, err := stealthFileDigest(to)
+		if err != nil {
+			return err
+		}
+		if source != target {
+			return fmt.Errorf("refusing to overwrite existing file %s", to)
+		}
+		return nil
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	file, err := os.CreateTemp(filepath.Dir(to), ".restore-*")
+	if err != nil {
+		return err
+	}
+	tmp := file.Name()
+	if err := file.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	defer os.Remove(tmp)
+	if err := copyFileMode(from, tmp, 0o755); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmp, 0o755); err != nil {
+		return err
+	}
+	return os.Link(tmp, to)
+}
+
+func stealthFileDigest(path string) ([sha256.Size]byte, error) {
+	var digest [sha256.Size]byte
+	file, err := os.Open(path)
+	if err != nil {
+		return digest, err
+	}
+	defer file.Close()
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return digest, err
+	}
+	copy(digest[:], hash.Sum(nil))
+	return digest, nil
+}
+
+func stealthServiceAction(manager, service, action string) error {
+	if manager == "systemd" {
+		return stealthCommandRunner(20*time.Second, "systemctl", action, service)
+	}
+	if manager == "openrc" {
+		return stealthCommandRunner(20*time.Second, "rc-service", service, action)
+	}
+	return errors.New("supported service manager is unavailable")
 }
 
 func copyFileMode(from, to string, perm os.FileMode) error {
@@ -1194,8 +1300,10 @@ func (r *Runner) switchCoreService(manager, oldService, newService string, layou
 		// Nothing deployed yet: the new unit starts with the first apply.
 		return nil
 	}
-	_ = stopManagedService(manager, oldService)
-	if err := startManagedService(manager, newService); err != nil {
+	if err := stealthServiceAction(manager, oldService, "stop"); err != nil {
+		return fmt.Errorf("stop core service %s: %w", oldService, err)
+	}
+	if err := stealthServiceAction(manager, newService, "start"); err != nil {
 		return fmt.Errorf("start core service %s: %w", newService, err)
 	}
 	if err := r.waitCoreServiceStable(10 * time.Second); err != nil {
@@ -1218,13 +1326,58 @@ func (r *Runner) switchCoreService(manager, oldService, newService string, layou
 func (r *Runner) armStealthSwitchFinalizer(oldService, newService, manager string) {
 	r.stealthSwitchMu.Lock()
 	defer r.stealthSwitchMu.Unlock()
-	r.stealthSwitchPending = &stealthSwitchFinalizer{OldService: oldService, NewService: newService, Manager: manager}
+	pending := &stealthSwitchFinalizer{OldService: oldService, NewService: newService, Manager: manager, NewCore: r.coreService()}
+	if cfg := r.Config(); cfg.Stealth != nil && cfg.Stealth.Previous != nil {
+		pending.OldCore = cfg.Stealth.Previous.CoreService
+		deployed, err := r.stateRead(singBoxConfigFile)
+		pending.RestoreCore = err == nil && len(deployed) > 0
+	}
+	r.stealthSwitchPending = pending
 }
 
 type stealthSwitchFinalizer struct {
-	OldService string
-	NewService string
-	Manager    string
+	OldService  string
+	NewService  string
+	Manager     string
+	OldCore     string
+	NewCore     string
+	RestoreCore bool
+}
+
+func (p stealthSwitchFinalizer) handoffCommand() string {
+	service := func(name, action string) string {
+		if p.Manager == "systemd" {
+			return "systemctl " + action + " " + shellQuoteValue(name)
+		}
+		return "rc-service " + shellQuoteValue(name) + " " + action
+	}
+	unit := func(name string, enable bool) string {
+		if name == "" {
+			return ""
+		}
+		action := "disable"
+		if enable {
+			action = "enable"
+		}
+		if p.Manager == "systemd" {
+			return "systemctl " + action + " " + shellQuoteValue(name) + " || exit 1; "
+		}
+		action = "del"
+		if enable {
+			action = "add"
+		}
+		return "rc-update " + action + " " + shellQuoteValue(name) + " default || exit 1; "
+	}
+	rollback := service(p.NewService, "stop") + " || exit 1; "
+	if p.NewCore != "" && p.NewCore != p.OldCore {
+		rollback += service(p.NewCore, "stop") + " || exit 1; "
+	}
+	rollback += unit(p.NewService, false) + unit(p.NewCore, false) + unit(p.OldService, true) + unit(p.OldCore, true)
+	if p.RestoreCore && p.OldCore != "" && p.NewCore != p.OldCore {
+		rollback += service(p.OldCore, "start") + " || exit 1; "
+	}
+	rollback += service(p.OldService, "start") + "; exit 1"
+	return service(p.OldService, "stop") + " || exit 1; if " + service(p.NewService, "restart") + "; then exit 0; fi; " + rollback
 }
 
 // runStealthSwitchFinalizer schedules the one-shot handoff five seconds out,
@@ -1232,7 +1385,6 @@ type stealthSwitchFinalizer struct {
 func (r *Runner) runStealthSwitchFinalizer() error {
 	r.stealthSwitchMu.Lock()
 	pending := r.stealthSwitchPending
-	r.stealthSwitchPending = nil
 	r.stealthSwitchMu.Unlock()
 	if pending == nil {
 		return nil
@@ -1240,12 +1392,12 @@ func (r *Runner) runStealthSwitchFinalizer() error {
 	command := ""
 	switch pending.Manager {
 	case "systemd":
-		command = fmt.Sprintf("systemctl stop %s 2>/dev/null || true; systemctl restart %s", shellQuoteValue(pending.OldService), shellQuoteValue(pending.NewService))
+		command = pending.handoffCommand()
 		unit := fmt.Sprintf("%s-switch-%d", pending.NewService, os.Getpid())
-		return runCommand(10*time.Second, "systemd-run", "--quiet", "--collect", "--on-active=5s", "--unit", unit, "/bin/sh", "-c", command)
+		return stealthCommandRunner(10*time.Second, "systemd-run", "--quiet", "--collect", "--on-active=5s", "--unit", unit, "/bin/sh", "-c", command)
 	case "openrc":
-		command = fmt.Sprintf("sleep 5; rc-service %s stop 2>/dev/null; rc-service %s restart", shellQuoteValue(pending.OldService), shellQuoteValue(pending.NewService))
-		return runCommand(5*time.Second, "sh", "-c", "nohup sh -c "+shellQuoteValue(command)+" >/dev/null 2>&1 &")
+		command = "sleep 5; " + pending.handoffCommand()
+		return stealthCommandRunner(5*time.Second, "sh", "-c", "nohup sh -c "+shellQuoteValue(command)+" >/dev/null 2>&1 &")
 	default:
 		return fmt.Errorf("supported service manager is unavailable; restart %s manually", pending.NewService)
 	}
@@ -1276,10 +1428,16 @@ func (r *Runner) reconcileStealthSwitchCleanup() {
 	// resurrect them.
 	if manager == "systemd" || manager == "openrc" {
 		if previous.AgentService != "" && previous.AgentService != r.agentService() {
-			_ = stopManagedService(manager, previous.AgentService)
+			if err := stealthServiceAction(manager, previous.AgentService, "stop"); err != nil {
+				logging.Errorf("stealth cleanup: stop previous service: %v", err)
+				return
+			}
 		}
 		if previous.CoreService != "" && previous.CoreService != r.coreService() {
-			_ = stopManagedService(manager, previous.CoreService)
+			if err := stealthServiceAction(manager, previous.CoreService, "stop"); err != nil {
+				logging.Errorf("stealth cleanup: stop previous service: %v", err)
+				return
+			}
 		}
 		disableServiceUnits(manager, previous.AgentService, previous.CoreService)
 		for _, service := range []string{previous.AgentService, previous.CoreService} {
