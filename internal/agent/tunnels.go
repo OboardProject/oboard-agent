@@ -187,6 +187,7 @@ func (r *Runner) applyTunnels(plan model.TunnelPlan) (tunnelApplyResult, error) 
 	if err != nil {
 		return result, err
 	}
+	r.tunnelDesiredState = ""
 	if err := r.applyTunnelSet(plan.Tunnels, &result); err != nil {
 		if rollbackErr := r.restoreLastGoodTunnels(backup); rollbackErr != nil {
 			result.Warnings = append(result.Warnings, fmt.Sprintf("restore last-good tunnels: %v", rollbackErr))
@@ -1053,7 +1054,9 @@ func (r *Runner) startManagedSSHServer(dir string, port int) error {
 	if err := runCommand(10*time.Second, sshd, "-t", "-f", configPath); err != nil {
 		return fmt.Errorf("validate managed sshd config: %w", err)
 	}
-	_ = stopManagedProcess(pidPath)
+	if err := stopManagedProcess(pidPath); err != nil {
+		return err
+	}
 	// #nosec G304 -- logPath is a fixed file name below the private tunnel state directory.
 	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
@@ -1077,6 +1080,7 @@ func (r *Runner) startManagedSSHServer(dir string, port int) error {
 	}
 	if err := writeManagedPIDFile(pidPath, cmd.Process.Pid, identity.ProcessName); err != nil {
 		_ = cmd.Process.Kill()
+		<-waitCh
 		return err
 	}
 	address := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
@@ -1157,7 +1161,9 @@ func (r *Runner) applySSHTunnel(dir string, t model.Tunnel) error {
 		return fmt.Errorf("ssh tunnel %q requires target_endpoint or a target server address", t.Name)
 	}
 	pidPath := filepath.Join(dir, fmt.Sprintf("ssh-%d.pid", t.ID))
-	_ = stopManagedProcess(pidPath)
+	if err := stopManagedProcess(pidPath); err != nil {
+		return err
+	}
 	keyPath := cfg.KeyPath
 	if cfg.ManagedPair {
 		if cfg.Role != "client" {
@@ -1235,7 +1241,7 @@ func (r *Runner) applySSHTunnel(dir string, t model.Tunnel) error {
 				ready, waitErr := waitForSSHLocalForward(cmd, waitCh, address, 7*time.Second)
 				if ready {
 					// The wait goroutine reaps the managed process after a later desired-state update.
-					return writeManagedPIDFile(pidPath, cmd.Process.Pid, "ssh")
+					return recordManagedChild(cmd, waitCh, pidPath, filepath.Base(cmd.Path))
 				}
 				lastErr = waitErr
 			} else {
@@ -1251,7 +1257,7 @@ func (r *Runner) applySSHTunnel(dir string, t model.Tunnel) error {
 						lastErr = err
 						break
 					}
-					return writeManagedPIDFile(pidPath, cmd.Process.Pid, "ssh")
+					return recordManagedChild(cmd, waitCh, pidPath, filepath.Base(cmd.Path))
 				}
 			}
 		}

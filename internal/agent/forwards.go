@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -70,7 +71,7 @@ func (r *Runner) applyPortForwards(plan model.PortForwardPlan) (forwardApplyResu
 	if err != nil {
 		return result, err
 	}
-	if desiredState != "" && desiredState == r.forwardDesiredState {
+	if desiredState != "" && desiredState == r.forwardDesiredState && r.realmForwardsCurrent(plan) {
 		result.Unchanged = true
 		return result, nil
 	}
@@ -104,6 +105,7 @@ func (r *Runner) applyPortForwards(plan model.PortForwardPlan) (forwardApplyResu
 		return result, err
 	}
 
+	r.forwardDesiredState = ""
 	if err := r.applyResolvedForwards(resolved, &result); err != nil {
 		if rollbackErr := r.restoreLastGoodForwards(backup); rollbackErr != nil {
 			result.Warnings = append(result.Warnings, fmt.Sprintf("restore last-good forwards: %v", rollbackErr))
@@ -134,6 +136,44 @@ func (r *Runner) restoreManagedPortForwardsOnStartup() error {
 	}
 	_, err = r.applyPortForwards(plan)
 	return err
+}
+
+func (r *Runner) realmForwardsCurrent(plan model.PortForwardPlan) bool {
+	rules, err := resolveForwardBackends(plan.Rules, r.detectForwardCapabilities())
+	if err != nil {
+		return false
+	}
+	pidData, err := os.ReadFile(r.statePath(realmPIDFile))
+	if len(rules) == 0 {
+		return errors.Is(err, os.ErrNotExist)
+	}
+	var record struct {
+		PID        int    `json:"pid"`
+		Command    string `json:"command"`
+		StartToken string `json:"start_token"`
+	}
+	if err != nil || json.Unmarshal(pidData, &record) != nil || !managedProcessMatches(record.PID, record.Command, record.StartToken) {
+		return false
+	}
+	sort.SliceStable(rules, func(i, j int) bool {
+		if rules[i].Priority == rules[j].Priority {
+			return rules[i].ID < rules[j].ID
+		}
+		return rules[i].Priority < rules[j].Priority
+	})
+	want, err := generateRealmConfig(rules)
+	if err != nil {
+		return false
+	}
+	actual, err := r.stateRead(realmConfigFile)
+	if err != nil || !bytes.Equal(actual, []byte(want)) {
+		return false
+	}
+	if dir, ok := r.tunnelRuntimeDir(); ok {
+		actual, err = os.ReadFile(filepath.Join(dir, "forward.conf"))
+		return err == nil && bytes.Equal(actual, []byte(want))
+	}
+	return true
 }
 
 func (r *Runner) suspendConflictingForwards(candidateConfig []byte) (*forwardHandoff, error) {
@@ -178,6 +218,7 @@ func (r *Runner) suspendConflictingForwards(candidateConfig []byte) (*forwardHan
 		currentPath: currentPath, retainedPlan: retained,
 		originalResolved: originalResolved, conflicts: conflicts,
 	}
+	r.forwardDesiredState = ""
 	if err := r.applyResolvedForwards(retainedResolved, &forwardApplyResult{}); err != nil {
 		if restoreErr := r.applyResolvedForwards(originalResolved, &forwardApplyResult{}); restoreErr != nil {
 			return nil, fmt.Errorf("suspend conflicting port forwards: %w; restore original forwards: %v", err, restoreErr)
@@ -195,7 +236,7 @@ func (r *Runner) commitForwardHandoff(handoff *forwardHandoff) error {
 	if err != nil {
 		return err
 	}
-	if err := atomicWriteFile(handoff.currentPath, b, 0o600); err != nil {
+	if err := r.stateWritePath(handoff.currentPath, b, 0o600); err != nil {
 		return err
 	}
 	// The runtime now owns only the retained subset. Force the next deployment
@@ -625,10 +666,10 @@ func (r *Runner) applyRealmForwards(rules []forwardRule) error {
 	// file in the private state directory exactly as before.
 	runtimeDir, _ := r.tunnelRuntimeDir()
 	configPath := r.statePath(realmConfigFile)
+	if err := r.stateWrite(realmConfigFile, []byte(config), 0o600); err != nil {
+		return err
+	}
 	if runtimeDir != "" {
-		if err := r.stateWrite(realmConfigFile, []byte(config), 0o600); err != nil {
-			return err
-		}
 		// #nosec G301 -- 0700 is intended for the private runtime artifact directory.
 		if err := os.MkdirAll(runtimeDir, 0o700); err != nil {
 			return err
@@ -638,7 +679,9 @@ func (r *Runner) applyRealmForwards(rules []forwardRule) error {
 			return err
 		}
 	}
-	_ = stopManagedProcess(pidPath)
+	if err := stopManagedProcess(pidPath); err != nil {
+		return fmt.Errorf("stop previous realm: %w", err)
+	}
 	logPath := r.statePath(realmLogFile)
 	// #nosec G304 -- logPath is a derived file below the private Agent state directory.
 	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
@@ -655,11 +698,30 @@ func (r *Runner) applyRealmForwards(rules []forwardRule) error {
 		return err
 	}
 	_ = logFile.Close()
+	waitCh := make(chan error, 1)
+	go func() { waitCh <- cmd.Wait() }()
+	select {
+	case err := <-waitCh:
+		if err == nil {
+			err = errors.New("process exited")
+		}
+		return fmt.Errorf("realm exited before ready: %w", err)
+	case <-time.After(300 * time.Millisecond):
+	}
 	processName := realmProcessName
 	if r.stealthOn() {
 		processName = r.Config().Stealth.Identity.RealmName
 	}
-	return writeManagedPIDFile(pidPath, cmd.Process.Pid, processName)
+	return recordManagedChild(cmd, waitCh, pidPath, processName)
+}
+
+func recordManagedChild(cmd *exec.Cmd, waitCh <-chan error, pidPath, processName string) error {
+	if err := writeManagedPIDFile(pidPath, cmd.Process.Pid, processName); err != nil {
+		_ = cmd.Process.Kill()
+		<-waitCh
+		return err
+	}
+	return nil
 }
 
 func stopManagedProcess(pidPath string) error {
@@ -680,8 +742,7 @@ func stopManagedProcess(pidPath string) error {
 		record.PID, err = parsePID(strings.TrimSpace(string(b)))
 	}
 	if err != nil || record.PID <= 0 {
-		_ = os.Remove(pidPath)
-		return nil
+		return fmt.Errorf("invalid managed PID record: %s", pidPath)
 	}
 	expected := record.Command
 	if expected == "" {
@@ -696,14 +757,27 @@ func stopManagedProcess(pidPath string) error {
 		}
 	}
 	if !managedProcessMatches(record.PID, expected, record.StartToken) {
-		_ = os.Remove(pidPath)
+		if !processAlive(record.PID) {
+			return os.Remove(pidPath)
+		}
 		return fmt.Errorf("refusing to stop PID %d because it no longer matches managed %s process", record.PID, expected)
 	}
-	if proc, err := os.FindProcess(record.PID); err == nil {
-		_ = proc.Kill()
+	proc, err := os.FindProcess(record.PID)
+	if err != nil {
+		return err
 	}
-	_ = os.Remove(pidPath)
-	return nil
+	defer proc.Release()
+	if err := proc.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		return err
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for managedProcessMatches(record.PID, expected, record.StartToken) {
+		if time.Now().After(deadline) {
+			return fmt.Errorf("managed process %d did not stop", record.PID)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return os.Remove(pidPath)
 }
 
 func writeManagedPIDFile(path string, pid int, command string) error {
