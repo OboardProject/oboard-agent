@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"github.com/OboardProject/oboard-agent/internal/model"
+	"github.com/OboardProject/oboard-agent/internal/securefile"
 	"github.com/OboardProject/oboard-agent/internal/stealth"
 )
 
@@ -87,7 +88,7 @@ func (s *Store) Load() (Policy, error) {
 
 func (s *Store) loadLocked() (Policy, error) {
 	// #nosec G304 -- s.path is derived from the agent config directory.
-	raw, err := os.ReadFile(s.path)
+	raw, err := securefile.Read(s.path, 64<<10)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return DefaultPolicy(), nil
@@ -102,6 +103,9 @@ func (s *Store) loadLocked() (Policy, error) {
 	var policy Policy
 	if err := json.Unmarshal(raw, &policy); err != nil {
 		return Policy{}, err
+	}
+	if policy.Version != 1 || (policy.Mode != model.RemoteAccessModeStandard && policy.Mode != model.RemoteAccessModeHardened) {
+		return Policy{}, errors.New("invalid local security policy")
 	}
 	return policy.Normalized(), nil
 }
@@ -126,15 +130,7 @@ func (s *Store) Save(policy Policy) error {
 	} else {
 		raw = append(raw, '\n')
 	}
-	tmp := s.path + ".tmp"
-	if err := os.WriteFile(tmp, raw, FileMode); err != nil {
-		return err
-	}
-	if err := os.Chmod(tmp, FileMode); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	return os.Rename(tmp, s.path)
+	return securefile.Write(s.path, raw, FileMode, true)
 }
 
 func (s *Store) SetMode(mode string) error {

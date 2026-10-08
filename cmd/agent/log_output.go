@@ -1,6 +1,8 @@
 package main
 
 import (
+	"github.com/OboardProject/oboard-agent/internal/redact"
+	"github.com/OboardProject/oboard-agent/internal/securefile"
 	"log"
 	"os"
 	"path/filepath"
@@ -17,12 +19,12 @@ func redirectProcessOutput(path string) error {
 		return err
 	}
 	// #nosec G304 -- the log path is an operator-provided service argument.
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	file, err := securefile.OpenAppend(path)
 	if err != nil {
 		return err
 	}
 	os.Stdout = file
 	os.Stderr = file
-	log.SetOutput(file)
+	log.SetOutput(redact.Writer{Output: file})
 	return nil
 }

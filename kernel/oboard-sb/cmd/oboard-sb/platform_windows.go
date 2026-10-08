@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"log"
+	"os"
 
 	"golang.org/x/sys/windows/svc"
 )
@@ -67,3 +68,7 @@ func (h *serviceHandler) Execute(_ []string, requests <-chan svc.ChangeRequest, 
 func restrictLocalSocket(string) error {
 	return nil
 }
+
+func managedPolicyReadFlags() int { return os.O_RDONLY }
+
+func preparePrivateRuntimeFiles() {}

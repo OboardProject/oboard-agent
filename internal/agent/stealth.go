@@ -470,6 +470,7 @@ WantedBy=multi-user.target
 // traffic backup and the authorization deny watermark) are handled by
 // statePhysicalName below.
 var stateTopLevelFiles = []string{
+	runtimeSecurityFile, runtimeSecurityPendingFile, runtimeSecurityDesiredFile, runtimeSecretsKey, runtimeStorageReady, runtimeSecurityReportFile,
 	singBoxConfigFile,
 	singBoxLastGoodFile,
 	"last-applied-version.json",

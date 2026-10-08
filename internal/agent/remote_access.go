@@ -26,7 +26,7 @@ func (r *Runner) localSecurityPath() string {
 func (r *Runner) localSecurityPolicy() agentsecurity.Policy {
 	policy, err := r.localSecurityStore().Load()
 	if err != nil {
-		return agentsecurity.DefaultPolicy()
+		return agentsecurity.Policy{Version: 1, Mode: model.RemoteAccessModeHardened}
 	}
 	return policy
 }

@@ -5,6 +5,8 @@
 package logging
 
 import (
+	"fmt"
+	"github.com/OboardProject/oboard-agent/internal/redact"
 	"log"
 	"strings"
 	"sync/atomic"
@@ -84,7 +86,7 @@ func output(level Level, format string, args ...any) {
 	if !Enabled(level) {
 		return
 	}
-	log.Printf("["+level.String()+"] "+format, args...)
+	log.Print("[" + level.String() + "] " + redact.Text(fmt.Sprintf(format, args...)))
 }
 
 func Tracef(format string, args ...any) { output(LevelTrace, format, args...) }

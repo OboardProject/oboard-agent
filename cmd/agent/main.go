@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"github.com/OboardProject/oboard-agent/internal/redact"
 	"log"
 	"os"
 	"os/signal"
@@ -21,6 +22,7 @@ import (
 )
 
 func main() {
+	log.SetOutput(redact.Writer{Output: log.Writer()})
 	args := os.Args[1:]
 	if len(args) >= 1 && strings.EqualFold(args[0], "maintenance") {
 		// Lightweight offline maintenance: no controller connection, no state sync.

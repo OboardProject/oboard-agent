@@ -250,6 +250,9 @@ func (r *Runner) downloadAndInstallSignedReleaseWithPolicy(ctx context.Context, 
 	// serving right now, while nothing on disk has been replaced yet. Doing it
 	// after installation is what leaves a node running its old working kernel
 	// with an incompatible executable staged for the next restart.
+	if err := r.preflightRuntimeSecurityUpdate(stagedCore); err != nil {
+		return outcome, err
+	}
 	state, note, err := r.preflightStagedCore(stagedCore, targets.ActiveConfig, coreCheckTimeout)
 	outcome.CorePreflight = state
 	outcome.CorePreflightNote = note

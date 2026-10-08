@@ -29,6 +29,8 @@ import (
 	"github.com/OboardProject/oboard-agent/internal/core"
 	"github.com/OboardProject/oboard-agent/internal/logging"
 	"github.com/OboardProject/oboard-agent/internal/model"
+	"github.com/OboardProject/oboard-agent/internal/redact"
+	"github.com/OboardProject/oboard-agent/internal/securefile"
 	"github.com/OboardProject/oboard-agent/internal/security"
 	"github.com/OboardProject/oboard-agent/internal/stealth"
 	"github.com/OboardProject/oboard-agent/internal/version"
@@ -76,6 +78,9 @@ type Config struct {
 }
 
 type Runner struct {
+	runtimeSecurityMu           sync.Mutex
+	runtimeStorageMu            sync.RWMutex
+	runtimeSecurityReport       atomic.Pointer[model.RuntimeSecurityReport]
 	authorizationMu             sync.Mutex
 	authorizationStore          *authorization.Store
 	authorizationApplyMu        sync.Mutex
@@ -361,15 +366,23 @@ func (r *Runner) stateRead(logical string) ([]byte, error) {
 // stateReadPath reads a state file by physical path, decrypting an envelope
 // when the runner is in stealth mode.
 func (r *Runner) stateReadPath(path string) ([]byte, error) {
+	r.runtimeStorageMu.RLock()
+	defer r.runtimeStorageMu.RUnlock()
+	return r.stateReadPathUnlocked(path)
+}
+func (r *Runner) stateReadPathUnlocked(path string) ([]byte, error) {
 	// #nosec G304 -- paths are derived from the agent state directory.
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
 	if r.stealthOn() && stealth.IsEncrypted(data) {
-		return stealth.Decrypt(r.Config().StealthKey, data)
+		data, err = stealth.Decrypt(r.Config().StealthKey, data)
+		if err != nil {
+			return nil, err
+		}
 	}
-	return data, nil
+	return r.openRuntimeState(path, data)
 }
 
 // stateWrite writes a state file by logical name, encrypting in stealth mode.
@@ -381,6 +394,16 @@ func (r *Runner) stateWrite(logical string, data []byte, perm os.FileMode) error
 // mode. The temporary file used by the atomic rename is removed again, so no
 // plaintext bytes survive on disk.
 func (r *Runner) stateWritePath(path string, data []byte, perm os.FileMode) error {
+	r.runtimeStorageMu.RLock()
+	defer r.runtimeStorageMu.RUnlock()
+	return r.stateWritePathUnlocked(path, data, perm)
+}
+func (r *Runner) stateWritePathUnlocked(path string, data []byte, perm os.FileMode) error {
+	var protectErr error
+	data, protectErr = r.protectRuntimeState(path, data)
+	if protectErr != nil {
+		return protectErr
+	}
 	if r.stealthOn() {
 		encrypted, err := stealth.Encrypt(r.Config().StealthKey, data)
 		if err != nil {
@@ -395,6 +418,16 @@ func (r *Runner) stateWritePath(path string, data []byte, perm os.FileMode) erro
 // before rename, encrypting in stealth mode. Used by traffic accounting,
 // whose checkpoints must not be lost on a crash.
 func (r *Runner) stateWritePathSynced(path string, data []byte, perm os.FileMode) error {
+	r.runtimeStorageMu.RLock()
+	defer r.runtimeStorageMu.RUnlock()
+	return r.stateWritePathSyncedUnlocked(path, data, perm)
+}
+func (r *Runner) stateWritePathSyncedUnlocked(path string, data []byte, perm os.FileMode) error {
+	var protectErr error
+	data, protectErr = r.protectRuntimeState(path, data)
+	if protectErr != nil {
+		return protectErr
+	}
 	if r.stealthOn() {
 		encrypted, err := stealth.Encrypt(r.Config().StealthKey, data)
 		if err != nil {
@@ -492,7 +525,7 @@ func saveConfigBytes(path string, cfg Config, key []byte) error {
 			return err
 		}
 	}
-	return atomicWriteFile(path, b, 0o600)
+	return securefile.Write(path, b, 0o600, true)
 }
 
 // saveAgentConfig persists cfg to the configured path, applying stealth
@@ -930,6 +963,10 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 	r.tuning = ApplyRuntimeTuning(r.resources)
 	r.reconcileStealthSwitchCleanup()
+	if err := r.recoverRuntimeSecurity(); err != nil {
+		logging.Warnf("runtime security recovery could not be verified; inspect the local policy and service")
+	}
+	go r.runtimeSecurityLoop(ctx)
 	r.logStartupSummary(cfg)
 	r.applyLowMemorySocketTuning()
 	r.reconcileUpdateArtifacts()
@@ -1704,6 +1741,15 @@ func (r *Runner) executeAgentTask(task model.AgentTask) (string, string) {
 			return "failed", jsonMap(result)
 		}
 		return "succeeded", jsonMap(result)
+	case model.AgentTaskTypeRuntimeSecurity:
+		value, err := r.applyRuntimeSecurity(task.PayloadJSON)
+		if err != nil {
+			if value == nil {
+				value = map[string]any{"message": err.Error()}
+			}
+			return "failed", jsonMap(value)
+		}
+		return "succeeded", jsonMap(value)
 	case model.AgentTaskTypeApplyStealth:
 		result, err := r.applyStealthTask(task.PayloadJSON)
 		if err != nil {
@@ -2752,7 +2798,7 @@ func scrubDiagnosticOutput(out string) string {
 	for _, pattern := range diagnosticSecretPatterns {
 		out = pattern.ReplaceAllString(out, `${1}[redacted]`)
 	}
-	return out
+	return redact.Text(out)
 }
 
 func scrubDiagnosticValue(value any) {
@@ -3286,24 +3332,7 @@ func inboundListenResources(raw []byte) map[string]struct{} {
 }
 
 func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
-	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*.tmp")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Chmod(perm); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmpName, path)
+	return securefile.Write(path, data, perm, false)
 }
 
 func (r *Runner) coreBinary() string {
@@ -3678,6 +3707,7 @@ func (r *Runner) Probe(force bool) model.HealthReport {
 	health.NetworkTotalDownloadBytes = probe.NetworkTotalDownloadBytes
 	health.Timestamp = now
 	health.RemoteAccess = r.remoteAccessReport()
+	health.RuntimeSecurity = r.cachedRuntimeSecurity()
 	health.AppliedAuthorization = r.appliedAuthorization()
 	health.AppliedUsers = r.appliedUsers()
 	health.AppliedLatencyProbe = r.appliedLatencyProbe()
@@ -3762,9 +3792,10 @@ func buildHealthReport(binary string, timeout time.Duration, host hostStaticInfo
 		AgentBuild:         version.Build,
 		SingBoxVersion:     coreVersion,
 		KernelCapabilities: kernelCapabilities,
-		TCPFastOpenState:   tfoState,
-		TCPFastOpenValue:   tfoValue,
-		Timestamp:          time.Now().UTC(),
+
+		TCPFastOpenState: tfoState,
+		TCPFastOpenValue: tfoValue,
+		Timestamp:        time.Now().UTC(),
 	}
 }
 
@@ -3778,7 +3809,7 @@ func (r *Runner) agentCapabilities(kernelCapabilities []string) []string {
 		model.AgentCapabilityAuthorizationControl,
 		model.AgentCapabilityRuntimeUsers,
 		"runtime_users_snell_psk_control_v1",
-		model.AgentCapabilityStealth)
+		model.AgentCapabilityStealth, model.RuntimeSecurityCapability)
 	capabilities = append(capabilities, networkDiagnosticCapabilities()...)
 	for _, capability := range kernelCapabilities {
 		if capability == "account_activity_local_v1" {

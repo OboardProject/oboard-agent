@@ -1,6 +1,8 @@
 package main
 
 import (
+	"errors"
+	"github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/redact"
 	"log"
 	"os"
 	"path/filepath"
@@ -17,12 +19,26 @@ func redirectProcessOutput(path string) error {
 		return err
 	}
 	// #nosec G304 -- the log path is an operator-provided service argument.
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	root, err := os.OpenRoot(filepath.Dir(path))
 	if err != nil {
+		return err
+	}
+	defer root.Close()
+	file, err := root.OpenFile(filepath.Base(path), managedPolicyReadFlags()|os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return err
+	}
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		file.Close()
+		return errors.New("unsafe managed log")
+	}
+	if err := file.Chmod(0600); err != nil {
+		file.Close()
 		return err
 	}
 	os.Stdout = file
 	os.Stderr = file
-	log.SetOutput(file)
+	log.SetOutput(redact.Writer{Output: file})
 	return nil
 }

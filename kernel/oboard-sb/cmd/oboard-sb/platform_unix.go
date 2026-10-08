@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"os"
+	"syscall"
 )
 
 // runUnderServiceManager is a no-op outside Windows: systemd and OpenRC stop
@@ -16,3 +17,7 @@ func runUnderServiceManager(ctx context.Context, _ string) (context.Context, fun
 func restrictLocalSocket(path string) error {
 	return os.Chmod(path, 0o600)
 }
+
+func managedPolicyReadFlags() int { return os.O_RDONLY | syscall.O_NOFOLLOW | syscall.O_NONBLOCK }
+
+func preparePrivateRuntimeFiles() { syscall.Umask(0077) }

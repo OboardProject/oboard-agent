@@ -575,12 +575,12 @@ func (r *Runner) applySSHInbounds(plan model.SSHInboundPlan) (result sshInboundA
 			if marshalErr != nil {
 				return result, marshalErr
 			}
-			if err := atomicWriteFile(current, encoded, 0o600); err != nil {
+			if err := r.stateWritePath(current, encoded, 0o600); err != nil {
 				return result, err
 			}
 			manager.applyCredentialStates(plan)
 			if err := r.reconcileSSHAndCoreTrafficPolicies(context.Background(), plan); err != nil {
-				_ = atomicWriteFile(current, previousPlan, 0o600)
+				_ = r.stateWritePath(current, previousPlan, 0o600)
 				manager.applyCredentialStates(previous)
 				_ = r.reconcileSSHAndCoreTrafficPolicies(context.Background(), previous)
 				return result, fmt.Errorf("update SSH credential runtime state: %w", err)

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/redact"
+	"github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/runtimeguard"
 	"log"
 	"net"
 	"net/http"
@@ -24,7 +26,7 @@ import (
 	C "github.com/sagernet/sing-box/constant"
 )
 
-var kernelCapabilities = []string{"authorization_lease_v1", "authorization_control_v1", "runtime_users_v1", "runtime_users:vless", "runtime_users:hysteria2", "runtime_users:shadowsocks-multi", "runtime_users:snell-psk", "snell_multi_psk_v4_v1", "snell_multi_psk_v6_v1", "runtime_users_snell_psk_v1", "outbound_egress_probe_v1", "outbound_relay_v1", "route_relay_v1", "runtime_clock_v1", "connection_presence_v1", "family_selector_v1", "traffic_ledger", "runtime_config_digest_v1", "runtime_build_identity_v1", "dns_doq_v1", "dns_group_v1", "account_activity_local_v1"}
+var kernelCapabilities = []string{"runtime_security_v1", "authorization_lease_v1", "authorization_control_v1", "runtime_users_v1", "runtime_users:vless", "runtime_users:hysteria2", "runtime_users:shadowsocks-multi", "runtime_users:snell-psk", "snell_multi_psk_v4_v1", "snell_multi_psk_v6_v1", "runtime_users_snell_psk_v1", "outbound_egress_probe_v1", "outbound_relay_v1", "route_relay_v1", "runtime_clock_v1", "connection_presence_v1", "family_selector_v1", "traffic_ledger", "runtime_config_digest_v1", "runtime_build_identity_v1", "dns_doq_v1", "dns_group_v1", "account_activity_local_v1"}
 
 // runtimeConfigState is the payload-free identity of the configuration this
 // process actually loaded. Agent compares it with the desired configuration so
@@ -36,6 +38,8 @@ type runtimeConfigState struct {
 }
 
 func main() {
+	preparePrivateRuntimeFiles()
+	log.SetOutput(redact.Writer{Output: log.Writer()})
 	config := flag.String("config", "config.json", "sing-box config path")
 	keyPath := flag.String("key", "", "optional stealth key file; decrypts the configuration and sibling state files")
 	check := flag.Bool("check", false, "validate config and exit")
@@ -48,10 +52,18 @@ func main() {
 	hy2DownMbps := flag.Int("hy2-down-mbps", 0, "override Hysteria2 inbound advertised download bandwidth in Mbps")
 	hy2IgnoreClientBandwidth := flag.Bool("hy2-ignore-client-bandwidth", false, "force Hysteria2 server bandwidth settings instead of client-advertised bandwidth")
 	hy2BrutalDebug := flag.Bool("hy2-brutal-debug", false, "enable Hysteria2 brutal congestion debug logging")
+	securityCheck := flag.Bool("runtime-security-check", false, "check the native enhanced profile in this isolated process and exit")
 	showVersion := flag.Bool("version", false, "print version and supported protocols")
 	logFile := flag.String("log-file", "", "append process output to this file; used where no service manager captures stdout")
 	flag.Parse()
 
+	if *securityCheck {
+		if err := runtimeguard.Apply("enhanced"); err != nil {
+			log.Fatal("runtime security profile unsupported")
+		}
+		_ = json.NewEncoder(os.Stdout).Encode(runtimeguard.Snapshot())
+		return
+	}
 	if *showVersion {
 		printVersion()
 		return
@@ -101,6 +113,14 @@ func main() {
 		return
 	}
 
+	stopLog, logErr := startRedactedRuntimeOutput()
+	if logErr != nil {
+		log.Fatal("cannot initialize protected runtime logging")
+	}
+	defer stopLog()
+	if err := applyRuntimeSecurityPolicy(*config, stealthKey); err != nil {
+		log.Fatal("runtime security policy could not be applied")
+	}
 	loadedOperationalDigest, err := minibox.OperationalConfigDigestFile(*config, stealthKey)
 	if err != nil {
 		log.Fatal(err)
@@ -324,6 +344,7 @@ func registerRuntimeStatusHandler(mux *http.ServeMux, runtimeConfig runtimeConfi
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
+			"runtime_security":          runtimeguard.Snapshot(),
 			"operational_config_sha256": runtimeConfig.OperationalDigest,
 			"started_at":                runtimeConfig.StartedAt.Format(time.RFC3339Nano),
 			"pid":                       os.Getpid(),

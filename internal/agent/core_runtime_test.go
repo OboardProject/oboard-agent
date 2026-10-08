@@ -26,15 +26,16 @@ import (
 // stands for a service manager that really replaces the process; without that,
 // the stub keeps serving its old configuration no matter who calls it.
 type fakeCoreKernel struct {
-	mu               sync.Mutex
-	configPath       string
-	loadedDigest     string
-	generation       uint64
-	boots            int
-	restartArmed     bool
-	runtimeSupported bool
-	policyPushes     int
-	client           *http.Client
+	runtimeSecurityMode string
+	mu                  sync.Mutex
+	configPath          string
+	loadedDigest        string
+	generation          uint64
+	boots               int
+	restartArmed        bool
+	runtimeSupported    bool
+	policyPushes        int
+	client              *http.Client
 	// loadedBuild is the executable this process was started from. It only
 	// changes on boot, the same way a replaced binary only takes effect on the
 	// next restart. An empty value stands for a kernel that predates
@@ -86,7 +87,7 @@ func newFakeCoreKernel(t *testing.T, configPath string, runtimeSupported bool) *
 	t.Helper()
 	// Unix socket paths are short-bounded, so the socket lives outside the
 	// (long) per-test temporary directory.
-	socketFile, err := os.CreateTemp("/tmp", "oboard-core-*.sock")
+	socketFile, err := os.CreateTemp(os.TempDir(), "oboard-core-*.sock")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,6 +135,9 @@ func newFakeCoreKernel(t *testing.T, configPath string, runtimeSupported bool) *
 			"started_at":                "2026-09-02T00:00:00Z",
 			"pid":                       kernel.reportedPID(),
 			"generation":                kernel.generation,
+		}
+		if kernel.runtimeSecurityMode != "" {
+			payload["runtime_security"] = map[string]any{"mode": kernel.runtimeSecurityMode, "supported": true, "no_new_privileges": kernel.runtimeSecurityMode == "enhanced", "dumpable": kernel.runtimeSecurityMode != "enhanced", "core_dumps_disabled": kernel.runtimeSecurityMode == "enhanced"}
 		}
 		if kernel.loadedBuild != "" {
 			payload["version"] = "0.0.1"
