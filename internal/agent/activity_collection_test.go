@@ -16,7 +16,7 @@ func TestAccountActivityCollectionScopeAndExpiry(t *testing.T) {
 	r.coreClient = &http.Client{Transport: roundTripFunc(func(q *http.Request) (*http.Response, error) {
 		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{}`)), Header: make(http.Header)}, nil
 	})}
-	item := connectionAuditSnapshotItem{UserID: 1, InboundID: 2, SourceIP: "8.8.8.8", Destination: "example.org"}
+	item := connectionAuditSnapshotItem{UserID: 1, InboundID: 2, SourceIP: "8.8.8.8"}
 	s := r.connectionAudit.startSession(item)
 	s.addTraffic(true, 100)
 	if len(r.connectionAudit.buckets) != 0 || len(r.connectionAudit.activity.Snapshot(600).Buckets) != 1 {

@@ -30,10 +30,6 @@ type ConnectionAuditBucket struct {
 	SourceIP           string `json:"source_ip"`
 	SourceGeoCode      string `json:"source_geo_code,omitempty"`
 	Network            string `json:"network"`
-	Destination        string `json:"destination,omitempty"`
-	DestinationPort    int    `json:"destination_port,omitempty"`
-	OutboundTag        string `json:"outbound_tag,omitempty"`
-	OutboundType       string `json:"outbound_type,omitempty"`
 	ConnectionCount    int64  `json:"connection_count"`
 	ClosedCount        int64  `json:"closed_count"`
 	DurationTotalMS    int64  `json:"duration_total_ms"`
@@ -86,65 +82,13 @@ type connectionPresenceState struct {
 	lastEmittedAt time.Time
 }
 
-func (t *RateLimitTracker) FamilySelectorSelected(ctx context.Context, selectorTag, childTag, childType string) {
-	selectorTag = strings.TrimSpace(selectorTag)
-	childTag = strings.TrimSpace(childTag)
-	childType = strings.TrimSpace(childType)
-	if t == nil || selectorTag == "" || childTag == "" {
-		return
+func (t *RateLimitTracker) FamilySelectorSelected(ctx context.Context, _, childTag, _ string) {
+	if metadata := adapter.ContextFrom(ctx); metadata != nil {
+		metadata.Outbound = childTag
 	}
-	metadata := adapter.ContextFrom(ctx)
-	if metadata == nil {
-		return
-	}
-	metadata.Outbound = childTag
-	if !t.auditEnabled.Load() || !t.auditDiagnostics.Load() {
-		return
-	}
-	t.auditMu.Lock()
-	if t.auditFamilyChildTypes == nil {
-		t.auditFamilyChildTypes = make(map[string]string)
-	}
-	if len(t.auditFamilyChildTypes) < maxConnectionAuditBuckets || t.auditFamilyChildTypes[childTag] != "" {
-		t.auditFamilyChildTypes[childTag] = childType
-	}
-	t.auditMu.Unlock()
-	state := t.runtimeFor(*metadata)
-	if state == nil || state.currentConfig().policy.UserID <= 0 {
-		return
-	}
-	sourceAddr := metadata.Source.Addr.Unmap()
-	if !sourceAddr.IsValid() {
-		return
-	}
-	destination := strings.TrimSpace(metadata.Destination.AddrString())
-	if len(destination) > 255 {
-		destination = destination[:255]
-	}
-	network := strings.TrimSpace(metadata.Network)
-	if network == "" {
-		network = "tcp"
-	}
-	baseKey := strings.Join([]string{
-		state.key,
-		sourceAddr.String(),
-		network,
-		destination,
-		strconv.Itoa(int(metadata.Destination.Port)),
-		selectorTag,
-		"family-selector",
-	}, "\x00")
-	t.auditMu.Lock()
-	defer t.auditMu.Unlock()
-	bucket := t.auditBuckets[strconv.FormatUint(t.auditGeneration, 10)+"\x00"+baseKey]
-	if bucket == nil {
-		return
-	}
-	bucket.OutboundTag = childTag
-	bucket.OutboundType = childType
 }
 
-func (t *RateLimitTracker) recordConnectionStart(state *runtimeState, metadata adapter.InboundContext, outbound adapter.Outbound, network string, admittedValue ...bool) string {
+func (t *RateLimitTracker) recordConnectionStart(state *runtimeState, metadata adapter.InboundContext, _ adapter.Outbound, network string, admittedValue ...bool) string {
 	if t == nil || state == nil || !t.auditEnabled.Load() || !t.auditDiagnostics.Load() {
 		return ""
 	}
@@ -157,32 +101,11 @@ func (t *RateLimitTracker) recordConnectionStart(state *runtimeState, metadata a
 		return ""
 	}
 	sourceIP := sourceAddr.String()
-	destination := strings.TrimSpace(metadata.Destination.AddrString())
-	if len(destination) > 255 {
-		destination = destination[:255]
-	}
 	if network == "" {
 		network = strings.TrimSpace(metadata.Network)
 	}
 	if network == "" {
 		network = "tcp"
-	}
-	outboundTag := strings.TrimSpace(metadata.Outbound)
-	outboundType := ""
-	if outbound != nil {
-		declaredTag := strings.TrimSpace(outbound.Tag())
-		declaredType := strings.TrimSpace(outbound.Type())
-		if declaredType == "family-selector" && outboundTag != "" && outboundTag != declaredTag {
-			t.auditMu.Lock()
-			outboundType = strings.TrimSpace(t.auditFamilyChildTypes[outboundTag])
-			t.auditMu.Unlock()
-			if outboundType == "" {
-				outboundType = "family-branch"
-			}
-		} else {
-			outboundTag = declaredTag
-			outboundType = declaredType
-		}
 	}
 	sourceGeoCode := strings.ToUpper(strings.TrimSpace(metadata.SourceGeoIPCode))
 	if len(sourceGeoCode) != 2 {
@@ -192,10 +115,6 @@ func (t *RateLimitTracker) recordConnectionStart(state *runtimeState, metadata a
 		state.key,
 		sourceIP,
 		network,
-		destination,
-		strconv.Itoa(int(metadata.Destination.Port)),
-		outboundTag,
-		outboundType,
 	}, "\x00")
 	now := t.timeNow().UTC()
 	admitted := true
@@ -227,10 +146,6 @@ func (t *RateLimitTracker) recordConnectionStart(state *runtimeState, metadata a
 			SourceIP:         sourceIP,
 			SourceGeoCode:    sourceGeoCode,
 			Network:          network,
-			Destination:      destination,
-			DestinationPort:  int(metadata.Destination.Port),
-			OutboundTag:      outboundTag,
-			OutboundType:     outboundType,
 			PresenceSequence: t.auditPresenceSequence.Add(1),
 			StartedAt:        now.Format(time.RFC3339Nano),
 			key:              key,
@@ -568,10 +483,7 @@ func (t *RateLimitTracker) DrainConnectionAuditSnapshot() ConnectionAuditDrain {
 		if items[i].SourceIP != items[j].SourceIP {
 			return items[i].SourceIP < items[j].SourceIP
 		}
-		if items[i].Destination != items[j].Destination {
-			return items[i].Destination < items[j].Destination
-		}
-		return items[i].DestinationPort < items[j].DestinationPort
+		return items[i].Network < items[j].Network
 	})
 	drain.Items = items
 	t.auditDropped = 0

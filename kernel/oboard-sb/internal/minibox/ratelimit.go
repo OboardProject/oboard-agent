@@ -52,7 +52,6 @@ type RateLimitTracker struct {
 	auditMu               sync.Mutex
 	auditBuckets          map[string]*ConnectionAuditBucket
 	auditActiveByIdentity map[string]int64
-	auditFamilyChildTypes map[string]string
 	auditGeneration       uint64
 	auditDropped          int64
 	auditWindowStart      time.Time
@@ -225,7 +224,6 @@ func (t *RateLimitTracker) SetConnectionAuditEnabled(enabled bool) {
 	t.auditMu.Lock()
 	t.auditBuckets = nil
 	t.auditActiveByIdentity = nil
-	t.auditFamilyChildTypes = nil
 	t.presenceStates = nil
 	t.presenceEvents = nil
 	t.presenceDropped = 0

@@ -15,7 +15,7 @@ func TestBasicActivityPayloadHooksIgnoreDiagnosticCapacity(t *testing.T) {
 	tracker.SetConnectionAuditEnabled(true)
 	state := tracker.states["user:alice"]
 	id := activity.Bind(7, 11, 0, netip.MustParseAddr("198.51.100.1"))
-	// Empty diagnostic handles also occur when destination capacity is exhausted.
+	// Empty diagnostic handles also occur when source capacity is exhausted.
 	tcp := &trackedConn{tracker: tracker, state: state, admitted: true, activityIdentity: id}
 	udp := &trackedPacketConn{tracker: tracker, state: state, admitted: true, activityIdentity: id}
 	if len(tracker.activity.Snapshot(now).Buckets) != 0 {

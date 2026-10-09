@@ -2,9 +2,11 @@ package minibox
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net"
 	"net/netip"
+	"strings"
 	"testing"
 	"time"
 
@@ -35,7 +37,7 @@ func TestConnectionAuditDoesNotAllocateUntilEnabled(t *testing.T) {
 	}
 	tracker.recordConnectionEnd(key)
 	items := tracker.DrainConnectionAudits()
-	if len(items) != 1 || items[0].UserID != 7 || items[0].SourceIP != "198.51.100.10" || items[0].DestinationPort != 443 {
+	if len(items) != 1 || items[0].UserID != 7 || items[0].SourceIP != "198.51.100.10" {
 		t.Fatalf("unexpected audit drain: %#v", items)
 	}
 	if items[0].ClosedCount != 1 || items[0].DurationTotalMS < 0 || items[0].DurationMaxMS < 0 || time.Since(started) < 0 {
@@ -47,7 +49,7 @@ func TestConnectionAuditDoesNotAllocateUntilEnabled(t *testing.T) {
 	}
 }
 
-func TestFamilySelectorAuditUsesSuccessfulChildOutbound(t *testing.T) {
+func TestFamilySelectorKeepsRoutingMetadataWithoutAuditOutbound(t *testing.T) {
 	tracker := NewRateLimitTracker(RuntimeMetadata{RateLimits: RuntimeRateLimits{Users: map[string]RuntimeUserLimit{
 		"alice": {UserID: 7, InboundID: 11, Billable: true},
 	}}})
@@ -73,12 +75,12 @@ func TestFamilySelectorAuditUsesSuccessfulChildOutbound(t *testing.T) {
 	}
 	tracker.recordConnectionEnd(key)
 	items := tracker.DrainConnectionAudits()
-	if len(items) != 1 || items[0].OutboundTag != "routing-rule-7-ipv6-path-51-step-1" || items[0].OutboundType != "vless" {
+	if len(items) != 1 || items[0].SourceIP != "198.51.100.10" {
 		t.Fatalf("family selector audit attribution = %#v", items)
 	}
 }
 
-func TestConnectionAuditPeakSpansDestinationBuckets(t *testing.T) {
+func TestConnectionAuditAggregatesDestinationsBySource(t *testing.T) {
 	tracker := NewRateLimitTracker(RuntimeMetadata{RateLimits: RuntimeRateLimits{Users: map[string]RuntimeUserLimit{
 		"alice": {UserID: 7, InboundID: 11, Billable: true},
 	}}})
@@ -93,13 +95,27 @@ func TestConnectionAuditPeakSpansDestinationBuckets(t *testing.T) {
 	}
 	first := tracker.recordConnectionStart(state, metadata, nil, "tcp")
 	metadata.Destination.Fqdn = "two.example"
+	metadata.Destination.Port = 8443
+	metadata.Outbound = "another-exit"
 	second := tracker.recordConnectionStart(state, metadata, nil, "tcp")
 	if first == "" || second == "" || first == second {
-		t.Fatalf("expected two audit buckets, got %q and %q", first, second)
+		t.Fatalf("expected two connection handles, got %q and %q", first, second)
 	}
 	items := tracker.DrainConnectionAudits()
-	if len(items) != 2 {
-		t.Fatalf("drain items = %d, want 2: %#v", len(items), items)
+	if len(items) != 1 {
+		t.Fatalf("drain items = %d, want 1: %#v", len(items), items)
+	}
+	if items[0].ConnectionCount != 2 || items[0].ActiveAtEnd != 2 {
+		t.Fatalf("source connection totals lost: %#v", items)
+	}
+	body, err := json.Marshal(items)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, retired := range []string{"destination", "outbound", "one.example", "two.example", "another-exit"} {
+		if strings.Contains(string(body), retired) {
+			t.Fatalf("kernel retained %q in audit: %s", retired, body)
+		}
 	}
 	peak := int64(0)
 	for _, item := range items {
@@ -108,7 +124,7 @@ func TestConnectionAuditPeakSpansDestinationBuckets(t *testing.T) {
 		}
 	}
 	if peak != 2 {
-		t.Fatalf("cross-destination active peak = %d, want 2: %#v", peak, items)
+		t.Fatalf("source active peak = %d, want 2: %#v", peak, items)
 	}
 	tracker.recordConnectionEnd(first)
 	tracker.recordConnectionEnd(second)

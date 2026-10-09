@@ -25,7 +25,6 @@ func (t *RateLimitTracker) SetActivityCollection(p auditwire.CollectionPolicy) b
 	t.auditDiagnostics.Store(p.Mode != "light")
 	t.auditBuckets = nil
 	t.auditActiveByIdentity = nil
-	t.auditFamilyChildTypes = nil
 	t.presenceStates = nil
 	t.presenceEvents = nil
 	t.auditGeneration++

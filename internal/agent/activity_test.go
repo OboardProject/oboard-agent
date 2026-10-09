@@ -9,11 +9,12 @@ import (
 func TestBasicSSHActivitySurvivesDiagnosticCapacity(t *testing.T) {
 	now := int64(120)
 	a := newConnectionAuditAccumulator(true, func() time.Time { return time.Unix(now, 0) })
-	// Fill destination diagnostics, without any business activity.
+	a.setCollectionPolicy(auditCollectionPolicy{Mode: "standard"})
+	// Fill source diagnostics, without any business activity.
 	for i := 0; i < maxAgentAuditBuckets; i++ {
-		a.startSession(connectionAuditSnapshotItem{UserID: 7, InboundID: 11, SourceIP: "198.51.100.1", Destination: fmt.Sprintf("%d.example", i)})
+		a.startSession(connectionAuditSnapshotItem{UserID: 7, InboundID: 11, SourceIP: fmt.Sprintf("2001:db8::%x", i+1)})
 	}
-	session := a.startSession(connectionAuditSnapshotItem{UserID: 7, InboundID: 11, SourceIP: "198.51.100.2", Destination: "overflow.example"})
+	session := a.startSession(connectionAuditSnapshotItem{UserID: 7, InboundID: 11, SourceIP: "198.51.100.2"})
 	if session.key != "" {
 		t.Fatal("fixture did not exhaust diagnostic capacity")
 	}

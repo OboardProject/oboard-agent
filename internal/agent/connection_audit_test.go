@@ -103,14 +103,14 @@ func TestConnectionAuditPolicyRetriesFailedCoreSync(t *testing.T) {
 	}
 }
 
-func TestConnectionAuditPeakSpansDestinationBuckets(t *testing.T) {
+func TestConnectionAuditAggregatesSourceConnections(t *testing.T) {
 	audit := newConnectionAuditAccumulator(true)
 	audit.setCollectionPolicy(auditCollectionPolicy{Mode: "standard"})
-	first := audit.start(connectionAuditSnapshotItem{UserID: 7, SourceIP: "198.51.100.4", Destination: "one.example", DestinationPort: 443})
-	second := audit.start(connectionAuditSnapshotItem{UserID: 7, SourceIP: "198.51.100.4", Destination: "two.example", DestinationPort: 443})
+	first := audit.start(connectionAuditSnapshotItem{UserID: 7, SourceIP: "198.51.100.4"})
+	second := audit.start(connectionAuditSnapshotItem{UserID: 7, SourceIP: "198.51.100.4"})
 	items := audit.drain()
-	if len(items) != 2 {
-		t.Fatalf("drain items = %d, want 2: %#v", len(items), items)
+	if len(items) != 1 {
+		t.Fatalf("drain items = %d, want 1: %#v", len(items), items)
 	}
 	peak := int64(0)
 	for _, item := range items {
@@ -119,17 +119,47 @@ func TestConnectionAuditPeakSpansDestinationBuckets(t *testing.T) {
 		}
 	}
 	if peak != 2 {
-		t.Fatalf("cross-destination active peak = %d, want 2: %#v", peak, items)
+		t.Fatalf("source active peak = %d, want 2: %#v", peak, items)
 	}
 	first()
 	second()
 }
 
+func TestConnectionAuditPendingStateDropsDestinationBeforeRetry(t *testing.T) {
+	runner := New(Config{StateDir: t.TempDir(), ConnectionAuditEnabled: true})
+	previous := []byte("{\"pending\":[{\"report_id\":\"previous\",\"user_id\":7,\"source_ip\":\"198.51.100.4\",\"destination\":\"private.example\",\"destination_port\":443,\"outbound_tag\":\"exit-secret\",\"outbound_type\":\"direct\"}]}")
+	if err := runner.stateWritePath(runner.connectionAuditStatePath(), previous, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	state := runner.loadConnectionAuditState()
+	if len(state.Pending) != 1 || state.Pending[0].ReportID != "previous" || state.Pending[0].SourceIP != "198.51.100.4" {
+		t.Fatalf("source report lost: %#v", state)
+	}
+	if err := runner.saveConnectionAuditState(state); err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := runner.stateReadPath(runner.connectionAuditStatePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire, err := json.Marshal(state.Pending)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, data := range [][]byte{persisted, wire} {
+		for _, retired := range []string{"destination", "outbound", "private.example", "exit-secret"} {
+			if strings.Contains(string(data), retired) {
+				t.Fatalf("retired audit field %q retained: %s", retired, data)
+			}
+		}
+	}
+}
+
 func TestConnectionAuditPeakIsScopedToDevice(t *testing.T) {
 	audit := newConnectionAuditAccumulator(true)
 	audit.setCollectionPolicy(auditCollectionPolicy{Mode: "standard"})
-	first := audit.start(connectionAuditSnapshotItem{UserID: 7, DeviceIDHash: "device-a", SourceIP: "198.51.100.4", Destination: "one.example", DestinationPort: 443})
-	second := audit.start(connectionAuditSnapshotItem{UserID: 7, DeviceIDHash: "device-b", SourceIP: "198.51.100.5", Destination: "two.example", DestinationPort: 443})
+	first := audit.start(connectionAuditSnapshotItem{UserID: 7, DeviceIDHash: "device-a", SourceIP: "198.51.100.4"})
+	second := audit.start(connectionAuditSnapshotItem{UserID: 7, DeviceIDHash: "device-b", SourceIP: "198.51.100.5"})
 	items := audit.drain()
 	if len(items) != 2 {
 		t.Fatalf("drain items = %d, want 2: %#v", len(items), items)
@@ -146,7 +176,7 @@ func TestConnectionAuditPeakIsScopedToDevice(t *testing.T) {
 func TestConnectionAuditDurationAndCoverageSurviveDrain(t *testing.T) {
 	audit := newConnectionAuditAccumulator(true)
 	audit.setCollectionPolicy(auditCollectionPolicy{Mode: "standard"})
-	finish := audit.start(connectionAuditSnapshotItem{UserID: 7, SourceIP: "198.51.100.4", Destination: "one.example", DestinationPort: 443})
+	finish := audit.start(connectionAuditSnapshotItem{UserID: 7, SourceIP: "198.51.100.4"})
 	finish()
 	items := audit.drain()
 	if len(items) != 1 || items[0].ClosedCount != 1 || items[0].BucketCapacity != maxAgentAuditBuckets || items[0].CollectionStartedAt == "" || items[0].CollectionEndedAt == "" {
@@ -157,10 +187,10 @@ func TestConnectionAuditDurationAndCoverageSurviveDrain(t *testing.T) {
 func TestConnectionAuditOldCloseDoesNotAffectReenabledGeneration(t *testing.T) {
 	audit := newConnectionAuditAccumulator(true)
 	audit.setCollectionPolicy(auditCollectionPolicy{Mode: "standard"})
-	oldFinish := audit.start(connectionAuditSnapshotItem{UserID: 7, SourceIP: "198.51.100.4", Destination: "example.com", DestinationPort: 443})
+	oldFinish := audit.start(connectionAuditSnapshotItem{UserID: 7, SourceIP: "198.51.100.4"})
 	audit.setEnabled(false)
 	audit.setEnabled(true)
-	newFinish := audit.start(connectionAuditSnapshotItem{UserID: 7, SourceIP: "198.51.100.4", Destination: "example.com", DestinationPort: 443})
+	newFinish := audit.start(connectionAuditSnapshotItem{UserID: 7, SourceIP: "198.51.100.4"})
 	oldFinish()
 
 	items := audit.drain()

@@ -55,10 +55,6 @@ type connectionAuditSnapshotItem struct {
 	SourceIP             string `json:"source_ip"`
 	SourceGeoCode        string `json:"source_geo_code,omitempty"`
 	Network              string `json:"network"`
-	Destination          string `json:"destination,omitempty"`
-	DestinationPort      int    `json:"destination_port,omitempty"`
-	OutboundTag          string `json:"outbound_tag,omitempty"`
-	OutboundType         string `json:"outbound_type,omitempty"`
 	ConnectionCount      int64  `json:"connection_count"`
 	ClosedCount          int64  `json:"closed_count"`
 	DurationTotalMS      int64  `json:"duration_total_ms"`
@@ -207,10 +203,7 @@ func (a *connectionAuditAccumulator) startSession(item connectionAuditSnapshotIt
 	if item.Network == "" {
 		item.Network = "tcp"
 	}
-	item.Destination = strings.TrimSpace(item.Destination)
-	if len(item.Destination) > 255 {
-		item.Destination = item.Destination[:255]
-	}
+
 	started := time.Now().UTC()
 	now := started.Format(time.RFC3339Nano)
 	a.mu.Lock()
@@ -218,7 +211,7 @@ func (a *connectionAuditAccumulator) startSession(item connectionAuditSnapshotIt
 		a.mu.Unlock()
 		return session
 	}
-	key := fmt.Sprintf("%d\x00%d\x00%d\x00%d\x00%s\x00%s\x00%s\x00%s\x00%d\x00%s\x00%s", a.generation, item.UserID, item.InboundID, item.PathID, item.DeviceIDHash, item.SourceIP, item.Network, item.Destination, item.DestinationPort, item.OutboundTag, item.OutboundType)
+	key := fmt.Sprintf("%d\x00%d\x00%d\x00%d\x00%s\x00%s\x00%s", a.generation, item.UserID, item.InboundID, item.PathID, item.DeviceIDHash, item.SourceIP, item.Network)
 	if a.buckets == nil {
 		a.buckets = make(map[string]*agentAuditBucket)
 	}
@@ -501,6 +494,9 @@ func (r *Runner) collectAndReportConnectionAudits(ctx context.Context) error {
 	defer r.connectionAuditMu.Unlock()
 	state := r.connectionAuditStateLocked()
 	if len(state.Pending) > 0 {
+		if err := r.saveConnectionAuditState(*state); err != nil {
+			return err
+		}
 		return r.reportPendingConnectionAudits(ctx, state)
 	}
 	items, coreErr := r.coreConnectionAuditSnapshot(ctx)

@@ -162,10 +162,6 @@ func (g *badVPNGateway) association(frame badVPNFrame) (*badVPNAssociation, erro
 			CredentialEpoch: g.credentialEpoch,
 			SourceIP:        g.sourceIP,
 			Network:         "udp",
-			Destination:     frame.destination.Addr().String(),
-			DestinationPort: int(frame.destination.Port()),
-			OutboundTag:     g.outboundTag,
-			OutboundType:    map[bool]string{true: "direct", false: "outbound"}[g.outboundTag == "direct"],
 		}),
 	}
 

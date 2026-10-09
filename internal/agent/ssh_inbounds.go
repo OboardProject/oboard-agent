@@ -1437,22 +1437,11 @@ func (m *managedSSHInbound) handleDirectTCPIP(connection *ssh.ServerConn, newCha
 		CredentialEpoch: credentialEpoch,
 		SourceIP:        sourceIPFromNetAddr(connection.RemoteAddr()),
 		Network:         "tcp",
-		Destination:     strings.ToLower(strings.TrimSpace(payload.DestAddr)),
-		DestinationPort: int(payload.DestPort),
-		OutboundTag:     "kernel-route",
-		OutboundType:    "routed",
 	})
 	go func() {
 		defer auditSession.finish()
 		proxySSHDirectTCPIP(channel, target, counter, auditSession)
 	}()
-}
-
-func outboundTagForAudit(routeKind, outboundTag string) string {
-	if routeKind == "direct" {
-		return "direct"
-	}
-	return outboundTag
 }
 
 func dialSSHRelayAddresses(ctx context.Context, dial outboundRelayDialFunc, outboundTag string, addresses []netip.Addr, port uint32) (net.Conn, error) {
