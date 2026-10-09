@@ -2,7 +2,7 @@
 +++ b/go.mod
 @@ -3 +3 @@
 -go 1.24.0
-+go 1.26.7
++go 1.26.9
 --- /dev/null
 +++ b/multipsk/benchmark_test.go
 @@ -0,0 +1,58 @@
