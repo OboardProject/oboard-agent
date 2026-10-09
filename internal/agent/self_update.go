@@ -259,10 +259,8 @@ func (r *Runner) downloadAndInstallSignedReleaseWithPolicy(ctx context.Context, 
 	if err != nil {
 		return outcome, err
 	}
-	if err := r.installVerifiedReleaseFiles(stagingPrefix, []stagedReleaseFile{
-		{source: stagedAgent, target: targets.Agent},
-		{source: stagedCore, target: targets.Core},
-		{source: stagedRealm, target: targets.Realm},
+	if err := r.installVerifiedReleaseWithProof(stagingPrefix, manifestPath, signaturePath, []stagedReleaseFile{
+		{source: stagedAgent, target: targets.Agent}, {source: stagedCore, target: targets.Core}, {source: stagedRealm, target: targets.Realm},
 	}); err != nil {
 		return outcome, err
 	}

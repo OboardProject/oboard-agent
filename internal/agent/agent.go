@@ -81,6 +81,7 @@ type Runner struct {
 	runtimeSecurityMu           sync.Mutex
 	runtimeStorageMu            sync.RWMutex
 	runtimeSecurityReport       atomic.Pointer[model.RuntimeSecurityReport]
+	runtimeSecurityIntegrity    atomic.Pointer[[]model.RuntimeSecurityCheck]
 	authorizationMu             sync.Mutex
 	authorizationStore          *authorization.Store
 	authorizationApplyMu        sync.Mutex
@@ -372,7 +373,7 @@ func (r *Runner) stateReadPath(path string) ([]byte, error) {
 }
 func (r *Runner) stateReadPathUnlocked(path string) ([]byte, error) {
 	// #nosec G304 -- paths are derived from the agent state directory.
-	data, err := os.ReadFile(path)
+	data, err := securefile.Read(path, 32<<20)
 	if err != nil {
 		return nil, err
 	}

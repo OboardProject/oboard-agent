@@ -10,4 +10,4 @@ func Apply(mode string) error {
 	}
 	return errors.New("runtime security profile is unsupported on this platform")
 }
-func Snapshot() State { return State{Mode: "standard"} }
+func Snapshot() State { state := State{Mode: "standard"}; processEvidence(&state); return state }

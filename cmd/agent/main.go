@@ -98,6 +98,9 @@ func main() {
 	updateSource := flag.String("update-source", "", "agent update source: panel or github")
 	allowPanelUpdate := flag.Bool("allow-panel-update", false, "allow future Agent updates from the controller panel")
 	updateRepo := flag.String("update-repo", "", "GitHub repository used for release updates, for example OboardProject/oboard-agent")
+	stagedCore := flag.String("staged-core", "", "signed staged kernel file for local update preflight")
+	preflightCoreUpdate := flag.Bool("preflight-core-update", false, "verify a staged core against the local security profile and deployed configuration")
+	recordReleaseProof := flag.Bool("record-release-proof", false, "retain signed release evidence in managed local state")
 	verifyRelease := flag.Bool("verify-release", false, "verify a downloaded Agent release manifest and files")
 	verifyManifest := flag.String("verify-manifest", "", "release manifest path")
 	verifySignature := flag.String("verify-signature", "", "release manifest signature path")
@@ -144,7 +147,11 @@ func main() {
 		}
 		cfg = loaded
 	} else {
-		cfg, _ = agent.LoadConfig(*configPath)
+		loaded, cfgErr := agent.LoadConfig(*configPath)
+		if cfgErr != nil && (*recordReleaseProof || *preflightCoreUpdate) {
+			log.Fatal("local configuration unavailable")
+		}
+		cfg = loaded
 	}
 	cfg.ConfigPath = *configPath
 	if *controllerURL != "" {
@@ -189,8 +196,22 @@ func main() {
 	executablePath, _ := os.Executable()
 	cfg = fillLocalCoreDefaults(cfg, executablePath)
 	runner := agent.New(cfg)
+	if *preflightCoreUpdate {
+		summary, err := runner.PreflightCoreUpdate(*stagedCore, *verifyManifest, *verifySignature)
+		fmt.Println(summary)
+		if err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 	if err := runner.Config().Validate(); err != nil {
 		log.Fatal(err)
+	}
+	if *recordReleaseProof {
+		if err := runner.RecordReleaseProof(*verifyManifest, *verifySignature); err != nil {
+			log.Fatal(err)
+		}
+		return
 	}
 	if *verifyCoreRuntime {
 		summary, err := runner.VerifyCoreRuntime(context.Background())

@@ -2,7 +2,9 @@
 package securefile
 
 import (
+	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"io"
@@ -133,4 +135,56 @@ func Remove(path string) error {
 		return err
 	}
 	return syncDirectory(root)
+}
+
+// Digest streams one regular file with a fixed memory and byte budget. It
+// detects replacement or modification during inspection and never follows links.
+func Digest(ctx context.Context, path string, limit int64) (string, int64, error) {
+	root, err := os.OpenRoot(filepath.Dir(path))
+	if err != nil {
+		return "", 0, err
+	}
+	defer root.Close()
+	name := filepath.Base(path)
+	before, err := root.Lstat(name)
+	if err != nil {
+		return "", 0, err
+	}
+	if !before.Mode().IsRegular() || before.Size() > limit {
+		return "", 0, errors.New("unsafe or oversized binary")
+	}
+	file, err := root.OpenFile(name, readFlags(), 0)
+	if err != nil {
+		return "", 0, err
+	}
+	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil || !os.SameFile(before, opened) {
+		return "", 0, errors.New("binary changed")
+	}
+	hash := sha256.New()
+	buffer := make([]byte, 64<<10)
+	var total int64
+	for {
+		if err := ctx.Err(); err != nil {
+			return "", 0, err
+		}
+		n, err := file.Read(buffer)
+		total += int64(n)
+		if total > limit {
+			return "", 0, errors.New("binary exceeds budget")
+		}
+		hash.Write(buffer[:n])
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return "", 0, err
+		}
+	}
+	after, err := root.Lstat(name)
+	if err != nil || !os.SameFile(before, after) || before.Size() != after.Size() || !before.ModTime().Equal(after.ModTime()) {
+		return "", 0, errors.New("binary changed")
+	}
+	return hex.EncodeToString(hash.Sum(nil)), total, nil
 }

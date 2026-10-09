@@ -3,6 +3,10 @@ package runtimeguard
 import (
 	"errors"
 	"golang.org/x/sys/unix"
+	"io"
+	"os"
+	"strconv"
+	"strings"
 	"syscall"
 )
 
@@ -25,7 +29,23 @@ func Apply(mode string) error {
 }
 
 func Snapshot() State {
-	state := State{Mode: "standard", Supported: true}
+	state := State{Mode: "standard", Supported: true, UID: os.Geteuid(), GID: os.Getegid()}
+	processEvidence(&state)
+	if file, err := os.Open("/proc/self/status"); err == nil {
+		raw, err := io.ReadAll(io.LimitReader(file, 64<<10))
+		file.Close()
+		if err == nil {
+			for _, line := range strings.Split(string(raw), "\n") {
+				if value, ok := strings.CutPrefix(line, "CapEff:"); ok {
+					value = strings.TrimSpace(value)
+					if _, err := strconv.ParseUint(value, 16, 64); err == nil {
+						state.EffectiveCapabilities = value
+						state.IdentitySupported = true
+					}
+				}
+			}
+		}
+	}
 	nnp, _, e1 := syscall.Syscall6(syscall.SYS_PRCTL, unix.PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0, 0)
 	dump, _, e2 := syscall.Syscall6(syscall.SYS_PRCTL, unix.PR_GET_DUMPABLE, 0, 0, 0, 0, 0)
 	var limit unix.Rlimit

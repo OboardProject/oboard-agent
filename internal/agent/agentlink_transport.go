@@ -94,10 +94,10 @@ func (r *Runner) connectStealth(ctx context.Context) error {
 		return errors.New("stealth transport is not configured")
 	}
 	session, err := agentlink.Dial(ctx, agentlink.ClientConfig{
-		Address:  cfg.Stealth.ControllerAddr,
+		Address:    cfg.Stealth.ControllerAddr,
 		CertSHA256: cfg.Stealth.ControllerCertSHA256,
-		AgentID:  cfg.AgentID,
-		Token:    cfg.AgentToken,
+		AgentID:    cfg.AgentID,
+		Token:      cfg.AgentToken,
 	})
 	if err != nil {
 		return err
@@ -395,13 +395,16 @@ func (r *Runner) downloadAndInstallSignedReleaseOverTransport(ctx context.Contex
 	if err := checkUpdateDiskBudget(targets, agentFile.Size, coreFile.Size, realmFile.Size); err != nil {
 		return outcome, err
 	}
+	if err := r.preflightRuntimeSecurityUpdate(filepath.Join(tmpDir, coreName)); err != nil {
+		return outcome, err
+	}
 	state, note, err := r.preflightStagedCore(filepath.Join(tmpDir, coreName), targets.ActiveConfig, coreCheckTimeout)
 	outcome.CorePreflight = state
 	outcome.CorePreflightNote = note
 	if err != nil {
 		return outcome, err
 	}
-	if err := r.installVerifiedReleaseFiles(stagingPrefix, []stagedReleaseFile{
+	if err := r.installVerifiedReleaseWithProof(stagingPrefix, manifestPath, signaturePath, []stagedReleaseFile{
 		{source: filepath.Join(tmpDir, agentName), target: targets.Agent},
 		{source: filepath.Join(tmpDir, coreName), target: targets.Core},
 		{source: filepath.Join(tmpDir, realmName), target: targets.Realm},

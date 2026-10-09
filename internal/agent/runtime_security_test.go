@@ -2,6 +2,7 @@ package agent
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"github.com/OboardProject/oboard-agent/internal/model"
 	"github.com/OboardProject/oboard-agent/internal/protectedstate"
@@ -175,5 +176,96 @@ func TestRuntimeSecurityUpdatePreservesEnforcement(t *testing.T) {
 	raw, err := r.stateRead(runtimeSecurityFile)
 	if err != nil || !bytes.Contains(raw, []byte("enhanced")) {
 		t.Fatal("failed update relaxed profile")
+	}
+}
+
+func TestRuntimeSecurityStorageEvidenceAndInterruptedKeyLoss(t *testing.T) {
+	dir := t.TempDir()
+	r := New(Config{StateDir: dir, ConfigPath: filepath.Join(dir, "agent.json")})
+	if err := r.stateWrite(sshInboundsCurrent, []byte("secret"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.enableRuntimeStorage(); err != nil {
+		t.Fatal(err)
+	}
+	if encrypted, err := r.verifyRuntimeStorage(context.Background()); err != nil || !encrypted {
+		t.Fatal(encrypted, err)
+	}
+	raw, err := os.ReadFile(r.statePath(sshInboundsCurrent))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw[len(raw)-1] ^= 1
+	if err := os.WriteFile(r.statePath(sshInboundsCurrent), raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.verifyRuntimeStorage(context.Background()); err == nil {
+		t.Fatal("damaged state reported safe")
+	}
+	for _, name := range []string{runtimeStorageReady, runtimeSecretsKey} {
+		if err := os.Remove(r.statePath(name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := r.enableRuntimeStorage(); err == nil {
+		t.Fatal("partial conversion replaced lost key")
+	}
+}
+func TestRuntimeSecurityRepairClosedInputAndPermissions(t *testing.T) {
+	dir := t.TempDir()
+	config := filepath.Join(dir, "agent.json")
+	r := New(Config{StateDir: dir, ConfigPath: config})
+	if err := os.WriteFile(config, []byte("{}"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.repairRuntimePermissions(); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(config); err != nil || info.Mode().Perm() != 0600 {
+		t.Fatal(info, err)
+	}
+	for _, raw := range []string{`{"repair":true,"mode":"standard"}`, `{"repair":true,"path":"/etc/passwd"}`, `{"repair":true,"command":"whoami"}`} {
+		if _, err := r.applyRuntimeSecurity(raw); err == nil {
+			t.Fatal("unsafe repair accepted")
+		}
+	}
+}
+
+func TestRuntimeSecurityUpdateVerificationRejectsLostRestrictions(t *testing.T) {
+	dir := t.TempDir()
+	r := New(Config{StateDir: dir, ConfigPath: filepath.Join(dir, "agent.json")})
+	if err := r.stateWrite(singBoxConfigFile, []byte(`{"inbounds":[],"outbounds":[{"type":"direct","tag":"direct"}]}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	kernel := newFakeCoreKernel(t, r.statePath(singBoxConfigFile), true)
+	r.coreClient = kernel.client
+	if err := r.stateWrite(runtimeSecurityFile, []byte(`{"mode":"enhanced"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	kernel.mu.Lock()
+	kernel.runtimeSecurityMode = "standard"
+	kernel.mu.Unlock()
+	if err := r.verifyInstalledRuntimeSecurity(context.Background()); err == nil {
+		t.Fatal("upgrade lost restrictions but passed verification")
+	}
+	kernel.mu.Lock()
+	kernel.runtimeSecurityMode = "enhanced"
+	kernel.mu.Unlock()
+	if err := r.verifyInstalledRuntimeSecurity(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRuntimeSecurityReportWriteFailureIsVisible(t *testing.T) {
+	dir := t.TempDir()
+	r := New(Config{StateDir: dir})
+	if err := os.Mkdir(r.statePath(runtimeSecurityReportFile), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.persistRuntimeSecurityReport(model.RuntimeSecurityReport{State: "enhanced"}); err == nil {
+		t.Fatal("report save failure ignored")
+	}
+	if report := r.cachedRuntimeSecurity(); report == nil || report.State != "failed" || report.ErrorCode != "runtime_security_report_save_failed" {
+		t.Fatal(report)
 	}
 }

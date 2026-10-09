@@ -19,8 +19,17 @@ import (
 type Target struct {
 	ID, Path                            string
 	Directory, Public, Optional, Socket bool
+	Repairable                          bool
 }
 type Kernel struct {
+	UID                   int    `json:"uid"`
+	GID                   int    `json:"gid"`
+	EffectiveCapabilities string `json:"effective_capabilities,omitempty"`
+	IdentitySupported     bool   `json:"identity_supported"`
+	SensitiveArguments    bool   `json:"sensitive_arguments"`
+	SensitiveEnvironment  bool   `json:"sensitive_environment"`
+	LocalAPI              string `json:"local_api"`
+
 	Mode              string `json:"mode"`
 	Supported         bool   `json:"supported"`
 	NoNewPrivileges   bool   `json:"no_new_privileges"`
@@ -37,7 +46,7 @@ type Input struct {
 
 func Inspect(ctx context.Context, input Input) model.RuntimeSecurityReport {
 	now := time.Now().UTC()
-	report := model.RuntimeSecurityReport{Revision: input.Revision, DesiredMode: input.Mode, ActualMode: "unknown", State: "partial", Platform: runtime.GOOS, Supported: runtime.GOOS == "linux" && input.Kernel != nil && input.Kernel.Supported, Phase: "checked", LocalPolicy: input.LocalPolicy, CheckedAt: now, Capabilities: []string{"managed_permissions", "bounded_inspection", "bound_state_encryption"}, Checks: []model.RuntimeSecurityCheck{}}
+	report := model.RuntimeSecurityReport{Revision: input.Revision, DesiredMode: input.Mode, ActualMode: "unknown", State: "partial", Platform: runtime.GOOS, Supported: runtime.GOOS == "linux" && input.Kernel != nil && input.Kernel.Supported, Phase: "checked", LocalPolicy: input.LocalPolicy, CheckedAt: now, Capabilities: []string{"managed_permissions", "bounded_inspection", "bound_state_encryption", "signed_binary_integrity", "managed_permission_repair"}, Checks: []model.RuntimeSecurityCheck{}}
 	add := func(id, category, status, severity, message, remedy string) {
 		report.Checks = append(report.Checks, model.RuntimeSecurityCheck{ID: id, Category: category, Status: status, Supported: status != "unsupported", Severity: severity, CheckedAt: now, Message: message, Remedy: remedy})
 	}
@@ -70,10 +79,15 @@ func Inspect(ctx context.Context, input Input) model.RuntimeSecurityReport {
 		if target.Public {
 			unsafe = unsafe || info.Mode().Perm()&0022 != 0
 		} else {
-			unsafe = unsafe || info.Mode().Perm()&0077 != 0
+			expected := os.FileMode(0600)
+			if target.Directory {
+				expected = 0700
+			}
+			unsafe = unsafe || info.Mode().Perm() != expected || unexpectedLinks(info)
 		}
 		if unsafe {
-			add(target.ID, "filesystem", "failed", "high", "受管资源类型或访问权限不安全", "由主机管理员修复权限，敏感目录 0700、文件 0600；拒绝符号链接")
+			add(target.ID, "filesystem", "failed", "high", "受管资源类型或访问权限不安全", "修复权限，敏感目录 0700、文件 0600；符号链接或异常所有者须由主机管理员处理")
+			report.Checks[len(report.Checks)-1].AutoFix = target.Repairable && repairableOwner(info) && (info.IsDir() == target.Directory)
 		} else {
 			add(target.ID, "filesystem", "passed", "info", "受管资源访问权限符合要求", "")
 		}
@@ -144,7 +158,7 @@ func Inspect(ctx context.Context, input Input) model.RuntimeSecurityReport {
 				}
 			}
 			if strings.Contains(string(status), "Uid:\t0\t") {
-				add("process_identity", "process", "warning", "info", "Agent 以 root 运行以提供受管更新和网络操作", "本检查不修改 Agent UID 或能力，远程操作仍受本地策略限制")
+				add("process_identity", "process", "passed", "info", "Agent 以 root 运行以提供受管更新和网络操作", "本检查不修改 Agent UID 或能力，远程操作仍受本地策略限制")
 			} else {
 				add("process_identity", "process", "passed", "info", "Agent 以非 root 身份运行", "")
 			}
@@ -153,7 +167,7 @@ func Inspect(ctx context.Context, input Input) model.RuntimeSecurityReport {
 	if input.Encrypted {
 		add("state_storage", "storage", "passed", "info", "Agent 私有 SSH 状态采用用途绑定的认证加密", "密钥与数据同机保存，不能抵御容器 root 或宿主机管理员")
 	} else {
-		add("state_storage", "storage", "warning", "info", "状态使用文件访问权限保护", "强化模式额外加密 Agent 私有 SSH 状态；内核及外部工具必需配置仍由权限保护")
+		add("state_storage", "storage", "passed", "info", "状态使用文件访问权限保护", "强化模式额外加密 Agent 私有 SSH 状态；内核及外部工具必需配置仍由权限保护")
 	}
 	if input.Kernel == nil {
 		add("kernel_profile", "service", "unknown", "warning", "尚未取得运行内核的安全状态", "先更新内核并确认本地管理接口可用")
@@ -167,10 +181,37 @@ func Inspect(ctx context.Context, input Input) model.RuntimeSecurityReport {
 		if input.Mode == "standard" {
 			report.State = "standard"
 		}
-		add("kernel_profile", "service", "warning", "info", "内核当前未完整启用强化限制", "应用强化模式后需要受控重启并重新验证")
+		status := "warning"
+		if input.Mode == "standard" {
+			status = "passed"
+		}
+		add("kernel_profile", "service", status, "info", "内核当前使用标准运行权限", "应用强化模式后需要受控重启并重新验证")
 	}
-	add("network_privileges", "service", "warning", "info", "保留现有网络能力和服务身份", "TUN、WireGuard、低端口及接口绑定不采用未经验证的统一降权")
-	add("binary_integrity", "binary", "unknown", "info", "本次检查未重新计算发布产物哈希", "安装和更新继续验证 Ed25519 签名及 SHA-256，名称和编译信息不构成漏洞")
+	if input.Kernel != nil {
+		k := input.Kernel
+		if k.IdentitySupported {
+			add("kernel_identity", "process", "passed", "info", fmt.Sprintf("内核 UID/GID：%d/%d，实际 CapEff：%s", k.UID, k.GID, k.EffectiveCapabilities), "权限值是实际观测，未统一删除网络能力")
+		} else {
+			add("kernel_identity", "process", "unsupported", "info", "内核未提供进程身份与能力证据", "")
+		}
+		if k.SensitiveArguments {
+			add("kernel_arguments", "process", "failed", "high", "内核参数存在疑似敏感字段", "改用受保护的配置文件")
+		} else if k.IdentitySupported {
+			add("kernel_arguments", "process", "passed", "info", "未发现内核凭据型启动参数", "")
+		}
+		if k.SensitiveEnvironment {
+			add("kernel_environment", "process", "warning", "high", "内核继承了疑似敏感环境变量", "移除服务环境中的安装凭据")
+		}
+		switch k.LocalAPI {
+		case "unix":
+			add("kernel_api_transport", "interface", "passed", "info", "内核管理接口使用 Unix Socket", "")
+		case "tcp":
+			add("kernel_api_transport", "interface", "failed", "high", "内核管理接口启用了 TCP 监听", "改为受限 Unix Socket；loopback 也可被其他本地用户访问")
+		default:
+			add("kernel_api_transport", "interface", "unknown", "warning", "无法确认内核管理接口类型", "")
+		}
+	}
+	add("network_privileges", "service", "passed", "info", "保留现有网络能力和服务身份", "TUN、WireGuard、低端口及接口绑定不采用未经验证的统一降权")
 	add("host_boundary", "process", "unsupported", "info", "共享内核无法阻止宿主机管理员观察容器进程", "普通用户文件权限、容器 root 和宿主机权限是不同边界")
 	if input.Mode == "enhanced" {
 		report.State = "partial"
@@ -191,11 +232,22 @@ func Inspect(ctx context.Context, input Input) model.RuntimeSecurityReport {
 // CheckManagedTree examines metadata only, without following links. Traversal
 // stops at a fixed entry count and depth rather than scanning a filesystem.
 func CheckManagedTree(ctx context.Context, path string) string {
+	before, err := os.Lstat(path)
+	if err != nil {
+		return "unknown"
+	}
+	if !before.IsDir() || before.Mode().Perm() != 0700 || unexpectedOwner(before) {
+		return "failed"
+	}
 	root, err := os.OpenRoot(path)
 	if err != nil {
 		return "unknown"
 	}
 	defer root.Close()
+	after, err := root.Stat(".")
+	if err != nil || !os.SameFile(before, after) {
+		return "unknown"
+	}
 	queue := []string{"."}
 	seen := 0
 	for len(queue) > 0 {
@@ -204,7 +256,7 @@ func CheckManagedTree(ctx context.Context, path string) string {
 		}
 		dir := queue[0]
 		queue = queue[1:]
-		file, err := root.Open(dir)
+		file, err := root.OpenFile(dir, directoryFlags(), 0)
 		if err != nil {
 			return "unknown"
 		}
@@ -223,7 +275,7 @@ func CheckManagedTree(ctx context.Context, path string) string {
 			if err != nil {
 				return "unknown"
 			}
-			if info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0077 != 0 || unexpectedOwner(info) {
+			if info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0077 != 0 || unexpectedOwner(info) || unexpectedLinks(info) {
 				return "failed"
 			}
 			if info.IsDir() {

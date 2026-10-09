@@ -633,7 +633,10 @@ func (r *Runner) restartCoreForRuntimeDrift(ctx context.Context, desired []byte)
 func (r *Runner) VerifyCoreRuntime(ctx context.Context) (string, error) {
 	configPath := r.statePath(singBoxConfigFile)
 	desired, err := r.stateReadPath(configPath)
-	if err != nil || len(bytes.TrimSpace(desired)) == 0 {
+	if err != nil && !os.IsNotExist(err) {
+		return "core runtime verification failed", errors.New("deployed configuration unreadable")
+	}
+	if os.IsNotExist(err) || len(bytes.TrimSpace(desired)) == 0 {
 		return "core runtime verification skipped: no kernel configuration is deployed", nil
 	}
 	check := r.awaitCoreRuntimeConfig(ctx, desired, r.coreRuntimeVerifyWindow())
@@ -651,6 +654,9 @@ func (r *Runner) VerifyCoreRuntime(ctx context.Context) (string, error) {
 		return summary, fmt.Errorf("core still runs %s after the update, expected %s", check.RunningBuild.String(), check.InstalledBuild.String())
 	case check.Verification == coreRuntimeVerificationUnavailable:
 		return summary, errors.New("core local API is unreachable, so the running kernel could not be verified")
+	}
+	if err := r.verifyInstalledRuntimeSecurity(ctx); err != nil {
+		return summary, err
 	}
 	return summary, nil
 }
@@ -741,8 +747,8 @@ func (r *Runner) activateInstalledCore(ctx context.Context, binaryReplaced bool)
 // activateInstalledCoreLocked runs while the caller holds coreLifecycleMu.
 // update_agent keeps the lock across atomic installation and activation so the
 // watchdog cannot race the file replacement.
-func (r *Runner) activateInstalledCoreLocked(ctx context.Context, binaryReplaced bool) (map[string]any, error) {
-	result := map[string]any{}
+func (r *Runner) activateInstalledCoreLocked(ctx context.Context, binaryReplaced bool) (result map[string]any, err error) {
+	result = map[string]any{}
 	if !r.managedRestartEnabled() {
 		result["core_activation"] = "unmanaged"
 		result["core_activation_note"] = "restart_command is \"none\"; restart the kernel out of band to activate the installed build"
@@ -750,11 +756,24 @@ func (r *Runner) activateInstalledCoreLocked(ctx context.Context, binaryReplaced
 	}
 	configPath := r.statePath(singBoxConfigFile)
 	desired, readErr := r.stateReadPath(configPath)
-	if readErr != nil || len(bytes.TrimSpace(desired)) == 0 {
+	if readErr != nil && !os.IsNotExist(readErr) {
+		result["core_activation"] = "config_unreadable"
+		return result, errors.New("deployed configuration unreadable")
+	}
+	if os.IsNotExist(readErr) || len(bytes.TrimSpace(desired)) == 0 {
 		// Nothing is deployed yet, so the next apply will start the new build.
 		result["core_activation"] = "waiting_for_config"
 		return result, nil
 	}
+
+	defer func() {
+		if err == nil {
+			if securityErr := r.verifyInstalledRuntimeSecurity(ctx); securityErr != nil {
+				result["core_activation"] = "security_unverified"
+				err = securityErr
+			}
+		}
+	}()
 
 	before := r.checkCoreRuntimeConfig(ctx, desired)
 	if running := before.RunningBuild.String(); running != "" {

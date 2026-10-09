@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"github.com/OboardProject/oboard-agent/internal/protectedstate"
 	"github.com/OboardProject/oboard-agent/internal/securefile"
@@ -75,7 +77,24 @@ func (r *Runner) openRuntimeState(path string, raw []byte) ([]byte, error) {
 }
 func (r *Runner) runtimeStorageRequired() bool {
 	_, err := os.Lstat(r.statePath(runtimeStorageReady))
-	return !os.IsNotExist(err)
+	if !os.IsNotExist(err) {
+		return true
+	}
+	raw, err := securefile.Read(r.statePath(runtimeSecurityFile), 4096)
+	if os.IsNotExist(err) {
+		return false
+	}
+	if err != nil {
+		return true
+	}
+	if r.stealthOn() && stealth.IsEncrypted(raw) {
+		raw, err = stealth.Decrypt(r.Config().StealthKey, raw)
+		if err != nil {
+			return true
+		}
+	}
+	var profile struct{ Mode string }
+	return json.Unmarshal(raw, &profile) != nil || profile.Mode != "standard"
 }
 func (r *Runner) enableRuntimeStorage() error {
 	r.runtimeStorageMu.Lock()
@@ -83,6 +102,24 @@ func (r *Runner) enableRuntimeStorage() error {
 	if _, err := r.runtimeStorageKey(); os.IsNotExist(err) {
 		if r.runtimeStorageRequired() {
 			return errors.New("runtime storage key missing")
+		}
+		for _, name := range runtimeProtectedFiles {
+			raw, readErr := securefile.Read(r.statePath(name), 8<<20)
+			if os.IsNotExist(readErr) {
+				continue
+			}
+			if readErr != nil {
+				return readErr
+			}
+			if r.stealthOn() && stealth.IsEncrypted(raw) {
+				raw, readErr = stealth.Decrypt(r.Config().StealthKey, raw)
+				if readErr != nil {
+					return readErr
+				}
+			}
+			if protectedstate.IsProtected(raw) {
+				return errors.New("runtime storage key missing")
+			}
 		}
 		key, err := stealth.GenerateKey()
 		if err != nil {
@@ -107,4 +144,43 @@ func (r *Runner) enableRuntimeStorage() error {
 		}
 	}
 	return r.stateWritePathSyncedUnlocked(r.statePath(runtimeStorageReady), []byte("1"), 0600)
+}
+
+func (r *Runner) verifyRuntimeStorage(ctx context.Context) (bool, error) {
+	if !r.runtimeStorageMu.TryRLock() {
+		return false, errors.New("storage busy")
+	}
+	defer r.runtimeStorageMu.RUnlock()
+	key, err := r.runtimeStorageKey()
+	if os.IsNotExist(err) && !r.runtimeStorageRequired() {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	for _, name := range runtimeProtectedFiles {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		raw, err := securefile.Read(r.statePath(name), 8<<20)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return false, err
+		}
+		if r.stealthOn() && stealth.IsEncrypted(raw) {
+			raw, err = stealth.Decrypt(r.Config().StealthKey, raw)
+			if err != nil {
+				return false, err
+			}
+		}
+		if !protectedstate.IsProtected(raw) {
+			return false, errors.New("unprotected private state")
+		}
+		if _, err := protectedstate.Open(key, name, raw); err != nil {
+			return false, err
+		}
+	}
+	return r.runtimeStorageRequired(), nil
 }

@@ -3,6 +3,7 @@ package runtimesecurity
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -48,5 +49,27 @@ func TestBoundedInspection(t *testing.T) {
 	}
 	if got := CheckManagedTree(context.Background(), dir); got != "failed" {
 		t.Fatal(got)
+	}
+}
+
+func TestManagedTreeRejectsLinkedRootAndReportsIncompleteCoverage(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "linked")
+	if err := os.Symlink(dir, link); err != nil {
+		t.Fatal(err)
+	}
+	if got := CheckManagedTree(context.Background(), link); got != "failed" {
+		t.Fatal(got)
+	}
+	for i := 0; i < 129; i++ {
+		if err := os.WriteFile(filepath.Join(dir, fmt.Sprint(i)), nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := CheckManagedTree(context.Background(), dir); got != "unknown" {
+		t.Fatal("incomplete scan claimed complete", got)
 	}
 }

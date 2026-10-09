@@ -1,6 +1,7 @@
 package securefile
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -84,5 +85,31 @@ func TestPrivateLogRejectsLinksAndRepairsMode(t *testing.T) {
 	if file, err := OpenAppend(link); err == nil {
 		file.Close()
 		t.Fatal("log symlink accepted")
+	}
+}
+
+func TestDigestRejectsLinksAndHonorsBudget(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "binary")
+	if err := os.WriteFile(path, []byte("payload"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Digest(context.Background(), path, 3); err == nil {
+		t.Fatal("byte budget ignored")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, _, err := Digest(ctx, path, 64); err == nil {
+		t.Fatal("cancellation ignored")
+	}
+	if _, n, err := Digest(context.Background(), path, 64); err != nil || n != 7 {
+		t.Fatal(n, err)
+	}
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(path, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Digest(context.Background(), link, 64); err == nil {
+		t.Fatal("symlink followed")
 	}
 }

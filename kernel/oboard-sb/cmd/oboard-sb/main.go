@@ -56,6 +56,7 @@ func main() {
 	showVersion := flag.Bool("version", false, "print version and supported protocols")
 	logFile := flag.String("log-file", "", "append process output to this file; used where no service manager captures stdout")
 	flag.Parse()
+	runtimeguard.SetLocalAPI(*api)
 
 	if *securityCheck {
 		if err := runtimeguard.Apply("enhanced"); err != nil {

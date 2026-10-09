@@ -86,7 +86,7 @@ func TestDownloadAndInstallSignedRelease(t *testing.T) {
 	if err := os.WriteFile(targets.Core, []byte("old-core"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	got, err := (&Runner{}).downloadAndInstallSignedRelease(context.Background(), server.Client(), server.URL+"/hidden/downloads/github", manifest.Repo, manifest.Build, targets, ".oboard-update")
+	got, err := New(Config{StateDir: dir, UpdateRepo: manifest.Repo}).downloadAndInstallSignedRelease(context.Background(), server.Client(), server.URL+"/hidden/downloads/github", manifest.Repo, manifest.Build, targets, ".oboard-update")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -318,7 +318,7 @@ func TestSignedReleaseRejectsTamperedBinaryBeforeInstall(t *testing.T) {
 	_ = os.WriteFile(targets.Agent, []byte("old-agent"), 0o755)
 	_ = os.WriteFile(targets.Core, []byte("old-core"), 0o755)
 	_ = os.WriteFile(targets.Realm, []byte("old-realm"), 0o755)
-	_, err = (&Runner{}).downloadAndInstallSignedRelease(context.Background(), server.Client(), server.URL, manifest.Repo, manifest.Build, targets, ".oboard-update")
+	_, err = New(Config{StateDir: dir, UpdateRepo: manifest.Repo}).downloadAndInstallSignedRelease(context.Background(), server.Client(), server.URL, manifest.Repo, manifest.Build, targets, ".oboard-update")
 	if err == nil || !strings.Contains(err.Error(), "failed after 3 attempts") {
 		t.Fatalf("unexpected tampered release error: %v", err)
 	}
@@ -370,7 +370,7 @@ func TestSignedReleaseRejectsMissingRealmAsset(t *testing.T) {
 	targets := signedReleaseTargets{Agent: filepath.Join(dir, "oboard-agent"), Core: filepath.Join(dir, "oboard-sb"), Realm: filepath.Join(dir, "oboard-realm")}
 	_ = os.WriteFile(targets.Agent, []byte("old-agent"), 0o755)
 	_ = os.WriteFile(targets.Core, []byte("old-core"), 0o755)
-	_, err = (&Runner{}).downloadAndInstallSignedRelease(context.Background(), server.Client(), server.URL, manifest.Repo, manifest.Build, targets, ".oboard-update")
+	_, err = New(Config{StateDir: dir, UpdateRepo: manifest.Repo}).downloadAndInstallSignedRelease(context.Background(), server.Client(), server.URL, manifest.Repo, manifest.Build, targets, ".oboard-update")
 	if err == nil || !strings.Contains(err.Error(), "oboard-realm-") {
 		t.Fatalf("unexpected missing realm error: %v", err)
 	}

@@ -471,6 +471,7 @@ WantedBy=multi-user.target
 // statePhysicalName below.
 var stateTopLevelFiles = []string{
 	runtimeSecurityFile, runtimeSecurityPendingFile, runtimeSecurityDesiredFile, runtimeSecretsKey, runtimeStorageReady, runtimeSecurityReportFile,
+	runtimeReleaseProofFile,
 	singBoxConfigFile,
 	singBoxLastGoodFile,
 	"last-applied-version.json",
