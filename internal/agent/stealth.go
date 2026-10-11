@@ -484,6 +484,7 @@ var stateTopLevelFiles = []string{
 	"authorization.json",
 	"kernel-authorization.json",
 	"kernel-users.json",
+	"kernel-proxy-dscp.json",
 	"runtime-users.json",
 	sshInboundsCurrent,
 	sshInboundsLastGood,

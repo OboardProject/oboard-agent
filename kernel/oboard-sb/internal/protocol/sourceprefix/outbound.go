@@ -10,9 +10,9 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/boxnet/common/dialer"
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/outbound"
-	"github.com/sagernet/sing-box/common/dialer"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"

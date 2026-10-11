@@ -7,13 +7,13 @@ import (
 	"fmt"
 	"strings"
 
+	upstream "github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/boxnet/protocol/shadowsocks"
 	"github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/runtimeuser"
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/inbound"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
-	upstream "github.com/sagernet/sing-box/protocol/shadowsocks"
 )
 
 func RegisterInbound(registry *inbound.Registry) {

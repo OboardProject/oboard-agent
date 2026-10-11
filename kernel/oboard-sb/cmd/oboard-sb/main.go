@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/proxydscp"
 	"github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/redact"
 	"github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/runtimeguard"
+	singService "github.com/sagernet/sing/service"
 	"log"
 	"net"
 	"net/http"
@@ -26,7 +28,7 @@ import (
 	C "github.com/sagernet/sing-box/constant"
 )
 
-var kernelCapabilities = []string{"runtime_security_v1", "authorization_lease_v1", "authorization_control_v1", "runtime_users_v1", "runtime_users:vless", "runtime_users:hysteria2", "runtime_users:shadowsocks-multi", "runtime_users:snell-psk", "snell_multi_psk_v4_v1", "snell_multi_psk_v6_v1", "runtime_users_snell_psk_v1", "outbound_egress_probe_v1", "outbound_relay_v1", "route_relay_v1", "runtime_clock_v1", "connection_presence_v1", "family_selector_v1", "traffic_ledger", "runtime_config_digest_v1", "runtime_build_identity_v1", "dns_doq_v1", "dns_group_v1", "account_activity_local_v1"}
+var kernelCapabilities = []string{proxydscp.Capability, "runtime_security_v1", "authorization_lease_v1", "authorization_control_v1", "runtime_users_v1", "runtime_users:vless", "runtime_users:hysteria2", "runtime_users:shadowsocks-multi", "runtime_users:snell-psk", "snell_multi_psk_v4_v1", "snell_multi_psk_v6_v1", "runtime_users_snell_psk_v1", "outbound_egress_probe_v1", "outbound_relay_v1", "route_relay_v1", "runtime_clock_v1", "connection_presence_v1", "family_selector_v1", "traffic_ledger", "runtime_config_digest_v1", "runtime_build_identity_v1", "dns_doq_v1", "dns_group_v1", "account_activity_local_v1"}
 
 // runtimeConfigState is the payload-free identity of the configuration this
 // process actually loaded. Agent compares it with the desired configuration so
@@ -135,6 +137,11 @@ func main() {
 	memoryReclaimer := minibox.StartMemoryReclaimer(ctx, runtimeTuning)
 	runtimeClock := minibox.NewRuntimeClock()
 	boxCtx := minibox.Context(context.Background(), runtimeClock)
+	dscp, err := proxydscp.New(kernelStatePath(*config, stealthKey, "kernel-proxy-dscp.json"), stealthKey)
+	if err != nil {
+		log.Print("proxy DSCP policy unavailable; continuing without marking")
+	}
+	singService.MustRegister[*proxydscp.Manager](boxCtx, dscp)
 	b, err := box.New(box.Options{Context: boxCtx, Options: opts})
 	if err != nil {
 		log.Fatal(err)
@@ -160,7 +167,7 @@ func main() {
 	tracker.SetSocketGovernor(socketGovernor)
 	if *api != "" {
 		go func() {
-			if err := serveHealth(ctx, *api, b, tracker, runtimeUsers, runtimeClock, runtimeTuning, memoryReclaimer, socketGovernor, runtimeConfig); err != nil && ctx.Err() == nil {
+			if err := serveHealth(ctx, *api, b, tracker, runtimeUsers, runtimeClock, runtimeTuning, memoryReclaimer, socketGovernor, runtimeConfig, dscp); err != nil && ctx.Err() == nil {
 				log.Println(err)
 			}
 		}()
@@ -213,11 +220,14 @@ func printVersion() {
 	fmt.Println(string(data))
 }
 
-func serveHealth(ctx context.Context, listen string, instance *box.Box, tracker *minibox.RateLimitTracker, runtimeUsers *minibox.RuntimeUsers, runtimeClock *minibox.RuntimeClock, tuning minibox.RuntimeTuning, memoryReclaimer *minibox.MemoryReclaimer, socketGovernor *minibox.SocketBufferGovernor, runtimeConfig runtimeConfigState) error {
+func serveHealth(ctx context.Context, listen string, instance *box.Box, tracker *minibox.RateLimitTracker, runtimeUsers *minibox.RuntimeUsers, runtimeClock *minibox.RuntimeClock, tuning minibox.RuntimeTuning, memoryReclaimer *minibox.MemoryReclaimer, socketGovernor *minibox.SocketBufferGovernor, runtimeConfig runtimeConfigState, dscp ...*proxydscp.Manager) error {
 	if err := validateLocalAPIListen(listen); err != nil {
 		return err
 	}
 	mux := http.NewServeMux()
+	if len(dscp) > 0 && strings.HasPrefix(listen, "unix:") {
+		mux.HandleFunc("/proxy/dscp", dscp[0].Handler)
+	}
 	registerRuntimeStatusHandler(mux, runtimeConfig)
 	registerOutboundEgressHandler(mux, instance)
 	registerOutboundRelayHandlers(mux, listen, instance)

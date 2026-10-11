@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 
+	boxlistener "github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/boxnet/common/listener"
 	"github.com/enfein/mieru/v3/apis/common"
 	mieruconstant "github.com/enfein/mieru/v3/apis/constant"
 	"github.com/enfein/mieru/v3/apis/model"
@@ -20,7 +21,6 @@ import (
 	mierupb "github.com/enfein/mieru/v3/pkg/appctl/appctlpb"
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/inbound"
-	boxlistener "github.com/sagernet/sing-box/common/listener"
 	"github.com/sagernet/sing-box/common/uot"
 	"github.com/sagernet/sing-box/log"
 	boxoption "github.com/sagernet/sing-box/option"

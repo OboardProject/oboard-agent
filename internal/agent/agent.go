@@ -1742,6 +1742,12 @@ func (r *Runner) executeAgentTask(task model.AgentTask) (string, string) {
 			return "failed", jsonMap(result)
 		}
 		return "succeeded", jsonMap(result)
+	case model.AgentTaskTypeProxyDSCP:
+		value, err := r.applyProxyDSCP(task.PayloadJSON)
+		if err != nil {
+			return "failed", jsonMap(map[string]any{"message": err.Error()})
+		}
+		return "succeeded", jsonMap(value)
 	case model.AgentTaskTypeRuntimeSecurity:
 		value, err := r.applyRuntimeSecurity(task.PayloadJSON)
 		if err != nil {
@@ -3709,6 +3715,12 @@ func (r *Runner) Probe(force bool) model.HealthReport {
 	health.Timestamp = now
 	health.RemoteAccess = r.remoteAccessReport()
 	health.RuntimeSecurity = r.cachedRuntimeSecurity()
+	for _, capability := range kernelCapabilities {
+		if capability == model.ProxyDSCPKernelCapability {
+			health.ProxyDSCP = r.proxyDSCPHealth()
+			break
+		}
+	}
 	health.AppliedAuthorization = r.appliedAuthorization()
 	health.AppliedUsers = r.appliedUsers()
 	health.AppliedLatencyProbe = r.appliedLatencyProbe()
@@ -3810,7 +3822,7 @@ func (r *Runner) agentCapabilities(kernelCapabilities []string) []string {
 		model.AgentCapabilityAuthorizationControl,
 		model.AgentCapabilityRuntimeUsers,
 		"runtime_users_snell_psk_control_v1",
-		model.AgentCapabilityStealth, model.RuntimeSecurityCapability)
+		model.AgentCapabilityStealth, model.RuntimeSecurityCapability, model.ProxyDSCPCapability)
 	capabilities = append(capabilities, networkDiagnosticCapabilities()...)
 	for _, capability := range kernelCapabilities {
 		if capability == "account_activity_local_v1" {

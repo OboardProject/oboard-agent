@@ -1421,6 +1421,7 @@ func TCPFastOpenStateFromMask(mask int) string {
 }
 
 type HealthReport struct {
+	ProxyDSCP                 *ProxyDSCPReport              `json:"proxy_dscp,omitempty"`
 	RuntimeSecurity           *RuntimeSecurityReport        `json:"runtime_security,omitempty"`
 	AgentID                   string                        `json:"agent_id"`
 	Status                    ServerStatus                  `json:"status"`

@@ -9,10 +9,10 @@ import (
 	"os"
 	"strings"
 
+	"github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/boxnet/common/listener"
 	"github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/runtimeuser"
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/inbound"
-	"github.com/sagernet/sing-box/common/listener"
 	"github.com/sagernet/sing-box/common/mux"
 	"github.com/sagernet/sing-box/common/tls"
 	"github.com/sagernet/sing-box/common/uot"
