@@ -22,6 +22,8 @@ import (
 const Value = 46
 const Capability = "proxy_dscp_socket_v1"
 
+var errIPv6MPTCPUnsupported = errors.New("IPv6 MPTCP DSCP is unsupported")
+
 type Policy struct {
 	Enabled  bool  `json:"enabled"`
 	Revision int64 `json:"revision"`
@@ -36,17 +38,18 @@ type Report struct {
 	Excluded []string `json:"excluded"`
 }
 type Manager struct {
-	mu        sync.Mutex
-	enabled   atomic.Bool
-	policy    Policy
-	marked    atomic.Uint64
-	errors    atomic.Uint64
-	udp       map[weak.Pointer[net.UDPConn]]struct{}
-	tcp       map[weak.Pointer[net.TCPListener]]struct{}
-	nextSweep int
-	loadError string
-	path      string
-	key       []byte
+	mu                   sync.Mutex
+	enabled              atomic.Bool
+	policy               Policy
+	marked               atomic.Uint64
+	errors               atomic.Uint64
+	ipv6MPTCPUnsupported atomic.Bool
+	udp                  map[weak.Pointer[net.UDPConn]]struct{}
+	tcp                  map[weak.Pointer[net.TCPListener]]struct{}
+	nextSweep            int
+	loadError            string
+	path                 string
+	key                  []byte
 }
 
 func New(path string, key []byte) (*Manager, error) {
@@ -87,7 +90,14 @@ func (m *Manager) Control(network, address string, conn syscall.RawConn) error {
 	return nil
 }
 func (m *Manager) apply(conn syscall.RawConn, enabled bool) {
-	if err := setSocket(conn, enabled); err != nil {
+	m.recordSocketResult(setSocket(conn, enabled), enabled)
+}
+func (m *Manager) recordSocketResult(err error, enabled bool) {
+	if err != nil {
+		if errors.Is(err, errIPv6MPTCPUnsupported) {
+			m.ipv6MPTCPUnsupported.Store(true)
+			return
+		}
 		if errors.Is(err, net.ErrClosed) {
 			return
 		}
@@ -174,6 +184,7 @@ func (m *Manager) Configure(p Policy) error {
 	m.policy = p
 	m.enabled.Store(p.Enabled)
 	m.errors.Store(0)
+	m.ipv6MPTCPUnsupported.Store(false)
 	for ptr := range m.udp {
 		v := ptr.Value()
 		if v == nil {
@@ -217,7 +228,11 @@ func (m *Manager) Snapshot() Report {
 	if !supported {
 		state = "unsupported"
 	}
-	return Report{Policy: m.policy, State: state, Value: Value, Marked: m.marked.Load(), Errors: m.errors.Load(), Error: errText, Excluded: []string{"hysteria2", "wireguard", "ssh", "realm", "route-direct"}}
+	excluded := []string{"hysteria2", "wireguard", "ssh", "realm", "route-direct"}
+	if m.ipv6MPTCPUnsupported.Load() {
+		excluded = append(excluded, "ipv6-mptcp")
+	}
+	return Report{Policy: m.policy, State: state, Value: Value, Marked: m.marked.Load(), Errors: m.errors.Load(), Error: errText, Excluded: excluded}
 }
 func (m *Manager) Handler(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost {

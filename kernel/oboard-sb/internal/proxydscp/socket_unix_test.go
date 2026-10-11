@@ -4,8 +4,10 @@ package proxydscp
 
 import (
 	"context"
+	"errors"
 	"golang.org/x/sys/unix"
 	"net"
+	"slices"
 	"syscall"
 	"testing"
 	"time"
@@ -124,5 +126,51 @@ func TestNewTCPUsesPolicyWithoutWrappingConnection(t *testing.T) {
 	}
 	if got := socketClass(t, c.(*net.TCPConn), false, nil) >> 2; got != 46 {
 		t.Fatal("existing TCP changed", got)
+	}
+}
+
+func TestIPv6MPTCPFallbackDoesNotHideRealErrors(t *testing.T) {
+	for _, tt := range []struct {
+		name                    string
+		only                    int
+		err6, error4, onlyError error
+		mptcp                   bool
+		want4                   bool
+		wantError               error
+	}{
+		{name: "dual MPTCP", err6: unix.EOPNOTSUPP, mptcp: true, want4: true, wantError: errIPv6MPTCPUnsupported},
+		{name: "IPv6-only MPTCP", only: 1, err6: unix.EOPNOTSUPP, mptcp: true, wantError: errIPv6MPTCPUnsupported},
+		{name: "ordinary TCP", err6: unix.EOPNOTSUPP, want4: true, wantError: unix.EOPNOTSUPP},
+		{name: "IPv4 denied", err6: unix.EOPNOTSUPP, error4: unix.EPERM, mptcp: true, want4: true, wantError: unix.EPERM},
+		{name: "both unsupported", err6: unix.EOPNOTSUPP, error4: unix.EOPNOTSUPP, mptcp: true, want4: true, wantError: unix.EOPNOTSUPP},
+		{name: "IPv6 denied", err6: unix.EACCES, mptcp: true, want4: true, wantError: unix.EACCES},
+		{name: "cannot read dual stack", err6: unix.EOPNOTSUPP, onlyError: unix.EBADF, mptcp: true, wantError: unix.EBADF},
+		{name: "ordinary dual stack success", want4: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var options []int
+			err := setIPv6Options(func(level, opt int) error {
+				options = append(options, opt)
+				if level == unix.IPPROTO_IPV6 {
+					return tt.err6
+				}
+				if level != unix.IPPROTO_IP || opt != unix.IP_TOS {
+					t.Fatal("unexpected socket option", level, opt)
+				}
+				return tt.error4
+			}, func() (int, error) { return tt.only, tt.onlyError }, func() bool { return tt.mptcp })
+			if !errors.Is(err, tt.wantError) {
+				t.Fatalf("got %v want %v", err, tt.wantError)
+			}
+			if slices.Contains(options, unix.IP_TOS) != tt.want4 {
+				t.Fatal("IPv4 fallback mismatch", options)
+			}
+			if len(options) == 0 || options[0] != unix.IPV6_TCLASS {
+				t.Fatal("IPv6 was not attempted first", options)
+			}
+			if tt.wantError != errIPv6MPTCPUnsupported && errors.Is(err, errIPv6MPTCPUnsupported) {
+				t.Fatal("real error hidden as limitation")
+			}
+		})
 	}
 }

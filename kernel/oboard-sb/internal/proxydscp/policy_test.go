@@ -2,10 +2,12 @@ package proxydscp
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -103,5 +105,30 @@ func BenchmarkSocketCreation(b *testing.B) {
 				c.Close()
 			}
 		})
+	}
+}
+
+func TestMPTCPLimitationIsNotAFullSuccessOrSocketFailure(t *testing.T) {
+	m, _ := New("", nil)
+	if err := m.Configure(Policy{Enabled: true, Revision: 1}); err != nil {
+		t.Fatal(err)
+	}
+	m.recordSocketResult(errIPv6MPTCPUnsupported, true)
+	m.recordSocketResult(nil, true)
+	report := m.Snapshot()
+	if report.Errors != 0 || report.Error != "" || report.Marked != 1 || !slices.Contains(report.Excluded, "ipv6-mptcp") {
+		t.Fatal(report)
+	}
+	m.recordSocketResult(errors.New("real failure"), true)
+	report = m.Snapshot()
+	if report.Errors != 1 || report.Error != "socket_mark_failed" {
+		t.Fatal("real failure hidden", report)
+	}
+	if err := m.Configure(Policy{Enabled: false, Revision: 2}); err != nil {
+		t.Fatal(err)
+	}
+	report = m.Snapshot()
+	if report.Errors != 0 || slices.Contains(report.Excluded, "ipv6-mptcp") {
+		t.Fatal("old observation retained after reapply", report)
 	}
 }

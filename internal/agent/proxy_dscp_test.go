@@ -5,6 +5,7 @@ import (
 	"github.com/OboardProject/oboard-agent/internal/model"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -20,7 +21,7 @@ func TestProxyDSCPUsesOnlyKernelLocalPolicyEndpoint(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
 			t.Error(err)
 		}
-		_ = json.NewEncoder(w).Encode(model.ProxyDSCPReport{ProxyDSCPPolicy: got, Value: 46, State: "partial", Excluded: []string{"hysteria2"}})
+		_ = json.NewEncoder(w).Encode(model.ProxyDSCPReport{ProxyDSCPPolicy: got, Value: 46, State: "partial", Excluded: []string{"hysteria2", "ipv6-mptcp"}})
 	}))
 	defer srv.Close()
 	r := &Runner{coreClient: &http.Client{Transport: roundTripDSCP(func(req *http.Request) (*http.Response, error) {
@@ -31,6 +32,10 @@ func TestProxyDSCPUsesOnlyKernelLocalPolicyEndpoint(t *testing.T) {
 	out, err := r.applyProxyDSCP(`{"enabled":true,"revision":7}`)
 	if err != nil || out["requires_restart"] != false || !got.Enabled || got.Revision != 7 {
 		t.Fatal(out, err, got)
+	}
+	report := out["proxy_dscp"].(*model.ProxyDSCPReport)
+	if report.Error != "" || !slices.Contains(report.Excluded, "ipv6-mptcp") {
+		t.Fatal("kernel limitation lost", report)
 	}
 	if _, err = r.applyProxyDSCP(`{"enabled":true,"revision":0}`); err == nil {
 		t.Fatal("invalid revision accepted")
