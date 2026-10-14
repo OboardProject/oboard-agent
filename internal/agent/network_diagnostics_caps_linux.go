@@ -4,10 +4,11 @@ package agent
 
 import "github.com/OboardProject/oboard-agent/internal/model"
 
-// networkDiagnosticCapabilities lists the plugin diagnostics this platform
+// networkDiagnosticCapabilities lists the diagnostics this platform
 // implements natively.
 func networkDiagnosticCapabilities() []string {
 	return []string{
+		model.AgentCapabilityRouteMonitor,
 		model.AgentCapabilityNetworkDiagnostics, model.AgentCapabilityNetworkPing,
 		model.AgentCapabilityNetworkTraceICMP, model.AgentCapabilityNetworkTraceUDP, model.AgentCapabilityNetworkTraceTCP,
 		model.AgentCapabilityNetworkTCPProbe, model.AgentCapabilityNetworkDNSLookup, model.AgentCapabilityNetworkHTTPProbe,

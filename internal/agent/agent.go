@@ -29,6 +29,7 @@ import (
 	"github.com/OboardProject/oboard-agent/internal/core"
 	"github.com/OboardProject/oboard-agent/internal/logging"
 	"github.com/OboardProject/oboard-agent/internal/model"
+	"github.com/OboardProject/oboard-agent/internal/nexttrace"
 	"github.com/OboardProject/oboard-agent/internal/redact"
 	"github.com/OboardProject/oboard-agent/internal/securefile"
 	"github.com/OboardProject/oboard-agent/internal/security"
@@ -78,6 +79,8 @@ type Config struct {
 }
 
 type Runner struct {
+	nextTraceOnce               sync.Once
+	nextTraceGeo                *nexttrace.Client
 	runtimeSecurityMu           sync.Mutex
 	runtimeStorageMu            sync.RWMutex
 	runtimeSecurityReport       atomic.Pointer[model.RuntimeSecurityReport]

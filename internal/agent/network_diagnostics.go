@@ -5,11 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"net"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/OboardProject/oboard-agent/internal/model"
 	"github.com/OboardProject/oboard-agent/internal/netdiag"
+	"github.com/OboardProject/oboard-agent/internal/nexttrace"
 )
 
 func isNetworkDiagnosticTask(taskType string) bool {
@@ -51,8 +53,8 @@ func (r *Runner) validateDiagnosticEnvelope(envelope model.NetworkDiagnosticEnve
 	case envelope.ProtocolVersion != model.NetworkDiagnosticProtocolVersion:
 		status, result := diagnosticFailure(model.NetworkDiagnosticCodeUnsupported, "unsupported diagnostic protocol version")
 		return status, result, false
-	case envelope.Origin != model.NetworkDiagnosticOriginPlugin:
-		status, result := diagnosticFailure(model.NetworkDiagnosticCodeInvalidInput, "diagnostic origin must be plugin")
+	case envelope.Origin != model.NetworkDiagnosticOriginPlugin && envelope.Origin != model.NetworkDiagnosticOriginMonitor:
+		status, result := diagnosticFailure(model.NetworkDiagnosticCodeInvalidInput, "diagnostic origin must be plugin or monitor")
 		return status, result, false
 	case envelope.OperationID == "" || len(envelope.OperationID) > 64 || strings.ContainsAny(envelope.OperationID, " \t\r\n"):
 		status, result := diagnosticFailure(model.NetworkDiagnosticCodeInvalidInput, "operation_id is invalid")
@@ -60,7 +62,10 @@ func (r *Runner) validateDiagnosticEnvelope(envelope model.NetworkDiagnosticEnve
 	case envelope.ExpiresAt.IsZero() || !r.diagnosticNow().Before(envelope.ExpiresAt):
 		status, result := diagnosticFailure(model.NetworkDiagnosticCodeExpired, "the diagnostic expired before it could start")
 		return status, result, false
-	case !r.localGateAllows("plugins"):
+	case envelope.Origin == model.NetworkDiagnosticOriginMonitor && (envelope.PluginID != "" || envelope.InstanceID != 0 || envelope.RunID != ""):
+		status, result := diagnosticFailure(model.NetworkDiagnosticCodeInvalidInput, "monitor diagnostics cannot carry plugin identity")
+		return status, result, false
+	case envelope.Origin == model.NetworkDiagnosticOriginPlugin && !r.localGateAllows("plugins"):
 		status, result := diagnosticFailure(model.NetworkDiagnosticCodeLocalGateDenied, "agent local security policy does not allow plugin diagnostics")
 		return status, result, false
 	}
@@ -76,9 +81,18 @@ func (r *Runner) diagnosticNow() time.Time {
 
 // executeNetworkDiagnosticTask runs one structured diagnostic with native Go
 // sockets. It never executes ping, traceroute, curl or any other program,
-// and every operation is bounded by NetworkDiagnosticMaxDurationMS.
+// Plugin operations use NetworkDiagnosticMaxDurationMS; native route monitors
+// allow 60 seconds including bounded NextTrace API enrichment.
 func (r *Runner) executeNetworkDiagnosticTask(task model.AgentTask) (string, string) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(model.NetworkDiagnosticMaxDurationMS)*time.Millisecond)
+	var envelope model.NetworkDiagnosticEnvelope
+	if json.Unmarshal([]byte(task.PayloadJSON), &envelope) == nil && envelope.Origin == model.NetworkDiagnosticOriginMonitor && task.Type != model.AgentTaskTypeNetworkTrace {
+		return diagnosticFailure(model.NetworkDiagnosticCodeInvalidInput, "monitor origin is restricted to route traces")
+	}
+	budget := time.Duration(model.NetworkDiagnosticMaxDurationMS) * time.Millisecond
+	if envelope.Origin == model.NetworkDiagnosticOriginMonitor {
+		budget = 60 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
 	resolver := netdiag.Resolver(net.DefaultResolver)
 	dialer := &net.Dialer{}
@@ -104,7 +118,12 @@ func (r *Runner) executeNetworkDiagnosticTask(task model.AgentTask) (string, str
 		if status, failure, ok := r.validateDiagnosticEnvelope(payload.NetworkDiagnosticEnvelope); !ok {
 			return status, failure
 		}
-		result, err = netdiag.Trace(ctx, resolver, netdiag.OpenRawTransport, netdiag.TCPTracer, payload)
+		trace, traceErr := netdiag.Trace(ctx, resolver, netdiag.OpenRawTransport, netdiag.TCPTracer, payload)
+		if traceErr == nil && payload.Origin == model.NetworkDiagnosticOriginMonitor {
+			r.nextTraceOnce.Do(func() { r.nextTraceGeo = nexttrace.New(r.diagnosticNow, os.Getenv("OBOARD_NEXTTRACE_API_TOKEN")) })
+			r.nextTraceGeo.Enrich(ctx, &trace)
+		}
+		result, err = trace, traceErr
 	case model.AgentTaskTypeNetworkTCP:
 		var payload model.NetworkTCPProbeTaskPayload
 		if decodeErr := decodeDiagnosticPayload(task.PayloadJSON, &payload); decodeErr != nil {
