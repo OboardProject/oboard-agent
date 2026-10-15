@@ -42,13 +42,14 @@ var (
 
 type Inbound struct {
 	inbound.Adapter
-	ctx       context.Context
-	router    adapter.ConnectionRouterEx
-	logger    logger.ContextLogger
-	listener  *listener.Listener
-	service   *vless.Service[string]
-	tlsConfig tls.ServerConfig
-	transport adapter.V2RayServerTransport
+	ctx        context.Context
+	router     adapter.ConnectionRouterEx
+	logger     logger.ContextLogger
+	listener   *listener.Listener
+	service    *vless.Service[string]
+	tlsConfig  tls.ServerConfig
+	transport  adapter.V2RayServerTransport
+	references []string
 }
 
 func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.VLESSInboundOptions) (adapter.Inbound, error) {
@@ -81,6 +82,9 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		})
 		if err != nil {
 			return nil, err
+		}
+		if options.TLS.Reality != nil && options.TLS.Reality.Enabled && options.TLS.Reality.Handshake.Detour != "" {
+			inbound.references = []string{options.TLS.Reality.Handshake.Detour}
 		}
 	}
 	if options.Transport != nil {
@@ -137,7 +141,7 @@ func applyVLESSUsers(service *vless.Service[string], users []option.VLESSUser) e
 	return nil
 }
 
-func (h *Inbound) Start(stage adapter.StartStage) error {
+func (h *Inbound) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 	if stage != adapter.StartStateStart {
 		return nil
 	}
@@ -145,10 +149,17 @@ func (h *Inbound) Start(stage adapter.StartStage) error {
 		if err := h.tlsConfig.Start(); err != nil {
 			return err
 		}
+		scope.Add(h.tlsConfig.Close)
 	}
 	if h.transport == nil {
-		return h.listener.Start()
+		if err := h.listener.Start(); err != nil {
+			return err
+		}
+		scope.Add(h.listener.Close)
+		return nil
 	}
+	scope.Add(h.transport.Close)
+	scope.Add(h.listener.Close)
 	if common.Contains(h.transport.Network(), N.NetworkTCP) {
 		tcpListener, err := h.listener.ListenTCP()
 		if err != nil {
@@ -178,6 +189,10 @@ func (h *Inbound) Start(stage adapter.StartStage) error {
 
 func (h *Inbound) Close() error {
 	return common.Close(h.service, h.listener, h.tlsConfig, h.transport)
+}
+
+func (h *Inbound) References() []string {
+	return h.references
 }
 
 func (h *Inbound) NewConnection(ctx context.Context, conn net.Conn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {

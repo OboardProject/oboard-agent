@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Derived from sing-box v1.14.0; see internal/boxnet/UPSTREAM.
+// Derived from sing-box v1.14.3; see internal/boxnet/UPSTREAM.
 
 package shadowsocks
 
@@ -89,15 +89,16 @@ func newRelayInbound(ctx context.Context, router adapter.Router, logger log.Cont
 	return inbound, err
 }
 
-func (h *RelayInbound) Start(stage adapter.StartStage) error {
+func (h *RelayInbound) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 	if stage != adapter.StartStateStart {
 		return nil
 	}
-	return h.listener.Start()
-}
-
-func (h *RelayInbound) Close() error {
-	return h.listener.Close()
+	err := h.listener.Start()
+	if err != nil {
+		return err
+	}
+	scope.Add(h.listener.Close)
+	return nil
 }
 
 //nolint:staticcheck

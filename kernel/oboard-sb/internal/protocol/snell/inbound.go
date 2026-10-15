@@ -150,11 +150,15 @@ func (h *Inbound) RuntimeUsersCapability() string {
 	return runtimeuser.CapabilitySnellPSK
 }
 
-func (h *Inbound) Start(stage adapter.StartStage) error {
+func (h *Inbound) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 	if stage != adapter.StartStateStart {
 		return nil
 	}
-	return h.listener.Start()
+	if err := h.listener.Start(); err != nil {
+		return err
+	}
+	scope.Add(h.Close)
+	return nil
 }
 
 func (h *Inbound) Close() error {

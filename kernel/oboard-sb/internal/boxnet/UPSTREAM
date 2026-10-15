@@ -1,4 +1,4 @@
-Source: github.com/sagernet/sing-box v1.14.0
+Source: github.com/sagernet/sing-box v1.14.3
 License: GPL-3.0-or-later (repository LICENSE)
 Scope: selected socket factories and protocol adapters.
 Local changes: socket DSCP hooks and import redirection; upstream DNS, QUIC and WireGuard factories are unchanged.

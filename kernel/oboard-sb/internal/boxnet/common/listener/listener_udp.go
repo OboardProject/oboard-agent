@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Derived from sing-box v1.14.0; see internal/boxnet/UPSTREAM.
+// Derived from sing-box v1.14.3; see internal/boxnet/UPSTREAM.
 
 package listener
 
@@ -47,7 +47,9 @@ func (l *Listener) ListenUDPWithConfig(listenConfig net.ListenConfig) (net.Packe
 	} else {
 		udpFragment = l.listenOptions.UDPFragmentDefault
 	}
-	if !udpFragment {
+	if udpFragment {
+		listenConfig.Control = control.Append(listenConfig.Control, control.EnableUDPFragment())
+	} else {
 		listenConfig.Control = control.Append(listenConfig.Control, control.DisableUDPFragment())
 	}
 	if l.tproxy {

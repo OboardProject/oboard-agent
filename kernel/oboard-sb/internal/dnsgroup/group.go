@@ -69,7 +69,7 @@ func New(ctx context.Context, _ log.ContextLogger, tag string, options Options) 
 	return &Transport{TransportAdapter: dns.NewTransportAdapter(Type, tag, append([]string(nil), options.Members...)), ctx: ctx, cancel: cancel, manager: service.FromContext[adapter.DNSTransportManager](ctx), options: options, slots: make(chan struct{}, options.MaxConcurrency)}, nil
 }
 
-func (t *Transport) Start(stage adapter.StartStage) error {
+func (t *Transport) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 	if stage != adapter.StartStateStart {
 		return nil
 	}
@@ -93,6 +93,7 @@ func (t *Transport) Start(stage adapter.StartStage) error {
 		members = append(members, member)
 	}
 	t.members = members
+	scope.Add(t.Close)
 	return nil
 }
 

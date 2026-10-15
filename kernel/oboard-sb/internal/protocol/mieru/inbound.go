@@ -81,7 +81,7 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 	}, nil
 }
 
-func (h *Inbound) Start(stage adapter.StartStage) error {
+func (h *Inbound) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 	if stage != adapter.StartStateStart {
 		return nil
 	}
@@ -100,6 +100,7 @@ func (h *Inbound) Start(stage adapter.StartStage) error {
 	h.started = true
 	h.acceptWG.Add(1)
 	go h.acceptLoop()
+	scope.Add(h.Close)
 	h.logger.Info("mieru server started")
 	return nil
 }

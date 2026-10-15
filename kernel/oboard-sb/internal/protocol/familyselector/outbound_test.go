@@ -167,8 +167,8 @@ type testDNSRouter struct {
 	lastOptions adapter.DNSQueryOptions
 }
 
-func (r *testDNSRouter) Start(adapter.StartStage) error { return nil }
-func (r *testDNSRouter) Close() error                   { return nil }
+func (r *testDNSRouter) Start(adapter.StartStage, *adapter.Scope) error { return nil }
+func (r *testDNSRouter) Close() error                                   { return nil }
 func (r *testDNSRouter) Exchange(context.Context, *dns.Msg, adapter.DNSQueryOptions) (*dns.Msg, error) {
 	return nil, errors.New("not implemented")
 }

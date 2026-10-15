@@ -13,6 +13,7 @@ import (
 	"github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/restrictedtarget"
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/outbound"
+	"github.com/sagernet/sing-box/common/dialer"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
 	E "github.com/sagernet/sing/common/exceptions"
@@ -62,9 +63,13 @@ func NewOutbound(ctx context.Context, _ adapter.Router, logger log.ContextLogger
 	if !ipv6OK {
 		return nil, fmt.Errorf("family-selector IPv6 outbound %q not found", ipv6Tag)
 	}
-	dnsOptions, err := adapter.DNSQueryOptionsFrom(ctx, options.DomainResolver)
-	if err != nil {
-		return nil, err
+	var dnsOptions adapter.DNSQueryOptions
+	if options.DomainResolver != nil && options.DomainResolver.Server != "" {
+		resolved, err := dialer.NewDNSQueryOptions(ctx, options.DomainResolver, true)
+		if err != nil {
+			return nil, err
+		}
+		dnsOptions = resolved
 	}
 	strategy := C.DomainStrategy(options.Strategy)
 	dnsOptions.Strategy = strategy

@@ -31,10 +31,10 @@ func (m *memberStub) ExchangeAsync(ctx context.Context, q *mDNS.Msg, cb func(*mD
 	r, e := m.Exchange(ctx, q)
 	cb(r, e)
 }
-func (m *memberStub) Start(adapter.StartStage) error { return nil }
-func (m *memberStub) Reset()                         {}
-func (m *memberStub) Close() error                   { m.closes.Add(1); return nil }
-func (m *memberStub) Environment() []string          { return m.environment }
+func (m *memberStub) Start(adapter.StartStage, *adapter.Scope) error { return nil }
+func (m *memberStub) Reset()                                         {}
+func (m *memberStub) Close() error                                   { m.closes.Add(1); return nil }
+func (m *memberStub) Environment() []string                          { return m.environment }
 func stub(tag string, rcode int, err error) *memberStub {
 	return &memberStub{TransportAdapter: dns.NewTransportAdapter("test", tag, nil), exchange: func(_ context.Context, q *mDNS.Msg) (*mDNS.Msg, error) {
 		if err != nil {

@@ -50,9 +50,12 @@ func NewOutbound(ctx context.Context, _ adapter.Router, logger log.ContextLogger
 		return nil, fmt.Errorf("source-prefix does not support network strategy options")
 	}
 	baseOptions := options.DialerOptions
-	dnsOptions, err := adapter.DNSQueryOptionsFrom(ctx, options.DomainResolver)
-	if err != nil {
-		return nil, err
+	var dnsOptions adapter.DNSQueryOptions
+	if options.DomainResolver != nil && options.DomainResolver.Server != "" {
+		dnsOptions, err = dialer.NewDNSQueryOptions(ctx, options.DomainResolver, true)
+		if err != nil {
+			return nil, err
+		}
 	}
 	baseOptions.DomainResolver = nil
 	baseOptions.DomainStrategy = option.DomainStrategy(C.DomainStrategyAsIS)
