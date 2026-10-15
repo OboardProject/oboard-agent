@@ -765,6 +765,8 @@ const (
 	AgentTaskTypeRemoteExec            = "remote_exec"
 	AgentTaskTypeRemoteOperation       = "remote_operation"
 	AgentTaskTypeApplyStealth          = "apply_stealth"
+	AgentTaskTypeApplyVPNGatePool      = "apply_vpngate_pool"
+	AgentTaskTypeProbeVPNGate          = "probe_vpngate_candidates"
 )
 
 // AgentCapabilityStealth is advertised by Agents that can switch the local
@@ -1020,6 +1022,91 @@ type DeploymentTaskPayload struct {
 	SSHInbounds          SSHInboundPlan             `json:"ssh_inbounds"`
 	DNSBenchmark         *DNSBenchmarkPlan          `json:"dns_benchmark,omitempty"`
 	MTUDetection         *MTUDetectionPlan          `json:"mtu_detection,omitempty"`
+}
+
+// OpenVPNSpec is the complete, Controller-sanitized description of one
+// OpenVPN server used by a VPNGate exit pool.
+type OpenVPNSpec struct {
+	Server     string   `json:"server"`
+	ServerPort uint16   `json:"server_port"`
+	Network    string   `json:"network"`
+	Cipher     string   `json:"cipher"`
+	Auth       string   `json:"auth"`
+	CA         string   `json:"ca"`
+	Cert       string   `json:"cert"`
+	Key        string   `json:"key"`
+	Username   string   `json:"username,omitempty"`
+	Password   string   `json:"password,omitempty"`
+	MTU        int      `json:"mtu,omitempty"`
+	Resolvers  []string `json:"resolvers,omitempty"`
+}
+
+type VPNGatePoolMember struct {
+	MemberID string `json:"member_id"`
+	OpenVPNSpec
+}
+
+// VPNGatePoolPlan is the signed membership of one vpngate-<pool_id> outbound.
+// Membership is runtime state: applying it never rewrites the kernel
+// configuration or restarts the kernel.
+type VPNGatePoolPlan struct {
+	PoolID        int64               `json:"pool_id"`
+	Tag           string              `json:"tag"`
+	Revision      int64               `json:"revision"`
+	ContentDigest string              `json:"content_digest"`
+	HotStandby    int                 `json:"hot_standby"`
+	Members       []VPNGatePoolMember `json:"members"`
+}
+
+type VPNGateProbeCandidate struct {
+	ProbeID string `json:"probe_id"`
+	OpenVPNSpec
+}
+
+type VPNGateProbePlan struct {
+	PoolID     int64                   `json:"pool_id"`
+	Tag        string                  `json:"tag"`
+	RequestID  string                  `json:"request_id"`
+	Candidates []VPNGateProbeCandidate `json:"candidates"`
+}
+
+type VPNGateProbeResult struct {
+	ProbeID     string  `json:"probe_id"`
+	Status      string  `json:"status"`
+	Stage       string  `json:"stage,omitempty"`
+	Error       string  `json:"error,omitempty"`
+	HandshakeMS int64   `json:"handshake_ms,omitempty"`
+	RTTMS       []int64 `json:"rtt_ms,omitempty"`
+	TTFBMS      int64   `json:"ttfb_ms,omitempty"`
+	EgressIP    string  `json:"egress_ip,omitempty"`
+}
+
+type VPNGateProbeReport struct {
+	PoolID    int64                `json:"pool_id"`
+	RequestID string               `json:"request_id"`
+	Results   []VPNGateProbeResult `json:"results"`
+}
+
+type VPNGateMemberStatus struct {
+	MemberID    string `json:"member_id"`
+	State       string `json:"state"`
+	Active      bool   `json:"active"`
+	Failures    int    `json:"failures"`
+	LastError   string `json:"last_error,omitempty"`
+	HandshakeMS int64  `json:"handshake_ms,omitempty"`
+	RTTMS       int64  `json:"rtt_ms,omitempty"`
+	LastChange  string `json:"last_change,omitempty"`
+}
+
+// VPNGatePoolStatus is the bounded, secret-free pool health an Agent reports.
+type VPNGatePoolStatus struct {
+	Tag           string                `json:"tag"`
+	PoolID        int64                 `json:"pool_id"`
+	Revision      int64                 `json:"revision"`
+	ContentDigest string                `json:"content_digest"`
+	ActiveMember  string                `json:"active_member,omitempty"`
+	Healthy       int                   `json:"healthy"`
+	Members       []VPNGateMemberStatus `json:"members"`
 }
 
 type ExternalEgressProbePlan struct {
@@ -1423,6 +1510,7 @@ func TCPFastOpenStateFromMask(mask int) string {
 type HealthReport struct {
 	ProxyDSCP                 *ProxyDSCPReport              `json:"proxy_dscp,omitempty"`
 	RuntimeSecurity           *RuntimeSecurityReport        `json:"runtime_security,omitempty"`
+	VPNGatePools              []VPNGatePoolStatus           `json:"vpngate_pools,omitempty"`
 	AgentID                   string                        `json:"agent_id"`
 	Status                    ServerStatus                  `json:"status"`
 	PublicIPv4                string                        `json:"public_ipv4"`

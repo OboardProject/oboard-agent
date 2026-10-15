@@ -5,6 +5,7 @@ go 1.26.9
 require (
 	github.com/enfein/mieru/v3 v3.35.0
 	github.com/miekg/dns v1.1.72
+	github.com/ooni/minivpn v0.0.7
 	github.com/sagernet/quic-go v0.61.0-sing-box-mod.7
 	github.com/sagernet/sing v0.9.0-beta.4
 	github.com/sagernet/sing-box v1.14.0
@@ -90,3 +91,5 @@ require (
 replace github.com/enfein/mieru/v3 => ./third_party/mieru
 
 replace github.com/sagernet/sing-snell => ./third_party/sing-snell
+
+replace github.com/ooni/minivpn => ./third_party/minivpn

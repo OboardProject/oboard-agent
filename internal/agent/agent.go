@@ -89,6 +89,8 @@ type Runner struct {
 	authorizationStore          *authorization.Store
 	authorizationApplyMu        sync.Mutex
 	authorizationSyncWake       chan struct{}
+	vpngateOnce                 sync.Once
+	vpngateState                *vpngateState
 	runtimeUsersMu              sync.Mutex
 	runtimeUsersApplyMu         sync.Mutex
 	runtimeUsersCurrent         *model.UsersInstallRequest
@@ -994,6 +996,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	r.startTrafficLoop(ctx)
 	r.startAuthorizationSyncLoop(ctx)
 	r.startUsersSyncLoop(ctx)
+	r.startVPNGateLoop(ctx)
 	r.startLatencyProbeLoop(ctx)
 	r.startMetricReportLoop(ctx)
 	_ = r.configureCoreConnectionAudit(ctx, cfg.ConnectionAuditEnabled)
@@ -1788,6 +1791,31 @@ func (r *Runner) executeAgentTask(task model.AgentTask) (string, string) {
 			return "failed", jsonMap(map[string]any{"message": "inbound probe failed", "error": err.Error(), "probes": result})
 		}
 		return "succeeded", jsonMap(map[string]any{"message": "inbound probe completed", "probes": result})
+	case model.AgentTaskTypeApplyVPNGatePool:
+		var plan model.VPNGatePoolPlan
+		if err := json.Unmarshal([]byte(task.PayloadJSON), &plan); err != nil {
+			return "failed", jsonResult(err.Error())
+		}
+		result, err := r.applyVPNGatePool(context.Background(), plan)
+		if err != nil {
+			return "failed", jsonResult(err.Error())
+		}
+		r.wakeVPNGate()
+		return "succeeded", jsonMap(result)
+	case model.AgentTaskTypeProbeVPNGate:
+		var plan model.VPNGateProbePlan
+		if err := json.Unmarshal([]byte(task.PayloadJSON), &plan); err != nil {
+			return "failed", jsonResult(err.Error())
+		}
+		report, err := r.probeVPNGate(context.Background(), plan)
+		raw, marshalErr := json.Marshal(report)
+		if marshalErr != nil {
+			return "failed", jsonResult(marshalErr.Error())
+		}
+		if err != nil {
+			return "failed", jsonMap(map[string]any{"message": "vpngate probe failed", "error": boundedExternalEgressProbeError(err.Error()), "report": report})
+		}
+		return "succeeded", string(raw)
 	case model.AgentTaskTypeProbeExternalEgress:
 		var plan model.ExternalEgressProbePlan
 		if err := json.Unmarshal([]byte(task.PayloadJSON), &plan); err != nil {
@@ -3718,6 +3746,7 @@ func (r *Runner) Probe(force bool) model.HealthReport {
 	health.Timestamp = now
 	health.RemoteAccess = r.remoteAccessReport()
 	health.RuntimeSecurity = r.cachedRuntimeSecurity()
+	health.VPNGatePools = r.cachedVPNGateStatus()
 	for _, capability := range kernelCapabilities {
 		if capability == model.ProxyDSCPKernelCapability {
 			health.ProxyDSCP = r.proxyDSCPHealth()

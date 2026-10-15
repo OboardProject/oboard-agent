@@ -35,13 +35,14 @@ import (
 	"github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/protocol/snell"
 	"github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/protocol/sourceprefix"
 	"github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/protocol/userselector"
+	"github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/protocol/vpngatepool"
 	"github.com/OboardProject/oboard-agent/kernel/oboard-sb/internal/protocol/vless"
 )
 
 // SupportedProtocols is the intentionally small protocol surface exposed by the
 // OBoard sing-box kernel. Do not add protocols here unless the Controller can
 // generate, validate, audit, and subscribe them.
-var SupportedProtocols = []string{"vless", "hysteria2", "anytls", "shadowsocks", "mieru", "snell", "socks", "wireguard", "source-prefix", "family-selector", "user-selector"}
+var SupportedProtocols = []string{"vless", "hysteria2", "anytls", "shadowsocks", "mieru", "snell", "socks", "wireguard", "source-prefix", "family-selector", "user-selector", "vpngate-pool"}
 
 // Context returns a sing-box context with only the inbounds/outbounds that
 // OBoard supports in the first kernel line: VLESS, HY2, AnyTLS, and SS.
@@ -71,6 +72,7 @@ func Context(parent context.Context, clocks ...*RuntimeClock) context.Context {
 	sourceprefix.RegisterOutbound(outbounds)
 	familyselector.RegisterOutbound(outbounds)
 	userselector.RegisterOutbound(outbounds)
+	vpngatepool.RegisterOutbound(outbounds)
 	socks.RegisterOutbound(outbounds)
 
 	endpoints := endpoint.NewRegistry()

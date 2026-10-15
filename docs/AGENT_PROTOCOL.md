@@ -956,6 +956,106 @@ online Agent and an unchanged deployed config containing the target outbound.
 An already pending/running task for the same path and fingerprint is returned
 instead of creating a duplicate. The endpoint does not deploy configuration.
 
+### `apply_vpngate_pool`
+
+Installs the ordered membership of one `vpngate-pool` kernel outbound. The
+outbound itself is part of the deployed configuration and carries only
+`{"type":"vpngate-pool","tag":"vpngate-<pool_id>","pool_id":<pool_id>}`;
+members and the hot-standby count are runtime state delivered by this task, so a
+membership change never rewrites `sing-box.json`, never restarts the kernel,
+and never allocates a `config_version`.
+
+```json
+{
+  "pool_id": 3,
+  "tag": "vpngate-3",
+  "revision": 7,
+  "content_digest": "sha256-hex",
+  "hot_standby": 1,
+  "members": [{
+    "member_id": "n42",
+    "server": "219.100.37.14",
+    "server_port": 443,
+    "network": "tcp",
+    "cipher": "AES-128-CBC",
+    "auth": "SHA1",
+    "ca": "-----BEGIN CERTIFICATE-----...",
+    "cert": "-----BEGIN CERTIFICATE-----...",
+    "key": "-----BEGIN RSA PRIVATE KEY-----...",
+    "mtu": 1280
+  }]
+}
+```
+
+`revision` binds `content_digest`, which Controller computes over the hot
+standby count and the member list. The Agent and kernel compare that opaque
+identity, not their own digest: an older revision is rejected, the same
+revision with the same identity is idempotent, and the same revision with a
+different identity is a conflict. At most 8 members and `hot_standby` 0-2 are
+accepted. The Agent persists the plan to `<state_dir>/vpngate-pools.json`
+(mode `0600`) before installing it through the Unix local API, and its
+reconciler reinstalls a persisted plan whenever the kernel reports a different
+revision for a loaded pool (kernel restart, or a deployment that only now added
+the outbound). When the kernel has not loaded the pool yet the task still
+succeeds with `installed=false`.
+
+An empty `members` list is valid and is how Controller withdraws a pool: the
+outbound stays in the configuration and refuses every connection. A pool never
+falls back to `direct` or any other outbound; Controller config validation and
+the kernel both reject a `detour` on a `vpngate-pool`.
+
+### `probe_vpngate_candidates`
+
+Measures candidate servers from the exit server with throwaway sessions over
+the pool's own underlay; it never touches live members or traffic.
+
+```json
+{
+  "pool_id": 3,
+  "tag": "vpngate-3",
+  "request_id": "hex",
+  "candidates": [{ "probe_id": "n42", "server": "219.100.37.14", "server_port": 443, "network": "tcp", "cipher": "AES-128-CBC", "auth": "SHA1", "ca": "...", "cert": "...", "key": "..." }]
+}
+```
+
+At most 64 candidates, four in parallel, 25 seconds per candidate and 150
+seconds per batch. Each candidate records the OpenVPN handshake time, three TCP
+connects through the tunnel to `1.1.1.1:443`/`8.8.8.8:443`, and the public
+egress IP from `https://api.ip.sb/ip` (fallback `https://icanhazip.com`).
+
+```json
+{
+  "pool_id": 3,
+  "request_id": "hex",
+  "results": [
+    { "probe_id": "n42", "status": "succeeded", "handshake_ms": 870, "rtt_ms": [140, 152, 142], "ttfb_ms": 595, "egress_ip": "113.154.3.100" },
+    { "probe_id": "n43", "status": "failed", "stage": "handshake", "error": "bounded message" }
+  ]
+}
+```
+
+Controller accepts results only for the `request_id` it last issued for that
+pool and server and only for the probe IDs in the signed payload. Members the
+kernel reports as `up` are not probed again: VPNGate servers throttle repeated
+sessions from one address, so a second session would fail a member that is
+carrying traffic. Their kernel health check is the measurement instead.
+
+#### Health report field `vpngate_pools`
+
+The Agent caches `GET /outbounds/vpngate/status` from its reconcile loop
+(15 s) and adds it to `health_report` while it is fresh (90 s):
+
+```json
+"vpngate_pools": [{
+  "tag": "vpngate-3", "pool_id": 3, "revision": 7, "content_digest": "sha256-hex",
+  "active_member": "n42", "healthy": 2,
+  "members": [{ "member_id": "n42", "state": "up", "active": true, "failures": 0, "handshake_ms": 870, "rtt_ms": 140 }]
+}]
+```
+
+It never carries certificates, keys, credentials, or server addresses. A drop
+in `healthy` for the current revision wakes Controller's selection worker.
+
 ### `probe_latency_targets`
 
 Controller uses this task for an immediate run of the same unified latency test

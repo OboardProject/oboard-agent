@@ -1,0 +1,764 @@
+diff --git upstream/go.mod fork/go.mod
+index 4cd7b54..03047b6 100644
+--- upstream/go.mod
++++ fork/go.mod
+@@ -1,71 +1,3 @@
+ module github.com/ooni/minivpn
+ 
+-go 1.20
+-
+-// pinning for backwards-incompatible change
+-// replace gitlab.com/yawning/obfs4.git v0.0.0-20220204003609-77af0cba934d => gitlab.com/yawning/obfs4.git v0.0.0-20210511220700-e330d1b7024b
+-
+-require (
+-	git.torproject.org/pluggable-transports/goptlib.git v1.3.0
+-	github.com/Doridian/water v1.6.1
+-	github.com/apex/log v1.9.0
+-	github.com/google/go-cmp v0.5.9
+-	github.com/google/gopacket v1.1.19
+-	github.com/google/martian v2.1.0+incompatible
+-	github.com/google/uuid v1.3.0
+-	github.com/jackpal/gateway v1.0.11 // pinned to a previous version until we can use go1.21
+-	github.com/ory/dockertest/v3 v3.9.1
+-	github.com/refraction-networking/utls v1.3.1
+-	gitlab.com/yawning/obfs4.git v0.0.0-20220904064028-336a71d6e4cf
+-	golang.org/x/net v0.22.0
+-	golang.org/x/sync v0.6.0
+-	golang.zx2c4.com/wireguard v0.0.0-20231211153847-12269c276173 // indirect
+-)
+-
+-require golang.org/x/exp v0.0.0-20240325151524-a685a6edb6d8
+-
+-require (
+-	filippo.io/edwards25519 v1.0.0-rc.1.0.20210721174708-390f27c3be20 // indirect
+-	github.com/Azure/go-ansiterm v0.0.0-20170929234023-d6e3b3328b78 // indirect
+-	github.com/Doridian/gopacket v1.2.1 // indirect
+-	github.com/Microsoft/go-winio v0.6.0 // indirect
+-	github.com/Nvveen/Gotty v0.0.0-20120604004816-cd527374f1e5 // indirect
+-	github.com/andybalholm/brotli v1.0.4 // indirect
+-	github.com/cenkalti/backoff/v4 v4.1.3 // indirect
+-	github.com/containerd/continuity v0.3.0 // indirect
+-	github.com/davecgh/go-spew v1.1.1 // indirect
+-	github.com/dchest/siphash v1.2.1 // indirect
+-	github.com/docker/cli v20.10.14+incompatible // indirect
+-	github.com/docker/docker v20.10.7+incompatible // indirect
+-	github.com/docker/go-connections v0.4.0 // indirect
+-	github.com/docker/go-units v0.4.0 // indirect
+-	github.com/gogo/protobuf v1.3.2 // indirect
+-	github.com/google/btree v1.1.2 // indirect
+-	github.com/google/shlex v0.0.0-20191202100458-e7afc7fbc510 // indirect
+-	github.com/imdario/mergo v0.3.12 // indirect
+-	github.com/klauspost/compress v1.15.15 // indirect
+-	github.com/kr/text v0.2.0 // indirect
+-	github.com/mitchellh/mapstructure v1.4.1 // indirect
+-	github.com/moby/term v0.0.0-20201216013528-df9cb8a40635 // indirect
+-	github.com/opencontainers/go-digest v1.0.0 // indirect
+-	github.com/opencontainers/image-spec v1.0.2 // indirect
+-	github.com/opencontainers/runc v1.1.2 // indirect
+-	github.com/pkg/errors v0.9.1 // indirect
+-	github.com/pmezard/go-difflib v1.0.0 // indirect
+-	github.com/sirupsen/logrus v1.9.3 // indirect
+-	github.com/stretchr/objx v0.5.0 // indirect
+-	github.com/stretchr/testify v1.8.4 // indirect
+-	github.com/xeipuuv/gojsonpointer v0.0.0-20180127040702-4e3ac2762d5f // indirect
+-	github.com/xeipuuv/gojsonreference v0.0.0-20180127040603-bd5ef7bd5415 // indirect
+-	github.com/xeipuuv/gojsonschema v1.2.0 // indirect
+-	gitlab.com/yawning/edwards25519-extra.git v0.0.0-20211229043746-2f91fcc9fbdb // indirect
+-	golang.org/x/crypto v0.21.0 // indirect
+-	golang.org/x/mod v0.16.0 // indirect
+-	golang.org/x/sys v0.18.0 // indirect
+-	golang.org/x/time v0.3.0 // indirect
+-	golang.org/x/tools v0.19.0 // indirect
+-	golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2 // indirect
+-	gopkg.in/yaml.v2 v2.4.0 // indirect
+-	gopkg.in/yaml.v3 v3.0.1 // indirect
+-	gotest.tools/v3 v3.4.0 // indirect
+-)
++go 1.26.7
+diff --git upstream/internal/datachannel/controller.go fork/internal/datachannel/controller.go
+index 19481f1..abf8c27 100644
+--- upstream/internal/datachannel/controller.go
++++ fork/internal/datachannel/controller.go
+@@ -6,7 +6,6 @@ import (
+ 	"fmt"
+ 	"strings"
+ 
+-	"github.com/apex/log"
+ 	"github.com/ooni/minivpn/internal/bytesx"
+ 	"github.com/ooni/minivpn/internal/model"
+ 	"github.com/ooni/minivpn/internal/runtimex"
+@@ -121,16 +120,10 @@ func (d *DataChannel) setupKeys(dck *session.DataChannelKey) error {
+ 	d.state.cipherKeyRemote = keyRemote
+ 	d.state.hmacKeyRemote = hmacRemote
+ 
+-	log.Debugf("Cipher key local:  %x", keyLocal)
+-	log.Debugf("Cipher key remote: %x", keyRemote)
+-	log.Debugf("Hmac key local:    %x", hmacLocal)
+-	log.Debugf("Hmac key remote:   %x", hmacRemote)
+-
+ 	hashSize := d.state.hash().Size()
+ 	d.state.hmacLocal = hmac.New(d.state.hash, hmacLocal[:hashSize])
+ 	d.state.hmacRemote = hmac.New(d.state.hash, hmacRemote[:hashSize])
+ 
+-	log.Info("Key derivation OK")
+ 	return nil
+ }
+ 
+diff --git fork/internal/datachannel/oboard_test.go fork/internal/datachannel/oboard_test.go
+new file mode 100644
+index 0000000..d02efb8
+--- /dev/null
++++ fork/internal/datachannel/oboard_test.go
+@@ -0,0 +1,39 @@
++package datachannel
++
++import (
++	"testing"
++	"time"
++
++	"github.com/ooni/minivpn/internal/model"
++	"github.com/ooni/minivpn/internal/session"
++	"github.com/ooni/minivpn/pkg/config"
++)
++
++func TestKeepaliveTimersFollowPushedValues(t *testing.T) {
++	ping, restart := keepaliveTimers(model.TunnelInfo{PingSeconds: 3, PingRestartSeconds: 10})
++	if ping != 3*time.Second || restart != 10*time.Second {
++		t.Fatalf("got %s/%s", ping, restart)
++	}
++	ping, restart = keepaliveTimers(model.TunnelInfo{})
++	if ping != defaultPingSeconds*time.Second || restart != defaultPingRestartSeconds*time.Second {
++		t.Fatalf("defaults: got %s/%s", ping, restart)
++	}
++	ping, restart = keepaliveTimers(model.TunnelInfo{PingSeconds: 30, PingRestartSeconds: 2})
++	if restart != minPingRestartSeconds*time.Second || ping >= restart {
++		t.Fatalf("bounds: got %s/%s", ping, restart)
++	}
++}
++
++func TestDataOpcodeFollowsPushedPeerID(t *testing.T) {
++	manager, err := session.NewManager(config.NewConfig())
++	if err != nil {
++		t.Fatal(err)
++	}
++	if got := opcodeAndKeyHeader(manager) >> 3; got != byte(model.P_DATA_V1) {
++		t.Fatalf("without peer-id the client must send P_DATA_V1, got opcode %d", got)
++	}
++	manager.UpdateTunnelInfo(&model.TunnelInfo{PeerIDPushed: true, PeerID: 7})
++	if got := opcodeAndKeyHeader(manager) >> 3; got != byte(model.P_DATA_V2) {
++		t.Fatalf("with peer-id the client must send P_DATA_V2, got opcode %d", got)
++	}
++}
+diff --git upstream/internal/datachannel/service.go fork/internal/datachannel/service.go
+index 065561a..9fa0b71 100644
+--- upstream/internal/datachannel/service.go
++++ fork/internal/datachannel/service.go
+@@ -5,9 +5,11 @@ package datachannel
+ //
+ 
+ import (
+-	"encoding/hex"
++	"bytes"
+ 	"fmt"
+ 	"sync"
++	"sync/atomic"
++	"time"
+ 
+ 	"github.com/ooni/minivpn/internal/model"
+ 	"github.com/ooni/minivpn/internal/session"
+@@ -19,6 +21,35 @@ var (
+ 	serviceName = "datachannel"
+ )
+ 
++// pingPayload is the OpenVPN keepalive magic carried inside a data packet.
++var pingPayload = []byte{0x2a, 0x18, 0x7b, 0xf3, 0x64, 0x1e, 0xb4, 0xcb, 0x07, 0xed, 0x2d, 0x0a, 0x98, 0x1f, 0xc7, 0x48}
++
++const (
++	defaultPingSeconds        = 10
++	defaultPingRestartSeconds = 60
++	minPingRestartSeconds     = 5
++)
++
++// keepaliveTimers derives the ping interval and the inactivity timeout from
++// the server-pushed values, falling back to bounded defaults.
++func keepaliveTimers(info model.TunnelInfo) (time.Duration, time.Duration) {
++	ping := info.PingSeconds
++	if ping <= 0 {
++		ping = defaultPingSeconds
++	}
++	restart := info.PingRestartSeconds
++	if restart <= 0 {
++		restart = defaultPingRestartSeconds
++	}
++	if restart < minPingRestartSeconds {
++		restart = minPingRestartSeconds
++	}
++	if ping >= restart {
++		ping = restart / 2
++	}
++	return time.Duration(ping) * time.Second, time.Duration(restart) * time.Second
++}
++
+ // Service is the datachannel service. Make sure you initialize
+ // the channels before invoking [Service.StartWorkers].
+ type Service struct {
+@@ -90,6 +121,9 @@ type workersState struct {
+ 	sessionManager       *session.Manager
+ 	tunToData            <-chan []byte
+ 	workersManager       *workers.Manager
++
++	// lastReceived is the unix nano time of the last authenticated data packet.
++	lastReceived atomic.Int64
+ }
+ 
+ // moveDownWorker moves packets down the stack. It will BLOCK on PacketDown
+@@ -105,8 +139,29 @@ func (ws *workersState) moveDownWorker(firstKeyReady <-chan any) {
+ 	select {
+ 	// wait for the first key to be ready
+ 	case <-firstKeyReady:
++		pingEvery, restartAfter := keepaliveTimers(ws.sessionManager.TunnelInfo())
++		ws.lastReceived.Store(time.Now().UnixNano())
++		ticker := time.NewTicker(pingEvery)
++		defer ticker.Stop()
+ 		for {
+ 			select {
++			case <-ticker.C:
++				// Sending and encrypting stay on this goroutine: the HMAC state is
++				// not safe for concurrent use.
++				if time.Since(time.Unix(0, ws.lastReceived.Load())) > restartAfter {
++					ws.logger.Warnf("%s: no data from server for %s, closing tunnel", workerName, restartAfter)
++					return
++				}
++				packet, err := ws.dataChannel.writePacket(pingPayload)
++				if err != nil {
++					ws.logger.Warnf("error encrypting keepalive: %v", err)
++					continue
++				}
++				select {
++				case ws.dataOrControlToMuxer <- packet:
++				case <-ws.workersManager.ShouldShutdown():
++					return
++				}
+ 			case data := <-ws.tunToData:
+ 				// TODO: writePacket should get the ACTIVE KEY (verify this)
+ 				packet, err := ws.dataChannel.writePacket(data)
+@@ -153,15 +208,16 @@ func (ws *workersState) moveUpWorker() {
+ 				continue
+ 			}
+ 
+-			if len(decrypted) == 16 {
+-				// TODO: should reply to this keepalive ping
+-				// "2a 18 7b f3 64 1e b4 cb  07 ed 2d 0a 98 1f c7 48"
+-				fmt.Println(hex.Dump(decrypted))
++			ws.lastReceived.Store(time.Now().UnixNano())
++			if bytes.Equal(decrypted, pingPayload) {
+ 				continue
+ 			}
+ 
+-			// POSSIBLY BLOCK writing up towards TUN
+-			ws.dataToTUN <- decrypted
++			select {
++			case ws.dataToTUN <- decrypted:
++			case <-ws.workersManager.ShouldShutdown():
++				return
++			}
+ 		case <-ws.workersManager.ShouldShutdown():
+ 			return
+ 		}
+diff --git upstream/internal/datachannel/write.go fork/internal/datachannel/write.go
+index a490846..e4c1b89 100644
+--- upstream/internal/datachannel/write.go
++++ fork/internal/datachannel/write.go
+@@ -19,6 +19,10 @@ import (
+ // encryptAndEncodePayloadAEAD peforms encryption and encoding of the payload in AEAD modes (i.e., AES-GCM).
+ // TODO(ainghazal): for testing we can pass both the state object and the encryptFn
+ func encryptAndEncodePayloadAEAD(log model.Logger, padded []byte, session *session.Manager, state *dataChannelState) ([]byte, error) {
++	if !session.TunnelInfo().PeerIDPushed {
++		// The AEAD framing below is P_DATA_V2 only.
++		return []byte{}, fmt.Errorf("AEAD data channel requires a server-pushed peer-id")
++	}
+ 	nextPacketID, err := session.LocalDataPacketID()
+ 	if err != nil {
+ 		return []byte{}, fmt.Errorf("bad packet id")
+@@ -97,7 +101,9 @@ func encryptAndEncodePayloadNonAEAD(log model.Logger, padded []byte, session *se
+ 
+ 	out := &bytes.Buffer{}
+ 	out.WriteByte(opcodeAndKeyHeader(session))
+-	bytesx.WriteUint24(out, uint32(session.TunnelInfo().PeerID))
++	if session.TunnelInfo().PeerIDPushed {
++		bytesx.WriteUint24(out, uint32(session.TunnelInfo().PeerID))
++	}
+ 
+ 	out.Write(computedMAC)
+ 	out.Write(iv)
+@@ -167,5 +173,9 @@ func prependPacketID(p model.PacketID, buf []byte) []byte {
+ // opcodeAndKeyHeader returns the header byte encoding the opcode and keyID (3 upper
+ // and 5 lower bits, respectively)
+ func opcodeAndKeyHeader(session *session.Manager) byte {
+-	return byte((byte(model.P_DATA_V2) << 3) | (byte(session.CurrentKeyID()) & 0x07))
++	opcode := model.P_DATA_V1
++	if session.TunnelInfo().PeerIDPushed {
++		opcode = model.P_DATA_V2
++	}
++	return byte((byte(opcode) << 3) | (byte(session.CurrentKeyID()) & 0x07))
+ }
+diff --git upstream/internal/model/logger.go fork/internal/model/logger.go
+index ddd223f..406a4b3 100644
+--- upstream/internal/model/logger.go
++++ fork/internal/model/logger.go
+@@ -20,3 +20,13 @@ type Logger interface {
+ 	// Warnf formats and emits a warning message.
+ 	Warnf(format string, v ...any)
+ }
++
++// NoopLogger discards every message.
++type NoopLogger struct{}
++
++func (NoopLogger) Debug(string)          {}
++func (NoopLogger) Debugf(string, ...any) {}
++func (NoopLogger) Info(string)           {}
++func (NoopLogger) Infof(string, ...any)  {}
++func (NoopLogger) Warn(string)           {}
++func (NoopLogger) Warnf(string, ...any)  {}
+diff --git upstream/internal/model/tunnelinfo.go fork/internal/model/tunnelinfo.go
+index f67f82d..0c48747 100644
+--- upstream/internal/model/tunnelinfo.go
++++ fork/internal/model/tunnelinfo.go
+@@ -19,4 +19,14 @@ type TunnelInfo struct {
+ 
+ 	// PeerID is the peer-id assigned to us by the remote.
+ 	PeerID int
++
++	// PeerIDPushed reports whether the server pushed peer-id. Only then may the
++	// client send P_DATA_V2; otherwise it must use P_DATA_V1.
++	PeerIDPushed bool
++
++	// PingSeconds is the pushed keepalive interval (0 when not pushed).
++	PingSeconds int
++
++	// PingRestartSeconds is the pushed inactivity timeout (0 when not pushed).
++	PingRestartSeconds int
+ }
+diff --git upstream/internal/reliabletransport/receiver.go fork/internal/reliabletransport/receiver.go
+index 91dc37e..7739196 100644
+--- upstream/internal/reliabletransport/receiver.go
++++ fork/internal/reliabletransport/receiver.go
+@@ -49,7 +49,11 @@ func (ws *workersState) moveUpWorker() {
+ 
+ 			// notify seen packet to the sender using the lateral channel.
+ 			seen := receiver.newIncomingPacketSeen(packet)
+-			ws.incomingSeen <- seen
++			select {
++			case ws.incomingSeen <- seen:
++			case <-ws.workersManager.ShouldShutdown():
++				return
++			}
+ 
+ 			// TODO(ainghazal): drop a packet that is a replay (id <= lastConsumed, but != ACK...?)
+ 
+diff --git upstream/internal/session/manager.go fork/internal/session/manager.go
+index 1ae5195..271c854 100644
+--- upstream/internal/session/manager.go
++++ fork/internal/session/manager.go
+@@ -65,8 +65,8 @@ func NewManager(config *config.Config) (*Manager, error) {
+ 		// the data packet ID counter to zero.
+ 		localDataPacketID: 1,
+ 
+-		Ready:   make(chan any),
+-		Failure: make(chan error),
++		Ready:   make(chan any, 1),
++		Failure: make(chan error, 1),
+ 	}
+ 
+ 	randomBytes, err := randomFn(8)
+@@ -225,7 +225,10 @@ func (m *Manager) SetNegotiationState(sns model.NegotiationState) {
+ 	m.tracer.OnStateChange(sns)
+ 	m.negState = sns
+ 	if sns == model.S_GENERATED_KEYS {
+-		m.Ready <- true
++		select {
++		case m.Ready <- true:
++		default:
++		}
+ 	}
+ }
+ 
+@@ -299,6 +302,9 @@ func (m *Manager) UpdateTunnelInfo(ti *model.TunnelInfo) {
+ 	m.tunnelInfo.IP = ti.IP
+ 	m.tunnelInfo.GW = ti.GW
+ 	m.tunnelInfo.PeerID = ti.PeerID
++	m.tunnelInfo.PeerIDPushed = ti.PeerIDPushed
++	m.tunnelInfo.PingSeconds = ti.PingSeconds
++	m.tunnelInfo.PingRestartSeconds = ti.PingRestartSeconds
+ 	m.tunnelInfo.NetMask = ti.NetMask
+ 
+ 	m.logger.Infof("Tunnel IP: %s", ti.IP)
+@@ -310,11 +316,5 @@ func (m *Manager) UpdateTunnelInfo(ti *model.TunnelInfo) {
+ func (m *Manager) TunnelInfo() model.TunnelInfo {
+ 	defer m.mu.Unlock()
+ 	m.mu.Lock()
+-	return model.TunnelInfo{
+-		GW:      m.tunnelInfo.GW,
+-		IP:      m.tunnelInfo.IP,
+-		MTU:     m.tunnelInfo.MTU,
+-		NetMask: m.tunnelInfo.NetMask,
+-		PeerID:  m.tunnelInfo.PeerID,
+-	}
++	return m.tunnelInfo
+ }
+diff --git upstream/internal/tlssession/controlmsg.go fork/internal/tlssession/controlmsg.go
+index f030fa3..7351a0f 100644
+--- upstream/internal/tlssession/controlmsg.go
++++ fork/internal/tlssession/controlmsg.go
+@@ -14,7 +14,6 @@ import (
+ 	"bytes"
+ 	"errors"
+ 	"fmt"
+-	"log"
+ 	"strconv"
+ 	"strings"
+ 
+@@ -159,13 +158,22 @@ func newTunnelInfoFromPushedOptions(opts remoteOptions) *model.TunnelInfo {
+ 	if len(ifconfig) >= 2 {
+ 		t.NetMask = ifconfig[1]
+ 	}
++	if v := opts["ping"]; len(v) == 1 {
++		if n, err := strconv.Atoi(v[0]); err == nil && n > 0 && n <= 3600 {
++			t.PingSeconds = n
++		}
++	}
++	if v := opts["ping-restart"]; len(v) == 1 {
++		if n, err := strconv.Atoi(v[0]); err == nil && n > 0 && n <= 3600 {
++			t.PingRestartSeconds = n
++		}
++	}
+ 	peerID := opts["peer-id"]
+ 	if len(peerID) == 1 {
+ 		peer, err := strconv.Atoi(peerID[0])
+-		if err != nil {
+-			log.Println("Cannot parse peer-id:", err.Error())
+-		} else {
++		if err == nil {
+ 			t.PeerID = peer
++			t.PeerIDPushed = true
+ 		}
+ 	}
+ 	return t
+diff --git upstream/internal/tlssession/tlshandshake.go fork/internal/tlssession/tlshandshake.go
+index c79585d..d9d8812 100644
+--- upstream/internal/tlssession/tlshandshake.go
++++ fork/internal/tlssession/tlshandshake.go
+@@ -2,7 +2,6 @@ package tlssession
+ 
+ import (
+ 	"crypto/x509"
+-	"encoding/hex"
+ 	"errors"
+ 	"fmt"
+ 	"net"
+@@ -11,7 +10,7 @@ import (
+ 	"github.com/ooni/minivpn/internal/runtimex"
+ 	"github.com/ooni/minivpn/pkg/config"
+ 
+-	tls "github.com/refraction-networking/utls"
++	"crypto/tls"
+ )
+ 
+ var (
+@@ -27,9 +26,6 @@ var (
+ 	// ErrBadKeypair is returned when the key or cert file cannot be found or is not valid.
+ 	ErrBadKeypair = errors.New("bad keypair conf")
+ 
+-	// ErrBadParrot is returned for errors during TLS parroting
+-	ErrBadParrot = errors.New("cannot parrot")
+-
+ 	// ErrCannotVerifyCertChain is returned for certificate chain validation errors.
+ 	ErrCannotVerifyCertChain = errors.New("cannot verify chain")
+ )
+@@ -170,6 +166,14 @@ func customVerifyFactory(pinner authorityPinner) verifyFun {
+ 		opts := certVerifyOptions()
+ 		// Set the configured CA(s) as the certificate pool to verify against.
+ 		opts.Roots = pinner.authority()
++		// Servers commonly send their intermediate CA after the leaf; OpenSSL
++		// uses it to build the chain, so the verifier must as well.
++		opts.Intermediates = x509.NewCertPool()
++		for _, raw := range rawCerts[1:] {
++			if cert, err := x509.ParseCertificate(raw); err == nil {
++				opts.Intermediates.AddCert(cert)
++			}
++		}
+ 
+ 		if _, err := leaf.Verify(opts); err != nil {
+ 			return fmt.Errorf("%w: %s", ErrCannotVerifyCertChain, err)
+@@ -196,11 +200,8 @@ func initTLS(cfg *certConfig) (*tls.Config, error) {
+ 		InsecureSkipVerify: true,
+ 		// ...but we pass our own verification function that verifies against the CA and ignores the ServerName
+ 		VerifyPeerCertificate: customVerify,
+-		// disable DynamicRecordSizing to lower distinguishability.
+-		DynamicRecordSizingDisabled: true,
+-		// uTLS does not pick min/max version from the passed spec
+-		MinVersion: tls.VersionTLS12,
+-		MaxVersion: tls.VersionTLS13,
++		MinVersion:            tls.VersionTLS12,
++		MaxVersion:            tls.VersionTLS13,
+ 	} //#nosec G402
+ 
+ 	return tlsConf, nil
+@@ -236,34 +237,9 @@ func defaultTLSFactory(conn net.Conn, config *tls.Config) (handshaker, error) {
+ 	return c, nil
+ }
+ 
+-// vpnClientHelloHex is the hexadecimal representation of a capture from the reference openvpn implementation.
+-// openvpn=2.5.5,openssl=3.0.2
+-// You can use https://github.com/ainghazal/sniff/tree/main/clienthello to
+-// analyze a ClientHello from the wire or pcap.
+-var vpnClientHelloHex = `1603010114010001100303534e0a0f2687b240f7c7dfbb51c4aac33639f28173aa5d7bcebb159695ab0855208b835bf240a83df66885d6747b5bbf1b631e8c34ae469c629d7eb76e247128eb0032130213031301c02cc030009fcca9cca8ccaac02bc02f009ec024c028006bc023c0270067c00ac0140039c009c013003300ff01000095000b000403000102000a00160014001d0017001e00190018010001010102010301040016000000170000000d002a0028040305030603080708080809080a080b080408050806040105010601030303010302040205020602002b0009080304030303020301002d00020101003300260024001d0020a10bc24becb583293c317220e6725205d3a177a4a974090f6ffcf13a43da7035`
+-
+-// parrotTLSFactory returns an implementer of the handshaker interface; in this
+-// case, a parroting implementation; and an error.
+-func parrotTLSFactory(conn net.Conn, config *tls.Config) (handshaker, error) {
+-	fingerprinter := &tls.Fingerprinter{AllowBluntMimicry: true}
+-	rawOpenVPNClientHelloBytes, err := hex.DecodeString(vpnClientHelloHex)
+-	if err != nil {
+-		return nil, fmt.Errorf("%w: cannot decode raw fingerprint: %s", ErrBadParrot, err)
+-	}
+-	generatedSpec, err := fingerprinter.FingerprintClientHello(rawOpenVPNClientHelloBytes)
+-	if err != nil {
+-		return nil, fmt.Errorf("%w: fingerprinting failed: %s", ErrBadParrot, err)
+-	}
+-	client := tls.UClient(conn, config, tls.HelloCustom)
+-	if err := client.ApplyPreset(generatedSpec); err != nil {
+-		return nil, fmt.Errorf("%w: cannot apply spec: %s", ErrBadParrot, err)
+-	}
+-	return client, nil
+-}
+-
+ // global variables to allow monkeypatching in tests.
+ var (
+ 	initTLSFn      = initTLS
+-	tlsFactoryFn   = parrotTLSFactory
++	tlsFactoryFn   = defaultTLSFactory
+ 	tlsHandshakeFn = tlsHandshake
+ )
+diff --git upstream/internal/tlssession/tlssession.go fork/internal/tlssession/tlssession.go
+index 89c659d..509e7db 100644
+--- upstream/internal/tlssession/tlssession.go
++++ fork/internal/tlssession/tlssession.go
+@@ -10,7 +10,7 @@ import (
+ 	"github.com/ooni/minivpn/internal/workers"
+ 	"github.com/ooni/minivpn/pkg/config"
+ 
+-	tls "github.com/refraction-networking/utls"
++	"crypto/tls"
+ )
+ 
+ var (
+@@ -89,17 +89,17 @@ func (ws *workersState) worker() {
+ 		case notif := <-ws.notifyTLS:
+ 			if (notif.Flags & model.NotificationReset) != 0 {
+ 				if err := ws.tlsAuth(); err != nil {
+-
+-					// TODO(ainghazal): pass the failure to the tracer too.
+-
+-					if errors.Is(err, ErrBadCA) {
+-						ws.sessionManager.Failure <- err
++					if errors.Is(err, workers.ErrShutdown) {
+ 						return
+ 					}
+-					// The following errors are not handled, will just appear
+-					// as warnings in the log. We should catch any errors that we want to
+-					// deal with as unrecoverable failures in the block above.
++					// There is no renegotiation: a failed TLS or auth exchange
++					// (bad CA, AUTH_FAILED, broken push reply) ends the session.
+ 					ws.logger.Warnf("%s: %s", workerName, err.Error())
++					select {
++					case ws.sessionManager.Failure <- err:
++					default:
++					}
++					return
+ 				}
+ 			}
+ 
+@@ -128,7 +128,7 @@ func (ws *workersState) tlsAuth() error {
+ 	}
+ 
+ 	// run the real algorithm in a background goroutine
+-	errorch := make(chan error)
++	errorch := make(chan error, 1)
+ 	go ws.doTLSAuth(conn, tlsConf, errorch)
+ 
+ 	select {
+@@ -208,7 +208,12 @@ func (ws *workersState) doTLSAuth(conn net.Conn, config *tls.Config, errorch cha
+ 	ws.sessionManager.SetNegotiationState(model.S_ACTIVE)
+ 
+ 	// notify the datachannel that we've got a key pair ready to use
+-	ws.keyUp <- activeKey
++	select {
++	case ws.keyUp <- activeKey:
++	case <-ws.workersManager.ShouldShutdown():
++		errorch <- workers.ErrShutdown
++		return
++	}
+ 
+ 	errorch <- nil
+ }
+diff --git upstream/internal/tun/tun.go fork/internal/tun/tun.go
+index 5340ad9..d30c9ac 100644
+--- upstream/internal/tun/tun.go
++++ fork/internal/tun/tun.go
+@@ -1,10 +1,10 @@
+ package tun
+ 
+ import (
+-	"bytes"
+ 	"context"
+ 	"errors"
+ 	"fmt"
++	"io"
+ 	"net"
+ 	"os"
+ 	"sync"
+@@ -43,6 +43,15 @@ func StartTUN(ctx context.Context, conn networkio.FramingConn, config *config.Co
+ 		workers.StartShutdown()
+ 		workers.WaitWorkersShutdown()
+ 	})
++	// Any worker that stops (keepalive timeout, network error, server close)
++	// shuts the whole session down; close the TUN so readers observe it.
++	go func() {
++		select {
++		case <-workers.ShouldShutdown():
++			tunnel.Close()
++		case <-tunnel.hangup:
++		}
++	}()
+ 
+ 	tlsTimeout := time.NewTimer(time.Duration(tlsHandshakeTimeoutSeconds) * time.Second)
+ 
+@@ -95,9 +104,6 @@ type TUN struct {
+ 	// network is the underlying network for the passed [networkio.FramingConn].
+ 	network string
+ 
+-	// used to buffer reads from above.
+-	readBuffer *bytes.Buffer
+-
+ 	// readDeadline is used to set the read deadline.
+ 	readDeadline tunDeadline
+ 
+@@ -126,7 +132,6 @@ func newTUN(logger model.Logger, conn networkio.FramingConn, session *session.Ma
+ 		hangup:       make(chan any),
+ 		logger:       logger,
+ 		network:      conn.LocalAddr().Network(),
+-		readBuffer:   &bytes.Buffer{},
+ 		readDeadline: makeTUNDeadline(),
+ 		session:      session,
+ 		tunDown:      make(chan []byte),
+@@ -156,28 +161,30 @@ func (t *TUN) Close() error {
+ 	return nil
+ }
+ 
+-// Read implements net.Conn
++// Read implements net.Conn. Every call returns exactly one IP packet: the
++// caller is a packet device, so packets must never be split or coalesced.
+ func (t *TUN) Read(data []byte) (int, error) {
+-	for {
+-		count, _ := t.readBuffer.Read(data)
+-		if count > 0 {
+-			// log.Printf("[tunbio] received %d bytes", len(data))
+-			return count, nil
+-		}
+-		if isClosedChan(t.readDeadline.wait()) {
+-			return 0, os.ErrDeadlineExceeded
+-		}
+-		select {
+-		case extra := <-t.tunUp:
+-			t.readBuffer.Write(extra)
+-		case <-t.hangup:
+-			return 0, net.ErrClosed
+-		case <-t.readDeadline.wait():
+-			return 0, os.ErrDeadlineExceeded
++	if isClosedChan(t.readDeadline.wait()) {
++		return 0, os.ErrDeadlineExceeded
++	}
++	select {
++	case packet := <-t.tunUp:
++		if len(packet) > len(data) {
++			return 0, io.ErrShortBuffer
+ 		}
++		return copy(data, packet), nil
++	case <-t.hangup:
++		return 0, net.ErrClosed
++	case <-t.readDeadline.wait():
++		return 0, os.ErrDeadlineExceeded
+ 	}
+ }
+ 
++// Done is closed once the tunnel has shut down, for whatever reason.
++func (t *TUN) Done() <-chan any {
++	return t.hangup
++}
++
+ // Write implements net.Conn
+ func (t *TUN) Write(data []byte) (int, error) {
+ 	if isClosedChan(t.writeDeadline.wait()) {
+diff --git upstream/pkg/config/config.go fork/pkg/config/config.go
+index 61930dc..00a36b3 100644
+--- upstream/pkg/config/config.go
++++ fork/pkg/config/config.go
+@@ -3,7 +3,6 @@ package config
+ import (
+ 	"net"
+ 
+-	"github.com/apex/log"
+ 	"github.com/ooni/minivpn/internal/model"
+ 	"github.com/ooni/minivpn/internal/runtimex"
+ )
+@@ -24,7 +23,7 @@ type Config struct {
+ func NewConfig(options ...Option) *Config {
+ 	cfg := &Config{
+ 		openvpnOptions: &OpenVPNOptions{},
+-		logger:         log.Log,
++		logger:         model.NoopLogger{},
+ 		tracer:         &model.DummyTracer{},
+ 	}
+ 	for _, opt := range options {
+diff --git upstream/pkg/config/vpnoptions.go fork/pkg/config/vpnoptions.go
+index 06d8ef3..001f4ad 100644
+--- upstream/pkg/config/vpnoptions.go
++++ fork/pkg/config/vpnoptions.go
+@@ -34,7 +34,6 @@ import (
+ 	"errors"
+ 	"fmt"
+ 	"io"
+-	"log"
+ 	"os"
+ 	"path/filepath"
+ 	"strings"
+@@ -378,7 +377,7 @@ func parseOption(opt *OpenVPNOptions, dir, key string, p []string, lineno int) (
+ 			return updatedOpt, e
+ 		}
+ 	default:
+-		log.Printf("warn: unsupported key in line %d\n", lineno)
++		_ = lineno
+ 	}
+ 	return opt, nil
+ }
+diff --git upstream/pkg/tunnel/tunnel.go fork/pkg/tunnel/tunnel.go
+index 0b2405f..7db48d6 100644
+--- upstream/pkg/tunnel/tunnel.go
++++ fork/pkg/tunnel/tunnel.go
+@@ -5,7 +5,6 @@ import (
+ 	"context"
+ 	"net"
+ 
+-	"github.com/apex/log"
+ 	"github.com/ooni/minivpn/internal/networkio"
+ 	"github.com/ooni/minivpn/internal/tun"
+ 	"github.com/ooni/minivpn/pkg/config"
+@@ -26,7 +25,6 @@ func Start(ctx context.Context, underlyingDialer SimpleDialer, cfg *config.Confi
+ 	dialer := networkio.NewDialer(cfg.Logger(), underlyingDialer)
+ 	conn, err := dialer.DialContext(ctx, cfg.Remote().Protocol, cfg.Remote().Endpoint)
+ 	if err != nil {
+-		log.WithError(err).Error("dialer.DialContext")
+ 		return nil, err
+ 	}
+ 	return tun.StartTUN(ctx, conn, cfg)
