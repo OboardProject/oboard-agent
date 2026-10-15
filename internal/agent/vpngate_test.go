@@ -3,12 +3,15 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/OboardProject/oboard-agent/internal/model"
 )
@@ -166,5 +169,56 @@ func TestProbeVPNGateBoundsResults(t *testing.T) {
 	}
 	if _, err := r.probeVPNGate(context.Background(), model.VPNGateProbePlan{PoolID: 4, Tag: "vpngate-4"}); err == nil {
 		t.Fatal("empty candidate list must be rejected")
+	}
+}
+
+func TestProbeVPNGateUsesProbeTimeout(t *testing.T) {
+	kernel := &fakeVPNGateKernel{}
+	r := newVPNGateTestRunner(t, kernel, t.TempDir())
+	// Scale down the ordinary client's deadline to reproduce a slow batch
+	// without waiting for the production ten-second timeout.
+	r.coreClient.Timeout = 20 * time.Millisecond
+	transport := r.coreClient.Transport
+	r.coreClient.Transport = roundTripFunc(func(q *http.Request) (*http.Response, error) {
+		timer := time.NewTimer(100 * time.Millisecond)
+		defer timer.Stop()
+		select {
+		case <-q.Context().Done():
+			return nil, q.Context().Err()
+		case <-timer.C:
+			return transport.RoundTrip(q)
+		}
+	})
+	plan := model.VPNGateProbePlan{PoolID: 4, Tag: "vpngate-4", RequestID: "slow-batch"}
+	for i := 0; i < 24; i++ {
+		plan.Candidates = append(plan.Candidates, model.VPNGateProbeCandidate{ProbeID: fmt.Sprintf("p%d", i)})
+	}
+	report, err := r.probeVPNGate(context.Background(), plan)
+	if err != nil {
+		t.Fatalf("batch must outlive the ordinary kernel client timeout: %v", err)
+	}
+	if len(report.Results) != len(plan.Candidates) || report.RequestID != plan.RequestID {
+		t.Fatalf("incomplete batch report: %+v", report)
+	}
+	if r.coreClient.Timeout != 20*time.Millisecond {
+		t.Fatal("probe changed the shared kernel client timeout")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if _, err := r.probeVPNGate(ctx, plan); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("probe must honor the caller deadline: %v", err)
+	}
+}
+
+func TestVPNGateClientOperationTimeouts(t *testing.T) {
+	r := &Runner{coreClient: unixHTTPClient("unused.sock")}
+	for _, timeout := range []time.Duration{vpngateProbeTimeout, vpngateStatusTimeout, 10 * time.Second} {
+		client := r.vpngateClient(timeout)
+		if client.Timeout != timeout || client.Transport != r.coreClient.Transport {
+			t.Fatalf("operation client must use %v and share the kernel transport", timeout)
+		}
+	}
+	if r.coreClient.Timeout != 10*time.Second {
+		t.Fatal("operation changed the shared kernel client timeout")
 	}
 }

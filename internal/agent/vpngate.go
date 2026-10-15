@@ -165,7 +165,11 @@ func (r *Runner) applyVPNGatePool(ctx context.Context, plan model.VPNGatePoolPla
 
 func (r *Runner) vpngateClient(timeout time.Duration) *http.Client {
 	if r.coreClient != nil {
-		return r.coreClient
+		// Share the transport, but keep operation deadlines independent of
+		// the short timeout used by ordinary kernel requests.
+		client := *r.coreClient
+		client.Timeout = timeout
+		return &client
 	}
 	dialer := &net.Dialer{Timeout: 3 * time.Second}
 	socket := r.coreAPISocketPath()
