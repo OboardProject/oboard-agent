@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/OboardProject/oboard-agent/internal/model"
 	"io"
+	"net"
 	"net/http"
+	"syscall"
 	"time"
 )
 
@@ -37,6 +40,12 @@ func (r *Runner) proxyDSCPRequest(ctx context.Context, method string, body []byt
 	return &report, nil
 }
 func (r *Runner) applyProxyDSCP(raw string) (map[string]any, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return r.applyProxyDSCPContext(ctx, raw, time.Second)
+}
+
+func (r *Runner) applyProxyDSCPContext(ctx context.Context, raw string, retryInterval time.Duration) (map[string]any, error) {
 	var p model.ProxyDSCPPolicy
 	if err := json.Unmarshal([]byte(raw), &p); err != nil {
 		return nil, err
@@ -44,9 +53,27 @@ func (r *Runner) applyProxyDSCP(raw string) (map[string]any, error) {
 	if p.Revision <= 0 {
 		return nil, fmt.Errorf("invalid DSCP revision")
 	}
-	report, err := r.proxyDSCPRequest(context.Background(), http.MethodPost, []byte(raw))
-	if err != nil {
-		return nil, err
+	var report *model.ProxyDSCPReport
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		var err error
+		report, err = r.proxyDSCPRequest(ctx, http.MethodPost, []byte(raw))
+		if err == nil {
+			break
+		}
+		var op *net.OpError
+		if !errors.As(err, &op) || op.Op != "dial" || op.Net != "unix" || (!errors.Is(err, syscall.ENOENT) && !errors.Is(err, syscall.ECONNREFUSED)) {
+			return nil, err
+		}
+		timer := time.NewTimer(retryInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, fmt.Errorf("waiting for kernel DSCP API: %w (last error: %v)", ctx.Err(), err)
+		case <-timer.C:
+		}
 	}
 	if report.Revision != p.Revision || report.Enabled != p.Enabled {
 		return nil, fmt.Errorf("kernel DSCP acknowledgement mismatch")
