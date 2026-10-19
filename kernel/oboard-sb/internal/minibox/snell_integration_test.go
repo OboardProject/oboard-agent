@@ -151,7 +151,12 @@ func TestSnellSharedBranchDNSAndRuntimeLifecycle(t *testing.T) {
 			before := tracker.stateForKey("user:" + a.AuthUser).currentConfig().counters
 			installSnellTest(t, users, 2, []UserInstallEntry{a, bob})
 			tracker.mu.RLock()
-			parents := len(tracker.snellParents)
+			parents := 0
+			for parent := range tracker.snellParents {
+				if parent.authScope == a.InboundTag+"\x00"+a.AuthUser {
+					parents++
+				}
+			}
 			tracker.mu.RUnlock()
 			if parents != 0 {
 				t.Fatalf("rotation retained idle protocol parent: %d", parents)

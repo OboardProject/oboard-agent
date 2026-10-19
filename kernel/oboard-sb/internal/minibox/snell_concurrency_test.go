@@ -83,11 +83,12 @@ func TestSnellConcurrentPayloadRamp(t *testing.T) {
 							outbounds := []map[string]any{{"type": "direct", "tag": "direct"}}
 							outbound := "direct"
 							if chain {
-								inbounds = append(inbounds, map[string]any{"type": "shadowsocks", "tag": "ss-in", "listen": "127.0.0.1", "listen_port": ssPort, "method": "aes-128-gcm", "password": "test-chain-password"})
-								outbounds = append(outbounds, map[string]any{"type": "shadowsocks", "tag": "ss-out", "server": "127.0.0.1", "server_port": ssPort, "method": "aes-128-gcm", "password": "test-chain-password"})
+								inbounds = append(inbounds, map[string]any{"type": "shadowsocks", "tag": "ss-in", "listen": "127.0.0.1", "listen_port": ssPort, "method": "2022-blake3-aes-128-gcm", "password": "MDEyMzQ1Njc4OWFiY2RlZg=="})
+								outbounds = append(outbounds, map[string]any{"type": "shadowsocks", "tag": "ss-out", "server": "127.0.0.1", "server_port": ssPort, "method": "2022-blake3-aes-128-gcm", "password": "MDEyMzQ1Njc4OWFiY2RlZg=="})
 								outbound = "ss-out"
 							}
-							config, err := json.Marshal(map[string]any{"log": map[string]any{"level": "error"}, "inbounds": inbounds, "outbounds": outbounds, "route": map[string]any{"final": "direct"}})
+							outbounds = append(outbounds, map[string]any{"type": "user-selector", "tag": "userselector-in-1", "users": map[string]string{}})
+							config, err := json.Marshal(map[string]any{"log": map[string]any{"level": "error"}, "inbounds": inbounds, "outbounds": outbounds, "route": map[string]any{"final": "direct", "rules": []map[string]any{{"inbound": []string{"in-1"}, "action": "route", "outbound": "userselector-in-1"}}}})
 							if err != nil {
 								t.Fatal(err)
 							}
