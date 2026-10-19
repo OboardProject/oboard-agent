@@ -323,7 +323,7 @@ func (c *managementConsole) runRemoteAccess(args []string) int {
 		fmt.Fprintf(c.out, "模式：%s\n", policy.Mode)
 		fmt.Fprintf(c.out, "允许远程终端：%v\n", policy.Allow.RemoteTerminal)
 		fmt.Fprintf(c.out, "允许 MCP 远程控制：%v\n", policy.Allow.MCPEnabled)
-		fmt.Fprintf(c.out, "允许插件网络诊断：%v\n", policy.Allow.PluginsEnabled)
+		fmt.Fprintf(c.out, "允许插件网络诊断：%v\n", policy.Allows("plugins"))
 		return 0
 	}
 	if os.Geteuid() != 0 {

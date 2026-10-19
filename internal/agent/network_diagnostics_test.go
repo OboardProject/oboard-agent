@@ -14,9 +14,9 @@ import (
 func diagnosticRunner(t *testing.T, pluginsAllowed bool) *Runner {
 	t.Helper()
 	dir := t.TempDir()
-	policy := `{"version":1,"mode":"standard","allow":{"plugins_enabled":false}}`
+	policy := `{"version":1,"mode":"standard","deny":{"plugins_enabled":true}}`
 	if pluginsAllowed {
-		policy = `{"version":1,"mode":"standard","allow":{"plugins_enabled":true}}`
+		policy = `{"version":1,"mode":"standard"}`
 	}
 	if err := os.WriteFile(filepath.Join(dir, "local-security.json"), []byte(policy), 0o600); err != nil {
 		t.Fatal(err)

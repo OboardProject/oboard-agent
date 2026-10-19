@@ -9,7 +9,31 @@ import (
 	"github.com/OboardProject/oboard-agent/internal/model"
 )
 
-func TestPluginLocalPolicyRequiresExplicitGrant(t *testing.T) {
+func TestPluginLocalPolicyDefaults(t *testing.T) {
+	for _, tc := range []struct {
+		mode string
+		want bool
+	}{{model.RemoteAccessModeStandard, true}, {model.RemoteAccessModeHardened, false}} {
+		t.Run(tc.mode, func(t *testing.T) {
+			store := NewStore(filepath.Join(t.TempDir(), "local-security.json"), nil)
+			policy, err := store.Load()
+			if err != nil || !policy.Allows("plugins") {
+				t.Fatalf("missing policy file must allow plugins: %+v %v", policy, err)
+			}
+			if err := store.SetMode(tc.mode); err != nil {
+				t.Fatal(err)
+			}
+			if policy, err = store.Load(); err != nil {
+				t.Fatal(err)
+			}
+			if policy.Allows("plugins") != tc.want || policy.ReportedAllow().PluginsEnabled != tc.want {
+				t.Fatalf("default plugin gate in %s = %v, want %v", tc.mode, policy.Allows("plugins"), tc.want)
+			}
+		})
+	}
+}
+
+func TestPluginLocalPolicyExplicitAllowAndDeny(t *testing.T) {
 	for _, mode := range []string{model.RemoteAccessModeStandard, model.RemoteAccessModeHardened} {
 		t.Run(mode, func(t *testing.T) {
 			store := NewStore(filepath.Join(t.TempDir(), "local-security.json"), nil)
@@ -29,6 +53,9 @@ func TestPluginLocalPolicyRequiresExplicitGrant(t *testing.T) {
 						t.Fatalf("feature=%s grant=%v policy=%+v", feature, allow, policy)
 					}
 				}
+				if policy.ReportedAllow().PluginsEnabled != allow {
+					t.Fatalf("reported plugin gate = %v, want %v", policy.ReportedAllow().PluginsEnabled, allow)
+				}
 				raw, err := json.Marshal(policy)
 				if err != nil || !strings.Contains(string(raw), `"plugins_enabled":`) || strings.Contains(string(raw), "scripts_enabled") {
 					t.Fatalf("policy JSON: %s, %v", raw, err)
@@ -45,7 +72,7 @@ func TestPluginLocalPolicyRequiresExplicitGrant(t *testing.T) {
 
 func TestPluginLocalPolicyDoesNotImportRetiredGrant(t *testing.T) {
 	var policy Policy
-	if err := json.Unmarshal([]byte(`{"version":1,"mode":"standard","allow":{"scripts_enabled":true}}`), &policy); err != nil {
+	if err := json.Unmarshal([]byte(`{"version":1,"mode":"hardened","allow":{"scripts_enabled":true}}`), &policy); err != nil {
 		t.Fatal(err)
 	}
 	if policy.Allows("plugins") {

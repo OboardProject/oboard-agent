@@ -22,6 +22,13 @@ type Policy struct {
 	Version int                          `json:"version"`
 	Mode    string                       `json:"mode"`
 	Allow   model.RemoteAccessLocalAllow `json:"allow"`
+	Deny    LocalDeny                    `json:"deny"`
+}
+
+// LocalDeny records explicit operator denials for gates that are open by
+// default in Standard mode.
+type LocalDeny struct {
+	Plugins bool `json:"plugins_enabled"`
 }
 
 func DefaultPolicy() Policy {
@@ -45,7 +52,10 @@ func (p Policy) Allows(feature string) bool {
 	p = p.Normalized()
 	switch feature {
 	case "plugins", "plugins_enabled":
-		return p.Allow.PluginsEnabled
+		if p.Deny.Plugins {
+			return false
+		}
+		return p.Mode != model.RemoteAccessModeHardened || p.Allow.PluginsEnabled
 	case "remote_terminal":
 		return p.Mode != model.RemoteAccessModeHardened || p.Allow.RemoteTerminal
 	case "mcp_remote_operations", "mcp_structured_exec", "mcp_raw_shell", "mcp_interactive_terminal", "mcp_interactive", "mcp_enabled":
@@ -110,6 +120,14 @@ func (s *Store) loadLocked() (Policy, error) {
 	return policy.Normalized(), nil
 }
 
+// ReportedAllow is the allow set sent to Controller. The plugin gate is
+// reported as enforced because Controller uses it directly as the gate.
+func (p Policy) ReportedAllow() model.RemoteAccessLocalAllow {
+	allow := p.Allow
+	allow.PluginsEnabled = p.Allows("plugins")
+	return allow
+}
+
 func (s *Store) Save(policy Policy) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -154,6 +172,7 @@ func (s *Store) SetAllow(feature string, allow bool) error {
 		policy.Allow.MCPEnabled = allow
 	case "plugins", "plugins_enabled":
 		policy.Allow.PluginsEnabled = allow
+		policy.Deny.Plugins = !allow
 	default:
 		return errors.New("unknown remote-access feature")
 	}
