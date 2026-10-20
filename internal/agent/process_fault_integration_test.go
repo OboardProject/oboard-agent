@@ -139,6 +139,23 @@ func (k *faultKernel) restart() error {
 	return fmt.Errorf("kernel readiness deadline exceeded")
 }
 
+// waitListening waits until a kernel inbound accepts TCP. The kernel serves its
+// local API before its inbounds start, so /runtime/status readiness alone does
+// not mean the data plane is listening yet.
+func waitListening(t *testing.T, address string) {
+	t.Helper()
+	deadline := time.Now().Add(8 * time.Second)
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp", address, 200*time.Millisecond)
+		if err == nil {
+			conn.Close()
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("kernel inbound %s did not start listening", address)
+}
+
 func TestRealKernelProcessFaults(t *testing.T) {
 	binary := os.Getenv("OBOARD_PROCESS_KERNEL")
 	if binary == "" {
@@ -425,9 +442,11 @@ func TestRealKernelAuthorizationFaults(t *testing.T) {
 	}
 	k := &faultKernel{binary: binary, state: state}
 	t.Cleanup(func() { k.mu.Lock(); defer k.mu.Unlock(); k.stop() })
+	socksAddress := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
 	if err := k.restart(); err != nil {
 		t.Fatal(err)
 	}
+	waitListening(t, socksAddress)
 	client := unixHTTPClient(filepath.Join(state, "k.sock"))
 	client.Timeout = 2 * time.Second
 	defer client.CloseIdleConnections()
@@ -525,6 +544,7 @@ func TestRealKernelAuthorizationFaults(t *testing.T) {
 	if err := k.restart(); err != nil {
 		t.Fatal(err)
 	}
+	waitListening(t, socksAddress)
 	denied() // startup still carries the original grant; persisted denial wins.
 	// A separate, never-revoked identity expires without further updates.
 	dialer, err = proxy.SOCKS5("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), &proxy.Auth{User: "expiry-user", Password: "synthetic-password"}, &net.Dialer{Timeout: time.Second})
