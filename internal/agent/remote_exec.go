@@ -135,7 +135,10 @@ func (r *Runner) validateRemoteExecPayload(payload model.RemoteExecTaskPayload) 
 		}
 	case model.RemoteExecModeShell:
 		shell := strings.TrimSpace(payload.Command.Shell)
-		if shell == "" || len(shell) > remoteExecMaxShell {
+		if shell == "" {
+			return errors.New("shell command is required")
+		}
+		if len(shell) > remoteExecMaxShell {
 			return errors.New("shell command exceeds limit")
 		}
 		if strings.Contains(shell, "\x00") {
