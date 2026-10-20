@@ -8,7 +8,7 @@ import "github.com/OboardProject/oboard-agent/internal/model"
 // implements natively.
 func networkDiagnosticCapabilities() []string {
 	return []string{
-		model.AgentCapabilityRouteMonitor,
+		model.AgentCapabilityRouteMonitor, model.AgentCapabilityGoogleRegionProbe,
 		model.AgentCapabilityNetworkDiagnostics, model.AgentCapabilityNetworkPing,
 		model.AgentCapabilityNetworkTraceICMP, model.AgentCapabilityNetworkTraceUDP, model.AgentCapabilityNetworkTraceTCP,
 		model.AgentCapabilityNetworkTCPProbe, model.AgentCapabilityNetworkDNSLookup, model.AgentCapabilityNetworkHTTPProbe,

@@ -16,7 +16,7 @@ import (
 
 func isNetworkDiagnosticTask(taskType string) bool {
 	switch taskType {
-	case model.AgentTaskTypeNetworkPing, model.AgentTaskTypeNetworkTrace, model.AgentTaskTypeNetworkTCP, model.AgentTaskTypeNetworkDNS, model.AgentTaskTypeNetworkHTTP:
+	case model.AgentTaskTypeNetworkPing, model.AgentTaskTypeNetworkTrace, model.AgentTaskTypeNetworkTCP, model.AgentTaskTypeNetworkDNS, model.AgentTaskTypeNetworkHTTP, model.AgentTaskTypeGoogleRegion:
 		return true
 	default:
 		return false
@@ -81,12 +81,16 @@ func (r *Runner) diagnosticNow() time.Time {
 
 // executeNetworkDiagnosticTask runs one structured diagnostic with native Go
 // sockets. It never executes ping, traceroute, curl or any other program,
-// Plugin operations use NetworkDiagnosticMaxDurationMS; native route monitors
-// allow 60 seconds including bounded NextTrace API enrichment.
+// Plugin operations use NetworkDiagnosticMaxDurationMS; native monitors allow
+// 60 seconds, which covers bounded NextTrace API enrichment for route traces.
 func (r *Runner) executeNetworkDiagnosticTask(task model.AgentTask) (string, string) {
 	var envelope model.NetworkDiagnosticEnvelope
-	if json.Unmarshal([]byte(task.PayloadJSON), &envelope) == nil && envelope.Origin == model.NetworkDiagnosticOriginMonitor && task.Type != model.AgentTaskTypeNetworkTrace {
-		return diagnosticFailure(model.NetworkDiagnosticCodeInvalidInput, "monitor origin is restricted to route traces")
+	decoded := json.Unmarshal([]byte(task.PayloadJSON), &envelope) == nil
+	if decoded && envelope.Origin == model.NetworkDiagnosticOriginMonitor && task.Type != model.AgentTaskTypeNetworkTrace && task.Type != model.AgentTaskTypeGoogleRegion {
+		return diagnosticFailure(model.NetworkDiagnosticCodeInvalidInput, "monitor origin is restricted to route traces and Google region probes")
+	}
+	if task.Type == model.AgentTaskTypeGoogleRegion && (!decoded || envelope.Origin != model.NetworkDiagnosticOriginMonitor) {
+		return diagnosticFailure(model.NetworkDiagnosticCodeInvalidInput, "Google region probes require the monitor origin")
 	}
 	budget := time.Duration(model.NetworkDiagnosticMaxDurationMS) * time.Millisecond
 	if envelope.Origin == model.NetworkDiagnosticOriginMonitor {
@@ -151,6 +155,15 @@ func (r *Runner) executeNetworkDiagnosticTask(task model.AgentTask) (string, str
 			return status, failure
 		}
 		result, err = netdiag.HTTPProbe(ctx, resolver, dialer, payload)
+	case model.AgentTaskTypeGoogleRegion:
+		var payload model.GoogleRegionTaskPayload
+		if decodeErr := decodeDiagnosticPayload(task.PayloadJSON, &payload); decodeErr != nil {
+			return diagnosticFailure(model.NetworkDiagnosticCodeInvalidInput, "malformed Google region payload")
+		}
+		if status, failure, ok := r.validateDiagnosticEnvelope(payload.NetworkDiagnosticEnvelope); !ok {
+			return status, failure
+		}
+		result, err = netdiag.GoogleRegion(ctx, resolver, dialer, payload)
 	default:
 		return diagnosticFailure(model.NetworkDiagnosticCodeUnsupported, "unsupported diagnostic")
 	}
