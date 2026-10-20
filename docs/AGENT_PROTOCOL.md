@@ -706,6 +706,7 @@ GET /runtime/status
 
 ```json
 {
+  "state": "running",
   "operational_config_sha256": "sha256-hex",
   "started_at": "2026-09-02T00:00:00Z",
   "pid": 1234,
@@ -724,6 +725,21 @@ canonical JSON form of the loaded configuration with the runtime-only members
 normalization, so both sides derive the same digest from the same bytes
 regardless of key order or formatting. This is the same rule that decides
 whether a change is `runtime_policy_only`.
+
+Until the box has started and runtime users have been restored, the endpoint
+answers `503` with `{"state":"starting","runtime_security":{...},"pid":1234}`
+and no configuration identity. The local API already serves at that point
+because Agent pushes the clock, DSCP, authorization, and pool members into a
+starting kernel, but a loaded configuration whose inbounds are not listening
+yet, or whose start is about to fail, is not a converged kernel. Agent treats
+`starting` as `runtime_verification=unavailable`, never as drift or a restart
+reason, and keeps polling within its existing verification window: the
+watchdog reports `runtime_unreachable`, and `-verify-core-runtime` fails if the
+kernel is still starting when the window ends. The runtime security profile is
+applied before start, so Agent reads it from either response. Older Agents see
+a non-404 error while `/version` still advertises `runtime_config_digest_v1`,
+which they also treat as `unavailable`. A started kernel answers `200` with
+`"state": "running"`.
 
 Current kernels advertise `runtime_build_identity_v1` and return their build
 identity from `/runtime/status`. For older kernels whose runtime-status endpoint

@@ -2,8 +2,10 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -47,5 +49,38 @@ func TestClockConfigHandlerIsUnixOnly(t *testing.T) {
 	unixMux.ServeHTTP(methodResponse, httptest.NewRequest(http.MethodGet, "/clock/config", nil))
 	if methodResponse.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("clock config GET status = %d", methodResponse.Code)
+	}
+}
+
+func TestRuntimeStatusWithholdsDigestUntilStarted(t *testing.T) {
+	state := runtimeConfigState{OperationalDigest: "loaded-digest", StartedAt: time.Now().UTC(), Generation: 1, Started: new(atomic.Bool)}
+	mux := http.NewServeMux()
+	registerRuntimeStatusHandler(mux, state)
+	read := func() (int, map[string]any) {
+		t.Helper()
+		response := httptest.NewRecorder()
+		mux.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/runtime/status", nil))
+		var body map[string]any
+		if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode status: %v body=%s", err, response.Body.String())
+		}
+		return response.Code, body
+	}
+
+	code, body := read()
+	if code != http.StatusServiceUnavailable || body["state"] != "starting" {
+		t.Fatalf("starting status=%d body=%v", code, body)
+	}
+	if _, ok := body["operational_config_sha256"]; ok {
+		t.Fatalf("starting kernel reported a configuration digest: %v", body)
+	}
+	if _, ok := body["runtime_security"]; !ok {
+		t.Fatalf("starting kernel omitted its runtime security profile: %v", body)
+	}
+
+	state.Started.Store(true)
+	code, body = read()
+	if code != http.StatusOK || body["state"] != "running" || body["operational_config_sha256"] != "loaded-digest" {
+		t.Fatalf("started status=%d body=%v", code, body)
 	}
 }

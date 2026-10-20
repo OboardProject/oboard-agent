@@ -455,6 +455,9 @@ func (r *Runner) coreRuntimeStatus(ctx context.Context) (coreRuntimeStatus, erro
 	if res.StatusCode == http.StatusNotFound {
 		return coreRuntimeStatus{}, errCoreRuntimeStatusUnsupported
 	}
+	if coreRuntimeStarting(res) {
+		return coreRuntimeStatus{}, errCoreRuntimeStarting
+	}
 	if res.StatusCode >= 300 {
 		return coreRuntimeStatus{}, fmt.Errorf("core runtime status %d", res.StatusCode)
 	}
@@ -469,6 +472,26 @@ func (r *Runner) coreRuntimeStatus(ctx context.Context) (coreRuntimeStatus, erro
 }
 
 var errCoreRuntimeStatusUnsupported = fmt.Errorf("core does not expose %s", coreRuntimeDigestCapability)
+
+// errCoreRuntimeStarting means the kernel answered but has not finished
+// starting its inbounds and restoring runtime users, so it reports no loaded
+// configuration yet. It is neither drift nor a missing capability.
+var errCoreRuntimeStarting = errors.New("core is still starting")
+
+// coreRuntimeStarting reports whether a /runtime/status response is the
+// kernel's explicit starting answer. It consumes the bounded body.
+func coreRuntimeStarting(res *http.Response) bool {
+	if res.StatusCode != http.StatusServiceUnavailable {
+		return false
+	}
+	var payload struct {
+		State string `json:"state"`
+	}
+	if err := json.NewDecoder(io.LimitReader(res.Body, 64<<10)).Decode(&payload); err != nil {
+		return false
+	}
+	return payload.State == "starting"
+}
 
 // resolveCoreBuildState compares the build serving traffic with the executable
 // installed on disk. Both sides must identify themselves for a verdict: a
@@ -517,6 +540,11 @@ func (r *Runner) checkCoreRuntimeConfig(ctx context.Context, desired []byte) cor
 		return check
 	}
 	check.Err = err
+	// A starting kernel implements the capability; it just has nothing
+	// converged to report yet, so it stays unavailable and callers poll.
+	if errors.Is(err, errCoreRuntimeStarting) {
+		return check
+	}
 	// A 404 is conclusive: the local API answered and has no runtime status.
 	// Anything else may be a kernel that is still starting, so only treat an
 	// explicitly missing capability as unsupported.
@@ -652,6 +680,8 @@ func (r *Runner) VerifyCoreRuntime(ctx context.Context) (string, error) {
 		return summary, fmt.Errorf("core runs configuration %s, expected %s", check.LoadedDigest, check.DesiredDigest)
 	case check.binaryDrift():
 		return summary, fmt.Errorf("core still runs %s after the update, expected %s", check.RunningBuild.String(), check.InstalledBuild.String())
+	case check.Verification == coreRuntimeVerificationUnavailable && errors.Is(check.Err, errCoreRuntimeStarting):
+		return summary, errors.New("core is still starting, so the running kernel could not be verified")
 	case check.Verification == coreRuntimeVerificationUnavailable:
 		return summary, errors.New("core local API is unreachable, so the running kernel could not be verified")
 	}

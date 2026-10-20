@@ -55,3 +55,28 @@ func TestCoreWatchdogPushesClockToRespawnedKernel(t *testing.T) {
 		t.Fatalf("a respawned kernel was not given the logical clock: %d", kernel.clockPushCount())
 	}
 }
+
+// The local API answers before the kernel's inbounds are up. The watchdog must
+// neither restart that kernel nor hand it the clock as if it were running.
+func TestCoreWatchdogLeavesStartingKernelAlone(t *testing.T) {
+	dir := t.TempDir()
+	writeCoreConfig(t, dir, coreConfigA)
+	kernel := newFakeCoreKernel(t, filepath.Join(dir, "sing-box.json"), true)
+	kernel.answerStarting(1)
+	r := newRuntimeTestRunner(t, dir, kernel)
+	cfg := r.Config()
+	cfg.RestartCommand = "systemd-restart"
+	r.storeConfig(cfg)
+	r.coreServiceActiveCheck = func() error { return nil }
+	status := &coreWatchdogStatus{Service: r.coreService(), ConfigPath: r.statePath(singBoxConfigFile)}
+	boots := kernel.bootCount()
+
+	r.runCoreWatchdogCheck(context.Background(), status, time.Now())
+	if status.State != coreWatchdogStateRuntimeUnreachable || status.RestartCount != 0 || kernel.bootCount() != boots {
+		t.Fatalf("starting kernel: state=%q restarts=%d boots=%d", status.State, status.RestartCount, kernel.bootCount()-boots)
+	}
+	r.runCoreWatchdogCheck(context.Background(), status, time.Now())
+	if status.State != coreWatchdogStateRunning || !status.RuntimeVerified || kernel.clockPushCount() != 1 || kernel.bootCount() != boots {
+		t.Fatalf("started kernel: state=%q verified=%t clock pushes=%d boots=%d", status.State, status.RuntimeVerified, kernel.clockPushCount(), kernel.bootCount()-boots)
+	}
+}

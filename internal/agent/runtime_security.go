@@ -41,6 +41,7 @@ func (r *Runner) cachedRuntimeSecurity() *model.RuntimeSecurityReport {
 }
 func (r *Runner) kernelSecurity(ctx context.Context) (*runtimesecurity.Kernel, error) {
 	var value struct {
+		State    string                  `json:"state"`
 		Security *runtimesecurity.Kernel `json:"runtime_security"`
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://oboard-sb/runtime/status", nil)
@@ -52,11 +53,16 @@ func (r *Runner) kernelSecurity(ctx context.Context) (*runtimesecurity.Kernel, e
 		return nil, err
 	}
 	defer response.Body.Close()
-	if response.StatusCode != 200 {
+	// The profile is applied before the box starts, so a starting kernel
+	// reports it too; configuration convergence is verified separately.
+	if response.StatusCode != http.StatusOK && response.StatusCode != http.StatusServiceUnavailable {
 		return nil, errors.New("kernel security unavailable")
 	}
 	if err := json.NewDecoder(io.LimitReader(response.Body, 64<<10)).Decode(&value); err != nil {
 		return nil, err
+	}
+	if response.StatusCode != http.StatusOK && value.State != "starting" {
+		return nil, errors.New("kernel security unavailable")
 	}
 	return value.Security, nil
 }

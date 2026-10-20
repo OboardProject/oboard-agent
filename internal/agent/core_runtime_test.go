@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -61,6 +62,9 @@ type fakeCoreKernel struct {
 	// pid is the process id /runtime/status reports; zero means 4242.
 	pid         int
 	clockPushes int
+	// startingReads is how many more /runtime/status reads answer the
+	// kernel's 503 starting response before it reports the loaded config.
+	startingReads int
 }
 
 func (k *fakeCoreKernel) deniedKeys() []string {
@@ -130,7 +134,18 @@ func newFakeCoreKernel(t *testing.T, configPath string, runtimeSupported bool) *
 		}
 		kernel.mu.Lock()
 		defer kernel.mu.Unlock()
+		if kernel.startingReads > 0 {
+			kernel.startingReads--
+			payload := map[string]any{"state": "starting", "pid": kernel.reportedPID()}
+			if kernel.runtimeSecurityMode != "" {
+				payload["runtime_security"] = map[string]any{"mode": kernel.runtimeSecurityMode, "supported": true}
+			}
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(payload)
+			return
+		}
 		payload := map[string]any{
+			"state":                     "running",
 			"operational_config_sha256": kernel.loadedDigest,
 			"started_at":                "2026-09-02T00:00:00Z",
 			"pid":                       kernel.reportedPID(),
@@ -676,6 +691,65 @@ func TestCoreRuntimeCheckTreatsUnreachableKernelAsUnverified(t *testing.T) {
 	}
 	if check.drift() {
 		t.Fatal("unreachable kernel was mistaken for runtime drift")
+	}
+}
+
+func (k *fakeCoreKernel) answerStarting(reads int) {
+	k.mu.Lock()
+	k.startingReads = reads
+	k.mu.Unlock()
+}
+
+// A kernel that has loaded its configuration but not finished starting reports
+// no digest. That is not drift and not a missing capability: Agent keeps it
+// unverified and polls, without asking /version or restarting it.
+func TestCoreRuntimeCheckTreatsStartingKernelAsUnverified(t *testing.T) {
+	dir := t.TempDir()
+	writeCoreConfig(t, dir, coreConfigB)
+	kernel := newFakeCoreKernel(t, filepath.Join(dir, "sing-box.json"), true)
+	kernel.answerStarting(1 << 20)
+	r := newRuntimeTestRunner(t, dir, kernel)
+
+	check := r.checkCoreRuntimeConfig(context.Background(), []byte(coreConfigA))
+	if check.Verification != coreRuntimeVerificationUnavailable || !errors.Is(check.Err, errCoreRuntimeStarting) {
+		t.Fatalf("starting kernel was not reported as unavailable: %#v", check)
+	}
+	if check.drift() || check.LoadedDigest != "" {
+		t.Fatalf("starting kernel was mistaken for runtime drift: %#v", check)
+	}
+	if _, err := r.VerifyCoreRuntime(context.Background()); err == nil || !strings.Contains(err.Error(), "still starting") {
+		t.Fatalf("verify-core-runtime accepted a starting kernel: %v", err)
+	}
+}
+
+func TestAwaitCoreRuntimeConfigPollsThroughStartingKernel(t *testing.T) {
+	dir := t.TempDir()
+	writeCoreConfig(t, dir, coreConfigB)
+	kernel := newFakeCoreKernel(t, filepath.Join(dir, "sing-box.json"), true)
+	kernel.answerStarting(2)
+	r := newRuntimeTestRunner(t, dir, kernel)
+	boots := kernel.bootCount()
+
+	check := r.awaitCoreRuntimeConfig(context.Background(), []byte(coreConfigB), 5*time.Second)
+	if !check.verified() || check.drift() {
+		t.Fatalf("kernel was not verified once it finished starting: %#v", check)
+	}
+	if kernel.bootCount() != boots {
+		t.Fatalf("a starting kernel was restarted %d time(s)", kernel.bootCount()-boots)
+	}
+}
+
+func TestKernelSecurityReadsProfileFromStartingKernel(t *testing.T) {
+	dir := t.TempDir()
+	writeCoreConfig(t, dir, coreConfigB)
+	kernel := newFakeCoreKernel(t, filepath.Join(dir, "sing-box.json"), true)
+	kernel.runtimeSecurityMode = "enhanced"
+	kernel.answerStarting(1)
+	r := newRuntimeTestRunner(t, dir, kernel)
+
+	security, err := r.kernelSecurity(context.Background())
+	if err != nil || security == nil || security.Mode != "enhanced" {
+		t.Fatalf("starting kernel profile = %#v, %v", security, err)
 	}
 }
 

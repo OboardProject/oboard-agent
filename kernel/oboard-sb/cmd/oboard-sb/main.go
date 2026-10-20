@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -34,10 +35,15 @@ var kernelCapabilities = []string{proxydscp.Capability, "runtime_security_v1", "
 // runtimeConfigState is the payload-free identity of the configuration this
 // process actually loaded. Agent compares it with the desired configuration so
 // a deployment cannot report success while the kernel still runs older state.
+//
+// Started is set only once the box has started and runtime users have been
+// restored. Until then the configuration is loaded but not serving, so the
+// status endpoint must not let Agent treat the process as converged.
 type runtimeConfigState struct {
 	OperationalDigest string
 	StartedAt         time.Time
 	Generation        uint64
+	Started           *atomic.Bool
 }
 
 func main() {
@@ -129,7 +135,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	runtimeConfig := runtimeConfigState{OperationalDigest: loadedOperationalDigest, StartedAt: time.Now().UTC(), Generation: 1}
+	runtimeConfig := runtimeConfigState{OperationalDigest: loadedOperationalDigest, StartedAt: time.Now().UTC(), Generation: 1, Started: new(atomic.Bool)}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -179,6 +185,7 @@ func main() {
 	if err := runtimeUsers.Restore(); err != nil {
 		log.Fatal(err)
 	}
+	runtimeConfig.Started.Store(true)
 	<-ctx.Done()
 	if err := b.Close(); err != nil {
 		log.Println(err)
@@ -345,6 +352,14 @@ func serveHealth(ctx context.Context, listen string, instance *box.Box, tracker 
 // and build identifiers only; configuration content, credentials, and file
 // paths never leave the kernel.
 //
+// The local API serves before the box starts, because Agent pushes the clock,
+// DSCP, authorization, and pool members into a starting kernel. Until start
+// and runtime-user restore succeed the endpoint answers 503 with
+// state=starting and no configuration identity: a loaded configuration whose
+// inbounds are not listening yet, or whose start is about to fail, is not a
+// converged kernel. The runtime security profile is already applied by then
+// and is reported in both states.
+//
 // The build identity is what makes an upgrade verifiable. Replacing the binary
 // on disk does not touch the running process, so Agent has to be able to ask
 // which build is actually serving traffic instead of inferring it from the file
@@ -356,7 +371,17 @@ func registerRuntimeStatusHandler(mux *http.ServeMux, runtimeConfig runtimeConfi
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
+		if runtimeConfig.Started != nil && !runtimeConfig.Started.Load() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"state":            "starting",
+				"runtime_security": runtimeguard.Snapshot(),
+				"pid":              os.Getpid(),
+			})
+			return
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
+			"state":                     "running",
 			"runtime_security":          runtimeguard.Snapshot(),
 			"operational_config_sha256": runtimeConfig.OperationalDigest,
 			"started_at":                runtimeConfig.StartedAt.Format(time.RFC3339Nano),
