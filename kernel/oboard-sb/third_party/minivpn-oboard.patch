@@ -74,7 +74,7 @@ index 4cd7b54..03047b6 100644
 -	gopkg.in/yaml.v3 v3.0.1 // indirect
 -	gotest.tools/v3 v3.4.0 // indirect
 -)
-+go 1.26.7
++go 1.27.3
 diff --git upstream/internal/datachannel/controller.go fork/internal/datachannel/controller.go
 index 19481f1..abf8c27 100644
 --- upstream/internal/datachannel/controller.go
