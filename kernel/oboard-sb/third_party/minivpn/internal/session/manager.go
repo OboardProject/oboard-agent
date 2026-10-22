@@ -307,9 +307,7 @@ func (m *Manager) UpdateTunnelInfo(ti *model.TunnelInfo) {
 	m.tunnelInfo.PingRestartSeconds = ti.PingRestartSeconds
 	m.tunnelInfo.NetMask = ti.NetMask
 
-	m.logger.Infof("Tunnel IP: %s", ti.IP)
-	m.logger.Infof("Gateway IP: %s", ti.GW)
-	m.logger.Infof("Peer ID: %d", ti.PeerID)
+	m.logger.Info("Tunnel configuration updated")
 }
 
 // TunnelInfo returns a copy the current TunnelInfo

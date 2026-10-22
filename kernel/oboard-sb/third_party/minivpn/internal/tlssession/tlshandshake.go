@@ -156,6 +156,9 @@ func customVerifyFactory(pinner authorityPinner) verifyFun {
 	// setting InsecureSkipVerify, [...] then this callback will be considered but
 	// the verifiedChains argument will always be nil.
 	customVerify := func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+		if len(rawCerts) == 0 || pinner.authority() == nil {
+			return fmt.Errorf("%w: missing peer certificate or configured CA", ErrCannotVerifyCertChain)
+		}
 		// we assume (from docs) that we're always given the
 		// leaf certificate as the first cert in the array.
 		leaf, _ := x509.ParseCertificate(rawCerts[0])
@@ -170,9 +173,11 @@ func customVerifyFactory(pinner authorityPinner) verifyFun {
 		// uses it to build the chain, so the verifier must as well.
 		opts.Intermediates = x509.NewCertPool()
 		for _, raw := range rawCerts[1:] {
-			if cert, err := x509.ParseCertificate(raw); err == nil {
-				opts.Intermediates.AddCert(cert)
+			cert, err := x509.ParseCertificate(raw)
+			if err != nil {
+				return fmt.Errorf("%w: malformed intermediate certificate", ErrCannotVerifyCertChain)
 			}
+			opts.Intermediates.AddCert(cert)
 		}
 
 		if _, err := leaf.Verify(opts); err != nil {

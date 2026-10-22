@@ -176,7 +176,7 @@ func (ws *workersState) doTLSAuth(conn net.Conn, config *tls.Config, errorch cha
 		errorch <- err
 		return
 	}
-	ws.logger.Debugf("Remote options: %s", serverOptions)
+	ws.logger.Debug("Remote options received")
 
 	// init the tunnel info
 	if err := ws.sessionManager.InitTunnelInfo(serverOptions); err != nil {

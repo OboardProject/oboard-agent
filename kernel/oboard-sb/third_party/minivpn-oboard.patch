@@ -1,5 +1,5 @@
 diff --git upstream/go.mod fork/go.mod
-index 4cd7b54..03047b6 100644
+index 4cd7b54..fa25fe3 100644
 --- upstream/go.mod
 +++ fork/go.mod
 @@ -1,71 +1,3 @@
@@ -357,7 +357,7 @@ index 91dc37e..7739196 100644
  			// TODO(ainghazal): drop a packet that is a replay (id <= lastConsumed, but != ACK...?)
  
 diff --git upstream/internal/session/manager.go fork/internal/session/manager.go
-index 1ae5195..271c854 100644
+index 1ae5195..09aef18 100644
 --- upstream/internal/session/manager.go
 +++ fork/internal/session/manager.go
 @@ -65,8 +65,8 @@ func NewManager(config *config.Config) (*Manager, error) {
@@ -383,7 +383,7 @@ index 1ae5195..271c854 100644
  	}
  }
  
-@@ -299,6 +302,9 @@ func (m *Manager) UpdateTunnelInfo(ti *model.TunnelInfo) {
+@@ -299,22 +302,17 @@ func (m *Manager) UpdateTunnelInfo(ti *model.TunnelInfo) {
  	m.tunnelInfo.IP = ti.IP
  	m.tunnelInfo.GW = ti.GW
  	m.tunnelInfo.PeerID = ti.PeerID
@@ -392,8 +392,13 @@ index 1ae5195..271c854 100644
 +	m.tunnelInfo.PingRestartSeconds = ti.PingRestartSeconds
  	m.tunnelInfo.NetMask = ti.NetMask
  
- 	m.logger.Infof("Tunnel IP: %s", ti.IP)
-@@ -310,11 +316,5 @@ func (m *Manager) UpdateTunnelInfo(ti *model.TunnelInfo) {
+-	m.logger.Infof("Tunnel IP: %s", ti.IP)
+-	m.logger.Infof("Gateway IP: %s", ti.GW)
+-	m.logger.Infof("Peer ID: %d", ti.PeerID)
++	m.logger.Info("Tunnel configuration updated")
+ }
+ 
+ // TunnelInfo returns a copy the current TunnelInfo
  func (m *Manager) TunnelInfo() model.TunnelInfo {
  	defer m.mu.Unlock()
  	m.mu.Lock()
@@ -406,8 +411,47 @@ index 1ae5195..271c854 100644
 -	}
 +	return m.tunnelInfo
  }
+diff --git fork/internal/session/manager_test.go fork/internal/session/manager_test.go
+new file mode 100644
+index 0000000..5176e21
+--- /dev/null
++++ fork/internal/session/manager_test.go
+@@ -0,0 +1,33 @@
++package session
++
++import (
++	"fmt"
++	"strings"
++	"testing"
++
++	"github.com/ooni/minivpn/internal/model"
++)
++
++type tunnelLogger struct {
++	model.NoopLogger
++	messages []string
++}
++
++func (l *tunnelLogger) Info(msg string)                  { l.messages = append(l.messages, msg) }
++func (l *tunnelLogger) Infof(format string, args ...any) { l.Info(fmt.Sprintf(format, args...)) }
++
++func TestUpdateTunnelInfoDoesNotLogAddresses(t *testing.T) {
++	logger := &tunnelLogger{}
++	manager := &Manager{logger: logger}
++	info := &model.TunnelInfo{IP: "192.0.2.10", GW: "192.0.2.1", PeerID: 71}
++	manager.UpdateTunnelInfo(info)
++	if got := manager.TunnelInfo(); got.IP != info.IP || got.GW != info.GW || got.PeerID != info.PeerID {
++		t.Fatal("tunnel configuration lost")
++	}
++	logs := strings.Join(logger.messages, " ")
++	for _, value := range []string{info.IP, info.GW, "71"} {
++		if strings.Contains(logs, value) {
++			t.Fatal("tunnel identity leaked to logs")
++		}
++	}
++}
 diff --git upstream/internal/tlssession/controlmsg.go fork/internal/tlssession/controlmsg.go
-index f030fa3..7351a0f 100644
+index f030fa3..4d1f3ca 100644
 --- upstream/internal/tlssession/controlmsg.go
 +++ fork/internal/tlssession/controlmsg.go
 @@ -14,7 +14,6 @@ import (
@@ -418,6 +462,15 @@ index f030fa3..7351a0f 100644
  	"strconv"
  	"strings"
  
+@@ -136,7 +135,7 @@ func parseServerPushReply(logger model.Logger, resp []byte) (*model.TunnelInfo,
+ 	}
+ 
+ 	optsMap := pushedOptionsAsMap(resp)
+-	logger.Infof("Server pushed options: %v", optsMap)
++	logger.Info("Server pushed options received")
+ 	ti := newTunnelInfoFromPushedOptions(optsMap)
+ 	return ti, nil
+ }
 @@ -159,13 +158,22 @@ func newTunnelInfoFromPushedOptions(opts remoteOptions) *model.TunnelInfo {
  	if len(ifconfig) >= 2 {
  		t.NetMask = ifconfig[1]
@@ -444,8 +497,48 @@ index f030fa3..7351a0f 100644
  		}
  	}
  	return t
+diff --git fork/internal/tlssession/controlmsg_test.go fork/internal/tlssession/controlmsg_test.go
+new file mode 100644
+index 0000000..0b61ff4
+--- /dev/null
++++ fork/internal/tlssession/controlmsg_test.go
+@@ -0,0 +1,34 @@
++package tlssession
++
++import (
++	"fmt"
++	"strings"
++	"testing"
++
++	"github.com/ooni/minivpn/internal/model"
++)
++
++type pushLogger struct {
++	model.NoopLogger
++	messages []string
++}
++
++func (l *pushLogger) Info(msg string)                  { l.messages = append(l.messages, msg) }
++func (l *pushLogger) Infof(format string, args ...any) { l.Info(fmt.Sprintf(format, args...)) }
++
++func TestPushOptionsDoNotLeakToLogs(t *testing.T) {
++	logger := &pushLogger{}
++	info, err := parseServerPushReply(logger, []byte("PUSH_REPLY,ifconfig 192.0.2.10 255.255.255.0,route-gateway 192.0.2.1,auth-token private-token"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	if info.IP != "192.0.2.10" || info.GW != "192.0.2.1" {
++		t.Fatal("push options were not applied")
++	}
++	logs := strings.Join(logger.messages, " ")
++	for _, value := range []string{info.IP, info.GW, "private-token", "auth-token"} {
++		if strings.Contains(logs, value) {
++			t.Fatal("push option leaked to logs")
++		}
++	}
++}
 diff --git upstream/internal/tlssession/tlshandshake.go fork/internal/tlssession/tlshandshake.go
-index c79585d..d9d8812 100644
+index c79585d..71b3e0d 100644
 --- upstream/internal/tlssession/tlshandshake.go
 +++ fork/internal/tlssession/tlshandshake.go
 @@ -2,7 +2,6 @@ package tlssession
@@ -475,7 +568,17 @@ index c79585d..d9d8812 100644
  	// ErrCannotVerifyCertChain is returned for certificate chain validation errors.
  	ErrCannotVerifyCertChain = errors.New("cannot verify chain")
  )
-@@ -170,6 +166,14 @@ func customVerifyFactory(pinner authorityPinner) verifyFun {
+@@ -160,6 +156,9 @@ func customVerifyFactory(pinner authorityPinner) verifyFun {
+ 	// setting InsecureSkipVerify, [...] then this callback will be considered but
+ 	// the verifiedChains argument will always be nil.
+ 	customVerify := func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
++		if len(rawCerts) == 0 || pinner.authority() == nil {
++			return fmt.Errorf("%w: missing peer certificate or configured CA", ErrCannotVerifyCertChain)
++		}
+ 		// we assume (from docs) that we're always given the
+ 		// leaf certificate as the first cert in the array.
+ 		leaf, _ := x509.ParseCertificate(rawCerts[0])
+@@ -170,6 +169,16 @@ func customVerifyFactory(pinner authorityPinner) verifyFun {
  		opts := certVerifyOptions()
  		// Set the configured CA(s) as the certificate pool to verify against.
  		opts.Roots = pinner.authority()
@@ -483,14 +586,16 @@ index c79585d..d9d8812 100644
 +		// uses it to build the chain, so the verifier must as well.
 +		opts.Intermediates = x509.NewCertPool()
 +		for _, raw := range rawCerts[1:] {
-+			if cert, err := x509.ParseCertificate(raw); err == nil {
-+				opts.Intermediates.AddCert(cert)
++			cert, err := x509.ParseCertificate(raw)
++			if err != nil {
++				return fmt.Errorf("%w: malformed intermediate certificate", ErrCannotVerifyCertChain)
 +			}
++			opts.Intermediates.AddCert(cert)
 +		}
  
  		if _, err := leaf.Verify(opts); err != nil {
  			return fmt.Errorf("%w: %s", ErrCannotVerifyCertChain, err)
-@@ -196,11 +200,8 @@ func initTLS(cfg *certConfig) (*tls.Config, error) {
+@@ -196,11 +205,8 @@ func initTLS(cfg *certConfig) (*tls.Config, error) {
  		InsecureSkipVerify: true,
  		// ...but we pass our own verification function that verifies against the CA and ignores the ServerName
  		VerifyPeerCertificate: customVerify,
@@ -504,7 +609,7 @@ index c79585d..d9d8812 100644
  	} //#nosec G402
  
  	return tlsConf, nil
-@@ -236,34 +237,9 @@ func defaultTLSFactory(conn net.Conn, config *tls.Config) (handshaker, error) {
+@@ -236,34 +242,9 @@ func defaultTLSFactory(conn net.Conn, config *tls.Config) (handshaker, error) {
  	return c, nil
  }
  
@@ -540,8 +645,109 @@ index c79585d..d9d8812 100644
 +	tlsFactoryFn   = defaultTLSFactory
  	tlsHandshakeFn = tlsHandshake
  )
+diff --git fork/internal/tlssession/tlshandshake_test.go fork/internal/tlssession/tlshandshake_test.go
+new file mode 100644
+index 0000000..9dd2f27
+--- /dev/null
++++ fork/internal/tlssession/tlshandshake_test.go
+@@ -0,0 +1,95 @@
++package tlssession
++
++import (
++	"crypto/ecdsa"
++	"crypto/elliptic"
++	"crypto/rand"
++	"crypto/tls"
++	"crypto/x509"
++	"errors"
++	"math/big"
++	"net"
++	"testing"
++	"time"
++)
++
++func TestTLSVerifiesConfiguredCA(t *testing.T) {
++	now := time.Now()
++	issue := func(template, parent *x509.Certificate, signer *ecdsa.PrivateKey) (*x509.Certificate, *ecdsa.PrivateKey) {
++		t.Helper()
++		key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
++		if err != nil {
++			t.Fatal(err)
++		}
++		if parent == nil {
++			parent, signer = template, key
++		}
++		der, err := x509.CreateCertificate(rand.Reader, template, parent, &key.PublicKey, signer)
++		if err != nil {
++			t.Fatal(err)
++		}
++		cert, err := x509.ParseCertificate(der)
++		if err != nil {
++			t.Fatal(err)
++		}
++		return cert, key
++	}
++	root, rootKey := issue(&x509.Certificate{SerialNumber: big.NewInt(1), IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign, NotBefore: now.Add(-time.Hour), NotAfter: now.Add(time.Hour)}, nil, nil)
++	intermediate, intermediateKey := issue(&x509.Certificate{SerialNumber: big.NewInt(2), IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign, NotBefore: now.Add(-time.Hour), NotAfter: now.Add(time.Hour)}, root, rootKey)
++	template := &x509.Certificate{SerialNumber: big.NewInt(3), KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}, NotBefore: now.Add(-time.Hour), NotAfter: now.Add(time.Hour)}
++	leaf, leafKey := issue(template, intermediate, intermediateKey)
++	template.SerialNumber = big.NewInt(4)
++	template.NotAfter = now.Add(-time.Minute)
++	expired, expiredKey := issue(template, intermediate, intermediateKey)
++	template.SerialNumber = big.NewInt(5)
++	template.NotAfter = now.Add(time.Hour)
++	template.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}
++	wrongUsage, wrongKey := issue(template, intermediate, intermediateKey)
++	roots := x509.NewCertPool()
++	roots.AddCert(root)
++	for _, tc := range []struct {
++		name     string
++		roots    *x509.CertPool
++		chain    [][]byte
++		key      *ecdsa.PrivateKey
++		accepted bool
++	}{
++		{"trusted chain without DNS name", roots, [][]byte{leaf.Raw, intermediate.Raw}, leafKey, true},
++		{"untrusted CA", x509.NewCertPool(), [][]byte{leaf.Raw, intermediate.Raw}, leafKey, false},
++		{"missing CA", nil, [][]byte{leaf.Raw, intermediate.Raw}, leafKey, false},
++		{"missing intermediate", roots, [][]byte{leaf.Raw}, leafKey, false},
++		{"expired", roots, [][]byte{expired.Raw, intermediate.Raw}, expiredKey, false},
++		{"wrong key usage", roots, [][]byte{wrongUsage.Raw, intermediate.Raw}, wrongKey, false},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			cfg, err := initTLS(&certConfig{ca: tc.roots})
++			if err != nil {
++				t.Fatal(err)
++			}
++			clientSide, serverSide := net.Pipe()
++			defer clientSide.Close()
++			defer serverSide.Close()
++			_ = clientSide.SetDeadline(time.Now().Add(5 * time.Second))
++			_ = serverSide.SetDeadline(time.Now().Add(5 * time.Second))
++			done := make(chan struct{})
++			go func() {
++				defer close(done)
++				server := tls.Server(serverSide, &tls.Config{Certificates: []tls.Certificate{{Certificate: tc.chain, PrivateKey: tc.key}}, MinVersion: tls.VersionTLS12})
++				_ = server.Handshake()
++				_ = serverSide.Close()
++			}()
++			err = tls.Client(clientSide, cfg).Handshake()
++			_ = clientSide.Close()
++			<-done
++			if (err == nil) != tc.accepted {
++				t.Fatalf("handshake error = %v, want accepted=%v", err, tc.accepted)
++			}
++		})
++	}
++	verify := customVerifyFactory(&certConfig{ca: roots})
++	for _, raw := range [][][]byte{nil, {[]byte("invalid")}, {leaf.Raw, []byte("invalid")}} {
++		if err := verify(raw, nil); !errors.Is(err, ErrCannotVerifyCertChain) {
++			t.Fatalf("malformed peer error = %v", err)
++		}
++	}
++}
 diff --git upstream/internal/tlssession/tlssession.go fork/internal/tlssession/tlssession.go
-index 89c659d..509e7db 100644
+index 89c659d..b5f5a64 100644
 --- upstream/internal/tlssession/tlssession.go
 +++ fork/internal/tlssession/tlssession.go
 @@ -10,7 +10,7 @@ import (
@@ -588,6 +794,15 @@ index 89c659d..509e7db 100644
  	go ws.doTLSAuth(conn, tlsConf, errorch)
  
  	select {
+@@ -176,7 +176,7 @@ func (ws *workersState) doTLSAuth(conn net.Conn, config *tls.Config, errorch cha
+ 		errorch <- err
+ 		return
+ 	}
+-	ws.logger.Debugf("Remote options: %s", serverOptions)
++	ws.logger.Debug("Remote options received")
+ 
+ 	// init the tunnel info
+ 	if err := ws.sessionManager.InitTunnelInfo(serverOptions); err != nil {
 @@ -208,7 +208,12 @@ func (ws *workersState) doTLSAuth(conn net.Conn, config *tls.Config, errorch cha
  	ws.sessionManager.SetNegotiationState(model.S_ACTIVE)
  

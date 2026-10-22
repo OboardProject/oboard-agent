@@ -135,7 +135,7 @@ func parseServerPushReply(logger model.Logger, resp []byte) (*model.TunnelInfo, 
 	}
 
 	optsMap := pushedOptionsAsMap(resp)
-	logger.Infof("Server pushed options: %v", optsMap)
+	logger.Info("Server pushed options received")
 	ti := newTunnelInfoFromPushedOptions(optsMap)
 	return ti, nil
 }
