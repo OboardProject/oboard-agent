@@ -211,8 +211,8 @@ jobs:
             echo "Tag $tag already exists and releases are immutable" >&2
             exit 1
           fi
-          git config user.name OboardProject
-          git config user.email OboardProject@users.noreply.github.com
+          git config user.name obrdx
+          git config user.email obrdx@users.noreply.github.com
           git tag -a "$tag" -m "OBoard Agent $tag" "$GITHUB_SHA"
           git push origin "refs/tags/$tag"
       - name: Publish GitHub release

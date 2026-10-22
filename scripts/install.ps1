@@ -5,7 +5,7 @@
 #
 #   $env:OBOARD_CONTROLLER_URL = 'https://panel.example.com'
 #   $env:OBOARD_ENROLL_TOKEN = '安装令牌'
-#   & ([scriptblock]::Create((New-Object Net.WebClient).DownloadString('https://raw.githubusercontent.com/OboardProject/oboard-agent/main/scripts/install.ps1')))
+#   & ([scriptblock]::Create((New-Object Net.WebClient).DownloadString('https://raw.githubusercontent.com/obrdx/oboard-agent/main/scripts/install.ps1')))
 #
 # Set OBOARD_ACTION to update or uninstall for the other operations.
 

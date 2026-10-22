@@ -1911,3 +1911,15 @@ func TestConnectExecutesDeploymentAndReportsAppliedMetadata(t *testing.T) {
 	cancel()
 	<-connectDone
 }
+
+func TestUpdateRepoAllowedAfterAccountRename(t *testing.T) {
+	if !updateRepoAllowed("obrdx/oboard-agent") {
+		t.Fatal("current repository rejected")
+	}
+	if !updateRepoAllowed("  OboardProject/oboard-agent  ") {
+		t.Fatal("repository name from before the rename rejected")
+	}
+	if updateRepoAllowed("obrdx/other") || updateRepoAllowed("") {
+		t.Fatal("unexpected repository allowed")
+	}
+}

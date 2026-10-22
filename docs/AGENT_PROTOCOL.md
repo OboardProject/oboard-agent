@@ -38,7 +38,7 @@ Important response fields:
 {
   "agent_expected_version": "0.1.0-dev",
   "agent_expected_build": "20260708005400",
-  "agent_update_repo": "OboardProject/oboard-agent",
+  "agent_update_repo": "obrdx/oboard-agent",
   "kernel_version": "0.1.0-dev",
   "kernel_build": "20260708005400"
 }
@@ -1078,7 +1078,7 @@ Controller uses this task for an immediate run of the same unified latency test
 that Agent runs on schedule. Every plan contains exactly one public target plus
 the configured exact province-carrier pairs, subject to the total target cap.
 Controller downloads the regional target list from the stable
-`OboardProject/resource/probe/probe-targets-cn.json` path and refreshes its
+`obrdx/resource/probe/probe-targets-cn.json` path and refreshes its
 validated cache every six hours. A failed refresh keeps the last valid plan.
 
 ```json
@@ -1321,7 +1321,7 @@ Payload:
   "controller_url": "https://panel.example.com",
   "expected_build": "20260708005400",
   "source": "panel",
-  "github_repo": "OboardProject/oboard-agent",
+  "github_repo": "obrdx/oboard-agent",
   "auto_update": false
 }
 ```

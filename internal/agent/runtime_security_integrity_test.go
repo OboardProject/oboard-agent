@@ -33,7 +33,7 @@ func TestRuntimeSecuritySignedIntegrityAndCache(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	manifest := security.ReleaseManifest{Repo: "OboardProject/oboard-agent", Build: "test", Files: []security.ReleaseManifestFile{{Name: "oboard-sb-" + runtime.GOOS + "-" + runtime.GOARCH, Component: "sb", OS: runtime.GOOS, Arch: runtime.GOARCH, SHA256: hash, Size: size}}}
+	manifest := security.ReleaseManifest{Repo: "obrdx/oboard-agent", Build: "test", Files: []security.ReleaseManifestFile{{Name: "oboard-sb-" + runtime.GOOS + "-" + runtime.GOARCH, Component: "sb", OS: runtime.GOOS, Arch: runtime.GOARCH, SHA256: hash, Size: size}}}
 	sig, err := security.SignReleaseManifest(manifest, base64.RawStdEncoding.EncodeToString(priv))
 	if err != nil {
 		t.Fatal(err)

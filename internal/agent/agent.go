@@ -211,7 +211,7 @@ func coreSocketOrDefault(socket string) string {
 	return coreAPISocket
 }
 
-const defaultUpdateRepo = "OboardProject/oboard-agent"
+const defaultUpdateRepo = "obrdx/oboard-agent"
 
 func New(cfg Config) *Runner {
 	cfg = normalizeConfig(cfg)
@@ -2102,7 +2102,11 @@ func (r *Runner) scheduleAgentRestartCommand() error {
 
 func updateRepoAllowed(repo string) bool {
 	repo = strings.TrimSpace(repo)
-	allowed := map[string]bool{defaultUpdateRepo: true}
+	allowed := map[string]bool{
+		defaultUpdateRepo: true,
+		// Controllers that still send the pre-rename repository name.
+		"OboardProject/oboard-agent": true,
+	}
 	for _, item := range strings.Split(os.Getenv("OBOARD_UPDATE_REPO_ALLOWLIST"), ",") {
 		item = strings.TrimSpace(item)
 		if item != "" {

@@ -9,7 +9,7 @@ DATE_VALUE=${DATE:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
 BUILD_VALUE=${BUILD:-${BUILD_NUMBER:-$(date -u +%Y%m%d%H%M%S)}}
 OUT_DIR=${OUT_DIR:-$AGENT_DIR/dist/release}
 PLATFORMS=${OBOARD_PLATFORMS:-"linux/amd64 linux/arm64 windows/amd64"}
-REPO=${OBOARD_AGENT_REPO:-OboardProject/oboard-agent}
+REPO=${OBOARD_AGENT_REPO:-obrdx/oboard-agent}
 SIGNING_KEY=${OBOARD_RELEASE_SIGNING_KEY:-}
 # STAGE splits the release so CI can compile platforms on parallel runners
 # without handing them the signing key:

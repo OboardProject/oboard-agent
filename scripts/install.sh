@@ -10,7 +10,7 @@ ENROLL_TOKEN=${OBOARD_ENROLL_TOKEN:-${3:-}}
 if [ -z "$CONTROLLER_URL" ]; then
   echo "缺少主控地址。" >&2
   echo "请从面板复制服务器安装命令，或按下面的格式执行：" >&2
-  echo "  curl -fsSL https://raw.githubusercontent.com/OboardProject/oboard-agent/main/scripts/install.sh | sudo env OBOARD_CONTROLLER_URL='https://panel.example.com' OBOARD_ENROLL_TOKEN='安装令牌' sh" >&2
+  echo "  curl -fsSL https://raw.githubusercontent.com/obrdx/oboard-agent/main/scripts/install.sh | sudo env OBOARD_CONTROLLER_URL='https://panel.example.com' OBOARD_ENROLL_TOKEN='安装令牌' sh" >&2
   exit 1
 fi
 
@@ -33,7 +33,7 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
-OBOARD_UPDATE_REPO=${OBOARD_UPDATE_REPO:-OboardProject/oboard-agent}
+OBOARD_UPDATE_REPO=${OBOARD_UPDATE_REPO:-obrdx/oboard-agent}
 case "$OBOARD_UPDATE_REPO" in
   [A-Za-z0-9_.-]*/[A-Za-z0-9_.-]*) ;;
   *) echo "更新仓库格式无效，请使用 owner/name 格式。" >&2; exit 1 ;;

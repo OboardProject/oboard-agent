@@ -181,8 +181,8 @@ jobs:
         run: ./scripts/build-release.sh
       - name: Move development tag
         run: |
-          git config user.name OboardProject
-          git config user.email OboardProject@users.noreply.github.com
+          git config user.name obrdx
+          git config user.email obrdx@users.noreply.github.com
           git tag -f dev "$GITHUB_SHA"
           git push origin refs/tags/dev --force
       - name: Publish development GitHub prerelease
